@@ -1,0 +1,25 @@
+[package]
+name = "gleon-engine"
+description = "Image comparison engine (pixel, SSIM, masks) shared by the gleon CLI and the gleon Flutter package."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT OR Apache-2.0"
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck = { workspace = true }
+hex = { workspace = true }
+image = { workspace = true }
+image_hasher = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }

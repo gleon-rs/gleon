@@ -8,12 +8,12 @@
 
 use std::path::{Path, PathBuf};
 
+use gleon_engine::phash::compute_phash;
 use sha2::{Digest, Sha256};
 
 use crate::{
     config::ConfigError,
     context::{ContextError, ResolvedContext},
-    engine::phash::compute_phash,
     manifest::{ImageHash, ManifestError, SingleTestManifest, WorkspaceIndex},
     paths::GleonPaths,
     scanner::{FileScanner, ScannerError, TestCase},

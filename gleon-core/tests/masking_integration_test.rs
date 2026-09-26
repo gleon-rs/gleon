@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use gleon_core::{
+use gleon_engine::{
     config::{Dimension, Zone},
     masking,
 };

@@ -1,0 +1,22 @@
+[package]
+name = "gleon-ffi"
+description = "C ABI over gleon-engine, loaded by the gleon Flutter package through Dart FFI."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT OR Apache-2.0"
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+gleon-engine = { path = "../gleon-engine" }
+image = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

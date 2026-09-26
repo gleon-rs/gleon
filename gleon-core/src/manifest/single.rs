@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use gleon_engine::decode::{MAX_DIMENSION, MAX_PIXELS};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -11,12 +12,6 @@ use crate::{
 
 /// Supported schema version for individual test manifests.
 pub const SUPPORTED_SINGLE_MANIFEST_SCHEMA_VERSION: u32 = 1;
-
-/// Maximum allowed width or height in pixels to prevent OOM allocations.
-pub const MAX_DIMENSION: u32 = 16384;
-
-/// Maximum allowed total decoded pixels (67,108,864 = 8192x8192) to prevent decompression bombs.
-pub const MAX_PIXELS: u64 = 67_108_864;
 
 /// Deterministic, noise-free manifest for a single visual regression test case.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,16 +156,7 @@ impl SingleTestManifest {
     fn make_limited_reader(
         bytes: &[u8],
     ) -> Result<image::ImageReader<std::io::Cursor<&[u8]>>, ManifestError> {
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(MAX_DIMENSION);
-        limits.max_image_height = Some(MAX_DIMENSION);
-        limits.max_alloc = Some(MAX_PIXELS * 4);
-
-        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(ManifestError::StdIo)?;
-        reader.limits(limits);
-        Ok(reader)
+        gleon_engine::decode::limited_reader(bytes).map_err(ManifestError::StdIo)
     }
 
     /// Safely validates image dimensions from raw bytes before fully decoding the image.

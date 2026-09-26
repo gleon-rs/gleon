@@ -128,11 +128,12 @@ required_version: ">=0.1.0"
 # Rules for discovering and comparing screenshots
 screenshots:
   - include: "test/**/goldens/**/*.png" # Single pattern or list of glob patterns
-    mode: pixel # 'pixel' (fast color compare) or 'ssim' (structural similarity)
+    mode: pixel # 'pixel' (exact per-pixel compare) or 'ssim' (tolerates rendering noise, see below)
     diff:
-      threshold: 0.1 # Color difference tolerance per pixel [0.0 - 1.0] (default: 0.1)
-      anti_alias: true # Automatically ignore subpixel anti-aliasing differences (default: true)
-      min_similarity: 0.95 # Required SSIM score [0.0 - 1.0] when mode is 'ssim' (default: 0.95)
+      threshold: 0.1 # 'pixel': allowed fraction of differing pixels [0.0 - 1.0] (default: 0.1)
+      anti_alias: true # Reserved, currently has no effect; use mode 'ssim' to tolerate anti-aliasing
+      min_similarity: 0.8 # 'ssim': minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
+      color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
     masks:
       # Optional: Ignore dynamic regions (clocks, avatars, blinking cursors)
       - path: "**/dashboard.png"

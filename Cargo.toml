@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "gleon-engine",
+    "gleon-ffi",
     "gleon-core",
     "gleon"
 ]
@@ -35,7 +37,6 @@ http = "1.2.0"
 ignore = "0.4.31"
 image = { version = "0.25.5", default-features = false, features = ["png"] }
 indicatif = "0.18.6"
-image-compare = "0.5.0"
 image_hasher = "3.1.1"
 libc = "0.2"
 minijinja = "2.21.0"

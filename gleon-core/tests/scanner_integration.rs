@@ -14,9 +14,10 @@
 use std::{path::Path, sync::Arc};
 
 use gleon_core::{
-    config::{DiffConfig, GleonConfig, GlobPattern, Mode, ScreenshotRule},
+    config::{GleonConfig, GlobPattern, ScreenshotRule},
     scanner::{FileScanner, TestCase},
 };
+use gleon_engine::config::{DiffConfig, Mode};
 
 #[test]
 fn test_scanner_with_real_fixture() {

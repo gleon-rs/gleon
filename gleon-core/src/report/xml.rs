@@ -1,5 +1,6 @@
 //! `JUnit` XML report generation.
 
+use gleon_engine::MismatchDetail;
 use minijinja::context;
 use serde::{
     Serialize, Serializer,
@@ -7,10 +8,7 @@ use serde::{
 };
 
 use super::{ReportError, format::FormattedPath};
-use crate::{
-    engine::MismatchDetail,
-    results::{TestCaseResult, TestImageResult},
-};
+use crate::results::{TestCaseResult, TestImageResult};
 
 /// Lazy view prepending a static prefix (`"Decode error: "`, `"IO error: "`, ...) to a failure
 /// message, shared by every `TestImageResult` variant whose XML `failure_message` is just
@@ -54,18 +52,7 @@ struct XmlMismatchMessageView<'a>(&'a MismatchDetail);
 
 impl std::fmt::Display for XmlMismatchMessageView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            MismatchDetail::Pixel { diff_count } => {
-                write!(f, "Visual mismatch detected ({diff_count} pixels)")
-            }
-            MismatchDetail::Ssim { ssim_score } => {
-                write!(f, "Visual mismatch detected (SSIM score: {ssim_score:.4})")
-            }
-            MismatchDetail::SsimFallback { diff_count } => write!(
-                f,
-                "Visual mismatch detected (SSIM Fallback: {diff_count} pixels)"
-            ),
-        }
+        write!(f, "Visual mismatch detected ({})", self.0)
     }
 }
 
@@ -263,7 +250,12 @@ mod tests {
             name: "billing".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("ssim_form.png"),
-                detail: MismatchDetail::Ssim { ssim_score: 0.9412 },
+                detail: MismatchDetail::Ssim {
+                    ssim_score: 0.9412,
+                    min_ssim: 0.9412,
+                    max_excess: 0.0,
+                    region: None,
+                },
                 diff_path: PathBuf::from("diff.png"),
                 baseline_path: PathBuf::from("baseline.png"),
                 actual_path: PathBuf::from("actual.png"),
@@ -280,7 +272,7 @@ mod tests {
         let xml =
             ReportGenerator::generate_junit_xml(&[tc1, tc2, tc3]).expect("Render should succeed");
         assert!(xml.contains("<failure message=\"Visual mismatch detected (5 pixels)\">Visual mismatch detected (5 pixels)</failure>"));
-        assert!(xml.contains("<failure message=\"Visual mismatch detected (SSIM score: 0.9412)\">Visual mismatch detected (SSIM score: 0.9412)</failure>"));
+        assert!(xml.contains("<failure message=\"Visual mismatch detected (min local SSIM 0.9412)\">Visual mismatch detected (min local SSIM 0.9412)</failure>"));
         assert!(xml.contains(
             "<failure message=\"Encode error: io error\">Encode error: io error</failure>"
         ));

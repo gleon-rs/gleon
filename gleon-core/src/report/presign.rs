@@ -118,7 +118,7 @@ mod tests {
                 name: "mismatch".to_string(),
                 result: TestImageResult::Mismatch {
                     relative_path: "rel.png".into(),
-                    detail: crate::engine::MismatchDetail::Pixel { diff_count: 1 },
+                    detail: gleon_engine::MismatchDetail::Pixel { diff_count: 1 },
                     diff_path: "diff.png".into(),
                     baseline_path: "baseline.png".into(),
                     actual_path: "actual.png".into(),
@@ -154,7 +154,7 @@ mod tests {
             name: "auth/login".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: "test/Login.png".into(),
-                detail: crate::engine::MismatchDetail::Pixel { diff_count: 1 },
+                detail: gleon_engine::MismatchDetail::Pixel { diff_count: 1 },
                 diff_path: "/tmp/WorkSpace/.gleon/runs/latest/diffs/login.png".into(),
                 baseline_path: baseline_path.clone(),
                 actual_path: "/tmp/WorkSpace/.gleon/runs/latest/actual/login.png".into(),

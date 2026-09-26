@@ -9,14 +9,12 @@ pub mod config;
 pub mod context;
 /// Historical test results logging and static dashboard compiler.
 pub mod dashboard;
-pub mod engine;
 pub mod env;
 pub mod git;
 pub mod io;
 /// License validation and enforcement for gated features.
 pub mod license;
 pub mod manifest;
-pub mod masking;
 /// Test name normalization and validation shared by the scanner and manifest layers.
 pub mod naming;
 /// High-level workspace operations (init, stage, approve, diff, push, pull, etc.) invoked by the CLI.

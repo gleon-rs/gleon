@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::engine::MismatchDetail;
+use gleon_engine::MismatchDetail;
 
 /// Represents the result of running a test on a single screenshot.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

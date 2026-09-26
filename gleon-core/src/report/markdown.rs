@@ -1,13 +1,11 @@
 //! Markdown report/PR-comment generation.
 
+use gleon_engine::MismatchDetail;
 use minijinja::context;
 use serde::Serialize;
 
 use super::{ImageUrlResolver, MarkdownReportOptions, RenderTarget};
-use crate::{
-    engine::MismatchDetail,
-    results::{TestCaseResult, TestImageResult},
-};
+use crate::results::{TestCaseResult, TestImageResult};
 
 /// Displays a path using forward slashes regardless of platform, for embedding in
 /// Markdown/URLs (e.g. `foo/bar.png` even on Windows).
@@ -119,9 +117,16 @@ impl std::fmt::Display for DeltaFormatter<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             MismatchDetail::Pixel { diff_count } => write!(f, "{diff_count} px"),
-            MismatchDetail::Ssim { ssim_score } => write!(f, "{ssim_score:.4} SSIM"),
-            MismatchDetail::SsimFallback { diff_count } => {
-                write!(f, "{diff_count} px (fb)")
+            MismatchDetail::Ssim {
+                min_ssim,
+                max_excess,
+                ..
+            } => {
+                write!(f, "{min_ssim:.4} SSIM")?;
+                if *max_excess > 0.0 {
+                    write!(f, ", color +{max_excess:.0}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -380,12 +385,26 @@ mod tests {
     use crate::report::ReportGenerator;
 
     #[test]
+    fn test_delta_formatter_mentions_color_excess() {
+        let detail = MismatchDetail::Ssim {
+            ssim_score: 0.99,
+            min_ssim: 0.97,
+            max_excess: 146.4,
+            region: None,
+        };
+        assert_eq!(
+            DeltaFormatter(&detail).to_string(),
+            "0.9700 SSIM, color +146"
+        );
+    }
+
+    #[test]
     fn test_render_pr_comment_with_base_url_and_fallback() {
         let tc = TestCaseResult {
             name: "login_button".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("login.png"),
-                detail: MismatchDetail::SsimFallback { diff_count: 12 },
+                detail: MismatchDetail::Pixel { diff_count: 12 },
                 diff_path: PathBuf::from("diffs/login.png"),
                 baseline_path: PathBuf::from("goldens/login.png"),
                 actual_path: PathBuf::from("actual/login.png"),
@@ -400,7 +419,7 @@ mod tests {
         let comment = ReportGenerator::render_pr_comment(&[tc], &options);
         assert!(comment.contains("`login_button`"));
         assert!(comment.contains("[Image](https://storage.cdn.com/run-1/goldens/login.png)"));
-        assert!(comment.contains("12 px (fb)"));
+        assert!(comment.contains("12 px"));
     }
 
     #[test]
@@ -735,10 +754,10 @@ mod tests {
             },
         });
         tests.push(TestCaseResult {
-            name: "ssim_fb".to_string(),
+            name: "pixel_small".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("fb.png"),
-                detail: MismatchDetail::SsimFallback { diff_count: 10 },
+                detail: MismatchDetail::Pixel { diff_count: 10 },
                 diff_path: PathBuf::from("diff.png"),
                 baseline_path: PathBuf::from("base.png"),
                 actual_path: PathBuf::from("actual.png"),
@@ -766,7 +785,7 @@ mod tests {
         let md = ReportGenerator::render_pr_comment(&tests, &opts);
         assert!(md.contains("`Missing`"));
         assert!(md.contains("`Decode Error`"));
-        assert!(md.contains("10 px (fb)"));
+        assert!(md.contains("10 px"));
         assert!(md.contains("https://artifact.url"));
     }
 
@@ -821,7 +840,12 @@ mod tests {
                     actual_path: PathBuf::from("actual.png"),
                     baseline_path: PathBuf::from("baseline.png"),
                     diff_path: PathBuf::from("diff.png"),
-                    detail: MismatchDetail::Ssim { ssim_score: 0.95 },
+                    detail: MismatchDetail::Ssim {
+                        ssim_score: 0.95,
+                        min_ssim: 0.95,
+                        max_excess: 0.0,
+                        region: None,
+                    },
                 },
             },
         ];

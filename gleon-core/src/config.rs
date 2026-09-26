@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gleon_engine::config::{DiffConfig, Dimension, Mode, Zone};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -38,84 +39,6 @@ pub enum ConfigError {
     /// Configuration is semantically invalid (e.g. empty screenshots list).
     #[error("Invalid configuration: {0}")]
     Validation(String),
-}
-
-/// Comparison mode for visual regression testing.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[non_exhaustive]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    /// Pixel-by-pixel color comparison.
-    Pixel,
-    /// Structural Similarity Index comparison.
-    Ssim,
-}
-
-/// Dimension value that can be specified either in pixels or as a percentage of the image size.
-#[derive(Debug, Copy, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum Dimension {
-    /// Absolute size in pixels.
-    Pixels(u32),
-    /// Relative size as a percentage [0.0, 100.0].
-    Percent(f64),
-}
-
-impl<'de> Deserialize<'de> for Dimension {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum RawDimension<'a> {
-            Integer(u32),
-            Str(std::borrow::Cow<'a, str>),
-        }
-
-        RawDimension::deserialize(deserializer).and_then(|raw| match raw {
-            RawDimension::Integer(px) => Ok(Self::Pixels(px)),
-            RawDimension::Str(s) => {
-                let trimmed = s.trim();
-                trimmed.strip_suffix('%').map_or_else(
-                    || {
-                        trimmed
-                            .parse::<u32>()
-                            .map(Dimension::Pixels)
-                            .map_err(D::Error::custom)
-                    },
-                    |pct| {
-                        pct.trim()
-                            .parse::<f64>()
-                            .map_err(D::Error::custom)
-                            .and_then(|val| {
-                                if (0.0..=100.0).contains(&val) {
-                                    Ok(Self::Percent(val))
-                                } else {
-                                    Err(D::Error::custom(
-                                        "percentage must be between 0.0 and 100.0",
-                                    ))
-                                }
-                            })
-                    },
-                )
-            }
-        })
-    }
-}
-
-impl Serialize for Dimension {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::Pixels(px) => serializer.serialize_u32(*px),
-            Self::Percent(pct) => serializer.collect_str(&format_args!("{pct}%")),
-        }
-    }
 }
 
 /// A compiled glob pattern for fast file matching, serialized as a simple string.
@@ -278,49 +201,6 @@ impl ScreenshotRule {
     }
 }
 
-/// Configuration parameters for the diff engine.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct DiffConfig {
-    /// Pixel comparison threshold [0.0, 1.0].
-    #[serde(default = "default_threshold", deserialize_with = "deserialize_ratio")]
-    pub threshold: f64,
-    /// Whether to apply anti-aliasing detection.
-    #[serde(default = "default_anti_alias")]
-    pub anti_alias: bool,
-    /// Minimum required similarity ratio [0.0, 1.0] (for SSIM).
-    #[serde(
-        default = "default_min_similarity",
-        deserialize_with = "deserialize_ratio"
-    )]
-    pub min_similarity: f64,
-}
-
-fn deserialize_ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    f64::deserialize(deserializer).and_then(|val| {
-        if (0.0..=1.0).contains(&val) {
-            Ok(val)
-        } else {
-            Err(serde::de::Error::custom(
-                "Value must be between 0.0 and 1.0",
-            ))
-        }
-    })
-}
-
-impl Default for DiffConfig {
-    fn default() -> Self {
-        Self {
-            threshold: default_threshold(),
-            anti_alias: default_anti_alias(),
-            min_similarity: default_min_similarity(),
-        }
-    }
-}
-
 /// A mask rule specifying which regions of an image to ignore.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -331,34 +211,8 @@ pub struct MaskRule {
     pub zones: Vec<Zone>,
 }
 
-/// A bounding zone to ignore.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Zone {
-    /// The X coordinate of the top-left corner.
-    pub x: u32,
-    /// The Y coordinate of the top-left corner.
-    pub y: u32,
-    /// Width of the zone.
-    pub width: Dimension,
-    /// Height of the zone.
-    pub height: Dimension,
-}
-
 const fn default_mode() -> Mode {
     Mode::Pixel
-}
-
-const fn default_threshold() -> f64 {
-    0.1
-}
-
-const fn default_anti_alias() -> bool {
-    true
-}
-
-const fn default_min_similarity() -> f64 {
-    0.95
 }
 
 impl GleonConfig {
@@ -431,6 +285,12 @@ impl GleonConfig {
                 return Err(ConfigError::Validation(format!(
                     "screenshots[{i}].diff.min_similarity must be between 0.0 and 1.0 (got {})",
                     rule.diff.min_similarity
+                )));
+            }
+            if !(rule.diff.color_tolerance.is_finite() && rule.diff.color_tolerance >= 0.0) {
+                return Err(ConfigError::Validation(format!(
+                    "screenshots[{i}].diff.color_tolerance must be a finite, non-negative number (got {})",
+                    rule.diff.color_tolerance
                 )));
             }
             for (j, mask) in rule.masks.iter().enumerate() {
@@ -727,6 +587,18 @@ screenshots:
     }
 
     #[test]
+    fn test_validation_invalid_color_tolerance() {
+        for bad in [f64::NAN, -1.0, f64::INFINITY] {
+            let mut config = GleonConfig::default();
+            config.screenshots[0].diff.color_tolerance = bad;
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::Validation(msg)) if msg.contains("color_tolerance must be a finite, non-negative number")
+            ));
+        }
+    }
+
+    #[test]
     fn test_validation_invalid_min_similarity() {
         let mut config = GleonConfig::default();
         config.screenshots[0].diff.min_similarity = -0.1;
@@ -775,40 +647,6 @@ screenshots:
             result2.unwrap_err(),
             ConfigError::Validation(msg) if msg.contains("height percentage must be between 0.0 and 100.0")
         ));
-    }
-
-    #[test]
-    fn test_dimension_deserialization_and_serialization() {
-        // Test integer pixels
-        let d1: Dimension = serde_yaml::from_str("100").unwrap();
-        assert_eq!(d1, Dimension::Pixels(100));
-        assert_eq!(serde_yaml::to_string(&d1).unwrap().trim(), "100");
-
-        // Test string pixels
-        let d2: Dimension = serde_yaml::from_str("\"150\"").unwrap();
-        assert_eq!(d2, Dimension::Pixels(150));
-        assert_eq!(serde_yaml::to_string(&d2).unwrap().trim(), "150");
-
-        // Test valid percentage
-        let d3: Dimension = serde_yaml::from_str("\"50%\"").unwrap();
-        assert_eq!(d3, Dimension::Percent(50.0));
-        assert_eq!(serde_yaml::to_string(&d3).unwrap().trim(), "50%");
-
-        // Test invalid negative percentage
-        let d_neg_pct: Result<Dimension, _> = serde_yaml::from_str("\"-5%\"");
-        assert!(d_neg_pct.is_err());
-
-        // Test invalid excessive percentage
-        let d_exc_pct: Result<Dimension, _> = serde_yaml::from_str("\"105%\"");
-        assert!(d_exc_pct.is_err());
-
-        // Test invalid format
-        let d_invalid: Result<Dimension, _> = serde_yaml::from_str("\"not_a_number\"");
-        assert!(d_invalid.is_err());
-
-        // Test invalid float inside percentage
-        let d_invalid_pct_float: Result<Dimension, _> = serde_yaml::from_str("\"abc%\"");
-        assert!(d_invalid_pct_float.is_err());
     }
 
     #[test]
@@ -938,7 +776,7 @@ screenshots:
         // Check nested DiffConfig defaults
         assert_eq!(rule.diff.threshold, 0.1);
         assert!(rule.diff.anti_alias);
-        assert_eq!(rule.diff.min_similarity, 0.95);
+        assert_eq!(rule.diff.min_similarity, 0.8);
     }
 
     #[test]

@@ -266,8 +266,8 @@ mod tests {
 
         let rule = Arc::new(crate::config::ScreenshotRule {
             include: vec![],
-            mode: crate::config::Mode::Pixel,
-            diff: crate::config::DiffConfig::default(),
+            mode: gleon_engine::config::Mode::Pixel,
+            diff: gleon_engine::config::DiffConfig::default(),
             masks: vec![],
         });
 

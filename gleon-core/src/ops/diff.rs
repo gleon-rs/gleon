@@ -2,13 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+use gleon_engine::{ComparisonResult, compare_images, decode::decode_rgba, masking::apply_masks};
 use thiserror::Error;
 
 use crate::{
     context::ResolvedContext,
-    engine::{ComparisonResult, compare_images},
     manifest::WorkspaceIndex,
-    masking::apply_masks,
     ops::common::{
         CoreError, ensure_initialized, load_config_and_scan, load_merged_index_with_fallback,
         platform_key, sha256_hex_matches,
@@ -143,7 +142,9 @@ pub(crate) fn process_diff_case(
         };
     }
 
-    let baseline_dyn_img = match image::load_from_memory(&baseline_bytes) {
+    // Same resource-limited decoder as the Flutter package, so both entry points see the same
+    // pixels for the same bytes.
+    let mut baseline_rgba = match decode_rgba(&baseline_bytes) {
         Ok(img) => img,
         Err(e) => {
             return TestImageResult::DecodeError {
@@ -152,7 +153,6 @@ pub(crate) fn process_diff_case(
             };
         }
     };
-    let mut baseline_rgba = baseline_dyn_img.to_rgba8();
 
     if let Err(e) = crate::manifest::SingleTestManifest::validate_image_bytes(&actual_bytes) {
         return TestImageResult::DecodeError {
@@ -161,7 +161,7 @@ pub(crate) fn process_diff_case(
         };
     }
 
-    let actual_dyn_img = match image::load_from_memory(&actual_bytes) {
+    let mut actual_rgba = match decode_rgba(&actual_bytes) {
         Ok(img) => img,
         Err(e) => {
             return TestImageResult::DecodeError {
@@ -170,7 +170,6 @@ pub(crate) fn process_diff_case(
             };
         }
     };
-    let mut actual_rgba = actual_dyn_img.to_rgba8();
 
     let matched_zones = case.rule.matched_mask_zones(&case.image.relative_path);
     if !matched_zones.is_empty() {
@@ -195,6 +194,15 @@ pub(crate) fn process_diff_case(
     match comp_result {
         ComparisonResult::Match => TestImageResult::Success {
             relative_path: case.image.relative_path.clone(),
+        },
+        ComparisonResult::TooLarge {
+            size: (width, height),
+        } => TestImageResult::DecodeError {
+            relative_path: case.image.relative_path.clone(),
+            error: format!(
+                "{width}x{height} exceeds the SSIM analysis budget of {} pixels; use pixel mode or a smaller capture",
+                gleon_engine::ssim::MAX_ANALYSIS_PIXELS
+            ),
         },
         ComparisonResult::DimensionMismatch {
             baseline_size,
@@ -622,11 +630,12 @@ mod tests {
             },
             rule: std::sync::Arc::new(crate::config::ScreenshotRule {
                 include: vec![],
-                mode: crate::config::Mode::Pixel,
-                diff: crate::config::DiffConfig {
+                mode: gleon_engine::config::Mode::Pixel,
+                diff: gleon_engine::config::DiffConfig {
                     threshold: 0.0,
                     anti_alias: false,
                     min_similarity: 1.0,
+                    color_tolerance: 8.0,
                 },
                 masks: vec![],
             }),
@@ -685,11 +694,12 @@ mod tests {
             },
             rule: std::sync::Arc::new(crate::config::ScreenshotRule {
                 include: vec![],
-                mode: crate::config::Mode::Pixel,
-                diff: crate::config::DiffConfig {
+                mode: gleon_engine::config::Mode::Pixel,
+                diff: gleon_engine::config::DiffConfig {
                     threshold: 0.0,
                     anti_alias: false,
                     min_similarity: 1.0,
+                    color_tolerance: 8.0,
                 },
                 masks: vec![],
             }),

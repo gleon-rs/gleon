@@ -1,13 +1,11 @@
 //! HTML report generation.
 
+use gleon_engine::MismatchDetail;
 use minijinja::context;
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 
 use super::{ReportError, format::FormattedPath};
-use crate::{
-    engine::MismatchDetail,
-    results::{TestCaseResult, TestImageResult},
-};
+use crate::results::{TestCaseResult, TestImageResult};
 
 struct FormattedDimensions(u32, u32);
 
@@ -30,17 +28,7 @@ struct HtmlMismatchMessageView<'a>(&'a MismatchDetail);
 
 impl std::fmt::Display for HtmlMismatchMessageView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            MismatchDetail::Pixel { diff_count } => {
-                write!(f, "Visual mismatch ({diff_count} pixels)")
-            }
-            MismatchDetail::Ssim { ssim_score } => {
-                write!(f, "Visual mismatch (SSIM: {ssim_score:.4})")
-            }
-            MismatchDetail::SsimFallback { diff_count } => {
-                write!(f, "Visual mismatch (SSIM Fallback: {diff_count} pixels)")
-            }
-        }
+        write!(f, "Visual mismatch ({})", self.0)
     }
 }
 
@@ -183,8 +171,7 @@ fn html_failure_dto<'a>(
             actual_path,
         } => {
             let diff_count = match detail {
-                MismatchDetail::Pixel { diff_count }
-                | MismatchDetail::SsimFallback { diff_count } => Some(*diff_count),
+                MismatchDetail::Pixel { diff_count } => Some(*diff_count),
                 MismatchDetail::Ssim { .. } => None,
             };
             HtmlFailureDto {
@@ -410,7 +397,12 @@ mod tests {
                     actual_path: PathBuf::from("actual.png"),
                     baseline_path: PathBuf::from("baseline.png"),
                     diff_path: PathBuf::from("diff.png"),
-                    detail: MismatchDetail::Ssim { ssim_score: 0.5 },
+                    detail: MismatchDetail::Ssim {
+                        ssim_score: 0.5,
+                        min_ssim: 0.5,
+                        max_excess: 0.0,
+                        region: None,
+                    },
                 },
             },
             TestCaseResult {
@@ -430,7 +422,7 @@ mod tests {
         assert!(html.contains("io"));
         assert!(html.contains("encode"));
         assert!(html.contains("Dimension mismatch"));
-        assert!(html.contains("Visual mismatch (SSIM: 0.5000)"));
+        assert!(html.contains("Visual mismatch (min local SSIM 0.5000)"));
         assert!(!html.contains("pass"));
     }
 }

@@ -235,19 +235,18 @@ mod tests {
         GleonConfig {
             screenshots: vec![crate::config::ScreenshotRule {
                 include: include.to_vec(),
-                mode: crate::config::Mode::Pixel,
-                diff: crate::config::DiffConfig::default(),
+                mode: gleon_engine::config::Mode::Pixel,
+                diff: gleon_engine::config::DiffConfig::default(),
                 masks: vec![],
             }],
             exclude: exclude.to_vec(),
             ..GleonConfig::default()
         }
     }
+    use gleon_engine::MismatchDetail;
+
     use super::*;
-    use crate::{
-        engine::MismatchDetail,
-        results::{TestCaseResult, TestImageResult},
-    };
+    use crate::results::{TestCaseResult, TestImageResult};
 
     // Tiny 1x1 valid PNG bytes
     const VALID_PNG_BYTES: &[u8] = &[
@@ -487,11 +486,11 @@ screenshots:
 
         let pixel_case = cases
             .iter()
-            .find(|c| c.rule.mode == crate::config::Mode::Pixel)
+            .find(|c| c.rule.mode == gleon_engine::config::Mode::Pixel)
             .unwrap();
         let ssim_case = cases
             .iter()
-            .find(|c| c.rule.mode == crate::config::Mode::Ssim)
+            .find(|c| c.rule.mode == gleon_engine::config::Mode::Ssim)
             .unwrap();
 
         assert_eq!(pixel_case.name, "billing/form");
@@ -594,7 +593,12 @@ screenshots:
         assert!(!format!("{mismatch_detail:?}").is_empty());
         assert_eq!(mismatch_detail, MismatchDetail::Pixel { diff_count: 42 });
 
-        let ssim_detail = MismatchDetail::Ssim { ssim_score: 0.99 };
+        let ssim_detail = MismatchDetail::Ssim {
+            ssim_score: 0.99,
+            min_ssim: 0.99,
+            max_excess: 0.0,
+            region: None,
+        };
         assert!(!format!("{ssim_detail:?}").is_empty());
 
         let image_res = TestImageResult::DecodeError {
@@ -648,11 +652,12 @@ screenshots:
             image: test_image,
             rule: std::sync::Arc::new(crate::config::ScreenshotRule {
                 include: vec![],
-                mode: crate::config::Mode::Pixel,
-                diff: crate::config::DiffConfig {
+                mode: gleon_engine::config::Mode::Pixel,
+                diff: gleon_engine::config::DiffConfig {
                     threshold: 0.0,
                     anti_alias: false,
                     min_similarity: 0.99,
+                    color_tolerance: 8.0,
                 },
                 masks: vec![],
             }),

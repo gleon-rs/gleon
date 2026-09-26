@@ -184,19 +184,12 @@ impl RunHistoryEntry {
                 let (status, error, diff_count) = match &tc.result {
                     TestImageResult::Success { .. } => (TestHistoryStatus::Success, None, None),
                     TestImageResult::Mismatch { detail, .. } => match detail {
-                        crate::engine::MismatchDetail::Pixel { diff_count } => {
+                        gleon_engine::MismatchDetail::Pixel { diff_count } => {
                             (TestHistoryStatus::Mismatch, None, Some(*diff_count))
                         }
-                        crate::engine::MismatchDetail::Ssim { ssim_score } => (
-                            TestHistoryStatus::Mismatch,
-                            Some(format!("SSIM score: {ssim_score:.4}")),
-                            None,
-                        ),
-                        crate::engine::MismatchDetail::SsimFallback { diff_count } => (
-                            TestHistoryStatus::Mismatch,
-                            Some("SSIM calculation failed, fell back to pixel diff".to_string()),
-                            Some(*diff_count),
-                        ),
+                        detail @ gleon_engine::MismatchDetail::Ssim { .. } => {
+                            (TestHistoryStatus::Mismatch, Some(detail.to_string()), None)
+                        }
                     },
                     TestImageResult::DimensionMismatch {
                         baseline_size,
@@ -1398,17 +1391,12 @@ mod tests {
                 name: "test_ssim".to_string(),
                 result: TestImageResult::Mismatch {
                     relative_path: PathBuf::from("ssim.png"),
-                    detail: crate::engine::MismatchDetail::Ssim { ssim_score: 0.8542 },
-                    diff_path: PathBuf::from("diff.png"),
-                    baseline_path: PathBuf::from("base.png"),
-                    actual_path: PathBuf::from("act.png"),
-                },
-            },
-            TestCaseResult {
-                name: "test_ssim_fallback".to_string(),
-                result: TestImageResult::Mismatch {
-                    relative_path: PathBuf::from("fallback.png"),
-                    detail: crate::engine::MismatchDetail::SsimFallback { diff_count: 55 },
+                    detail: gleon_engine::MismatchDetail::Ssim {
+                        ssim_score: 0.8542,
+                        min_ssim: 0.8542,
+                        max_excess: 0.0,
+                        region: None,
+                    },
                     diff_path: PathBuf::from("diff.png"),
                     baseline_path: PathBuf::from("base.png"),
                     actual_path: PathBuf::from("act.png"),
@@ -1464,10 +1452,10 @@ mod tests {
             &test_cases,
         );
 
-        assert_eq!(entry.summary.total, 8);
+        assert_eq!(entry.summary.total, 7);
         assert_eq!(entry.summary.passed, 1);
-        assert_eq!(entry.summary.failed, 7);
-        assert_eq!(entry.tests.len(), 8);
+        assert_eq!(entry.summary.failed, 6);
+        assert_eq!(entry.tests.len(), 7);
 
         // Verify status Display implementation
         let statuses = [

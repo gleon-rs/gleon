@@ -5,7 +5,8 @@ screenshots:
   diff:
     threshold: 0.1
     anti_alias: true
-    min_similarity: 0.95
+    min_similarity: 0.8
+    color_tolerance: 8.0
   masks: []
 exclude:
 - node_modules/**

@@ -14,7 +14,7 @@ workspace = true
 keygen = []
 
 [dependencies]
-bytemuck = { workspace = true }
+gleon-engine = { path = "../gleon-engine" }
 bytes = { workspace = true }
 chrono = { workspace = true }
 dotenvy = { workspace = true }
@@ -27,8 +27,6 @@ hex = { workspace = true }
 http = { workspace = true }
 ignore = { workspace = true }
 image = { workspace = true }
-image-compare = { workspace = true }
-image_hasher = { workspace = true }
 libc = { workspace = true }
 indicatif = { workspace = true }
 minijinja = { workspace = true }

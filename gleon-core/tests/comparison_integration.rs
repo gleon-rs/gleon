@@ -13,9 +13,9 @@
 
 use std::path::Path;
 
-use gleon_core::{
+use gleon_engine::{
+    ComparisonResult, MismatchDetail, compare_images,
     config::{DiffConfig, Mode},
-    engine::{ComparisonResult, MismatchDetail, compare_images},
 };
 use image::{Rgba, RgbaImage};
 
