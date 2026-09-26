@@ -1,4 +1,4 @@
-[![codecov](https://codecov.io/gh/tsinis/gleon/graph/badge.svg?token=KIUODCEVAK)](https://codecov.io/gh/tsinis/gleon)
+[![codecov](https://codecov.io/gh/gleon-rs/gleon/graph/badge.svg?token=KIUODCEVAK)](https://codecov.io/gh/gleon-rs/gleon)
 
 # gleon
 
