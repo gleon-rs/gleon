@@ -253,8 +253,9 @@ pub fn compare(baseline: &[u8], candidate: &[u8], options_json: &[u8]) -> Outcom
             } => {
                 report.verdict = Verdict::Mismatch;
                 with_metrics(&mut report, measurement)?;
+                let encoding = Instant::now();
                 let diff_png = encode_png(&diff_image)?;
-                timings.encode = micros(compared.elapsed());
+                timings.encode = micros(encoding.elapsed());
                 report.timings_us = Some(timings);
                 Ok(Outcome::from_serializable(&report, Some(diff_png)))
             }

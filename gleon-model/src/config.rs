@@ -7,7 +7,7 @@ use gleon_engine::config::{DiffConfig, Dimension, Mode, Zone};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use crate::platform::PlatformConfig;
+use crate::platform::{PlatformConfig, PlatformError};
 
 /// Errors that can occur during configuration loading or manifest operations.
 #[derive(Debug, Error)]
@@ -36,6 +36,16 @@ pub enum ConfigError {
     /// Configuration is semantically invalid (e.g. empty screenshots list).
     #[error("Invalid configuration: {0}")]
     Validation(String),
+
+    /// `platform` or `fallback_platform` contains an invalid segment.
+    #[error("Invalid configuration: {field}: {source}")]
+    InvalidPlatform {
+        /// The offending field (`platform` or `fallback_platform`).
+        field: &'static str,
+        /// Why the platform is invalid.
+        #[source]
+        source: PlatformError,
+    },
 
     /// A boolean environment override (e.g. [`METRICS_ENV`]) has an unsupported value.
     #[error("{name} must be 1, 0, true or false (got '{value}')")]
@@ -328,8 +338,8 @@ impl GleonConfig {
     /// # Errors
     /// Returns [`ConfigError::NotFound`] if `path` does not exist, [`ConfigError::Io`] for
     /// other I/O failures, [`ConfigError::YamlParse`] if the file is not valid YAML matching
-    /// the schema, or [`ConfigError::Validation`] if the parsed configuration is semantically
-    /// invalid.
+    /// the schema, or [`ConfigError::Validation`] / [`ConfigError::InvalidPlatform`] if the parsed
+    /// configuration is semantically invalid.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         tracing::debug!("Loading configuration from {:?}", path);
@@ -349,7 +359,8 @@ impl GleonConfig {
     ///
     /// # Errors
     /// Returns [`ConfigError::YamlParse`] if `yaml` does not match the schema, or
-    /// [`ConfigError::Validation`] if the parsed configuration is semantically invalid.
+    /// [`ConfigError::Validation`] / [`ConfigError::InvalidPlatform`] if the parsed configuration
+    /// is semantically invalid.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, ConfigError> {
         serde_yaml::from_str::<Self>(yaml)?.validated()
     }
@@ -379,6 +390,18 @@ impl GleonConfig {
 
     /// Validates semantic invariants that serde attributes cannot express.
     fn validate(&self) -> Result<(), ConfigError> {
+        // Opaque keys are validated when parsed; structured fields only when turned into a key,
+        // which would otherwise happen long after loading (at context resolution).
+        for (field, platform) in [
+            ("platform", &self.platform),
+            ("fallback_platform", &self.fallback_platform),
+        ] {
+            if let Some(platform) = platform {
+                platform
+                    .to_key()
+                    .map_err(|source| ConfigError::InvalidPlatform { field, source })?;
+            }
+        }
         if self.screenshots.is_empty() {
             return Err(ConfigError::Validation(
                 "'screenshots' must contain at least one rule".to_string(),
@@ -930,6 +953,32 @@ metrics:
             err.to_string(),
             "GLEON_METRICS must be 1, 0, true or false (got 'yes')"
         );
+    }
+
+    #[test]
+    fn test_structured_platforms_are_validated_on_load() {
+        let config = |platforms: &str| {
+            GleonConfig::from_yaml_str(&format!(
+                "required_version: '>=0.1.0'\n{platforms}\nscreenshots:\n  - include: a.png\n"
+            ))
+        };
+        assert!(config("platform: {os: macos, arch: aarch64, labels: {theme: dark}}").is_ok());
+        for (yaml, field) in [
+            ("platform: {os: 'mac os'}", "platform"),
+            ("platform: {os: macos, labels: {'bad key': x}}", "platform"),
+            ("fallback_platform: {arch: 'x/y'}", "fallback_platform"),
+        ] {
+            let err = config(yaml).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::InvalidPlatform { field: f, .. } if *f == field),
+                "{yaml}: {err:?}"
+            );
+            assert!(
+                err.to_string()
+                    .starts_with(&format!("Invalid configuration: {field}: "))
+            );
+            assert!(std::error::Error::source(&err).is_some());
+        }
     }
 
     #[test]
