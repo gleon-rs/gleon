@@ -18,5 +18,6 @@ workspace = true
 gleon-engine = { path = "../gleon-engine" }
 image = { workspace = true }
 rayon = { workspace = true }
+safer-ffi = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

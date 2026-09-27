@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Version of the JSON request/response contract. Bumped on any breaking change so the Dart
 /// side can refuse a mismatched native library instead of misreading its output.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// Comparison strategy requested by the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
