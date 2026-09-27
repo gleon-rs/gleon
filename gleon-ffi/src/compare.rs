@@ -3,45 +3,32 @@
 //! Everything here is plain safe Rust and unit-tested directly; `lib.rs` only converts raw
 //! pointers into slices and hands ownership of the [`Outcome`] across the boundary.
 
+use std::time::{Duration, Instant};
+
 use gleon_engine::{
-    ComparisonResult, MismatchDetail, compare_images,
-    config::{DiffConfig, Mode, Zone},
+    ComparisonResult, compare_images,
+    config::Zone,
     decode::{DecodeError, decode_rgba},
     masking::apply_masks,
+};
+use gleon_model::{
+    case::{Metrics, RegionMetrics},
+    tolerance::Tolerance,
 };
 use image::{ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
 
 /// Version of the JSON request/response contract. Bumped on any breaking change so the Dart
 /// side can refuse a mismatched native library instead of misreading its output.
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
-/// Comparison strategy requested by the caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum RequestedMode {
-    /// Every pixel must be identical (the Flutter SDK default).
-    Exact,
-    /// Tolerates a fraction of differing pixels (`threshold`).
-    Pixel,
-    /// Tolerates rendering noise under [`gleon_engine::ssim`] policy v2: every local SSIM (half
-    /// resolution) must reach `min_similarity`, and no region may exceed its 3x3 envelope by more
-    /// than `color_tolerance`.
-    Ssim,
-}
-
-/// JSON options sent by the Dart side. Mode-specific parameters are required for their mode and
-/// rejected for the others, so a typo never silently falls back to a default.
+/// JSON options sent by the Dart side. The tolerance carries only the parameters of its own mode
+/// (`gleon_model::tolerance::Tolerance`), so a parameter of another mode is rejected, never
+/// silently ignored.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompareOptions {
-    mode: RequestedMode,
-    #[serde(default)]
-    threshold: Option<f64>,
-    #[serde(default)]
-    min_similarity: Option<f64>,
-    #[serde(default)]
-    color_tolerance: Option<f64>,
+    tolerance: Tolerance,
     #[serde(default)]
     masks: Vec<Zone>,
 }
@@ -60,6 +47,34 @@ pub enum Verdict {
     Error,
 }
 
+/// Image dimensions in pixels.
+#[derive(Debug, Clone, Copy, Serialize)]
+struct Size {
+    width: u32,
+    height: u32,
+}
+
+impl From<(u32, u32)> for Size {
+    fn from((width, height): (u32, u32)) -> Self {
+        Self { width, height }
+    }
+}
+
+/// Time spent in each native stage, in microseconds.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+struct Timings {
+    /// Decoding both PNGs.
+    decode: u64,
+    /// Masking and comparing.
+    compare: u64,
+    /// Encoding the diff PNG (0 unless the verdict is a mismatch).
+    encode: u64,
+}
+
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
 /// JSON report returned to the Dart side.
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -69,13 +84,16 @@ pub struct Report {
     /// The verdict.
     pub verdict: Verdict,
     #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<MismatchDetail>,
+    baseline: Option<Size>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    baseline_size: Option<(u32, u32)>,
+    candidate: Option<Size>,
+    /// Whole-image metrics, present for `match` and `mismatch`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    candidate_size: Option<(u32, u32)>,
+    metrics: Option<Metrics>,
+    /// Per-region metrics: one whole-image region alongside `metrics`.
+    regions: Vec<RegionMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    total_pixels: Option<u64>,
+    timings_us: Option<Timings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -86,110 +104,56 @@ impl Report {
             abi: ABI_VERSION,
             policy_version: gleon_engine::ssim::POLICY_VERSION,
             verdict: Verdict::Error,
-            detail: None,
-            baseline_size: None,
-            candidate_size: None,
-            total_pixels: None,
+            baseline: None,
+            candidate: None,
+            metrics: None,
+            regions: Vec::new(),
+            timings_us: None,
             error: Some(message.into()),
         }
     }
 }
 
-/// A finished comparison: the JSON report plus an optional PNG-encoded diff visualization.
+/// A finished call: the JSON report plus an optional PNG-encoded diff visualization.
 #[derive(Debug)]
 pub struct Outcome {
-    /// Serialized [`Report`].
+    /// Serialized report.
     pub json: Vec<u8>,
     /// PNG diff image, present only on [`Verdict::Mismatch`].
     pub diff_png: Option<Vec<u8>>,
 }
 
 impl Outcome {
-    fn from_report(report: &Report, diff_png: Option<Vec<u8>>) -> Self {
-        // Serializing a struct of plain numbers/strings cannot fail; fall back to a static
-        // error document rather than panicking across the FFI boundary if it ever does.
+    /// Serializes `report` (a compare report or a resolve response).
+    ///
+    /// Serializing plain numbers and strings cannot fail; should it ever, the result is a static
+    /// error document rather than a panic across the FFI boundary. It carries both `"verdict"`
+    /// and `"kind"` so either contract's parser reads it as an error.
+    pub(crate) fn from_serializable(report: &impl Serialize, diff_png: Option<Vec<u8>>) -> Self {
         let json = serde_json::to_vec(report).unwrap_or_else(|_| {
             format!(
-                r#"{{"abi":{ABI_VERSION},"verdict":"error","error":"failed to serialize report"}}"#
+                r#"{{"abi":{ABI_VERSION},"verdict":"error","kind":"error","error":"failed to serialize report"}}"#
             )
             .into_bytes()
         });
         Self { json, diff_png }
     }
 
-    /// Builds an error outcome (used for invalid pointers and caught panics).
+    /// Builds a comparison error outcome (used for invalid pointers and caught panics).
     #[must_use]
     pub fn error(message: impl Into<String>) -> Self {
-        Self::from_report(&Report::error(message), None)
+        Self::from_serializable(&Report::error(message), None)
     }
 }
 
-fn parse_options(options_json: &[u8]) -> Result<(Mode, DiffConfig, Vec<Zone>), String> {
+fn parse_options(options_json: &[u8]) -> Result<CompareOptions, String> {
     let options: CompareOptions = serde_json::from_slice(options_json)
         .map_err(|e| format!("invalid comparison options: {e}"))?;
-    let non_negative = |name: &str, value: Option<f64>| -> Result<f64, String> {
-        let value = value.ok_or_else(|| format!("`{name}` is required for this mode"))?;
-        if value.is_finite() && value >= 0.0 {
-            Ok(value)
-        } else {
-            Err(format!(
-                "`{name}` must be a finite, non-negative number (got {value})"
-            ))
-        }
-    };
-    let ratio = |name: &str, value: Option<f64>| -> Result<f64, String> {
-        let value = value.ok_or_else(|| format!("`{name}` is required for this mode"))?;
-        if (0.0..=1.0).contains(&value) {
-            Ok(value)
-        } else {
-            Err(format!(
-                "`{name}` must be between 0.0 and 1.0 (got {value})"
-            ))
-        }
-    };
-    let reject = |name: &str, value: Option<f64>| -> Result<(), String> {
-        value.map_or(Ok(()), |_| {
-            Err(format!("`{name}` is not supported for this mode"))
-        })
-    };
-    let base = DiffConfig::default();
-    let (mode, config) = match options.mode {
-        RequestedMode::Exact => {
-            reject("threshold", options.threshold)?;
-            reject("min_similarity", options.min_similarity)?;
-            reject("color_tolerance", options.color_tolerance)?;
-            (
-                Mode::Pixel,
-                DiffConfig {
-                    threshold: 0.0,
-                    ..base
-                },
-            )
-        }
-        RequestedMode::Pixel => {
-            reject("min_similarity", options.min_similarity)?;
-            reject("color_tolerance", options.color_tolerance)?;
-            (
-                Mode::Pixel,
-                DiffConfig {
-                    threshold: ratio("threshold", options.threshold)?,
-                    ..base
-                },
-            )
-        }
-        RequestedMode::Ssim => {
-            reject("threshold", options.threshold)?;
-            (
-                Mode::Ssim,
-                DiffConfig {
-                    min_similarity: ratio("min_similarity", options.min_similarity)?,
-                    color_tolerance: non_negative("color_tolerance", options.color_tolerance)?,
-                    ..base
-                },
-            )
-        }
-    };
-    Ok((mode, config, options.masks))
+    options
+        .tolerance
+        .validate()
+        .map_err(|e| format!("invalid comparison options: {e}"))?;
+    Ok(options)
 }
 
 fn decode(label: &str, bytes: &[u8]) -> Result<RgbaImage, String> {
@@ -221,32 +185,57 @@ fn limit_engine_threads() {
 
 /// Compares two encoded images (PNG) using the JSON `options`.
 ///
-/// Masks are applied to both images before comparing, exactly like `gleon diff`.
+/// Masks are applied to both images before comparing, exactly like `gleon diff`. Matches report
+/// their metrics too, so callers can see the headroom to the tolerance.
 #[must_use]
 pub fn compare(baseline: &[u8], candidate: &[u8], options_json: &[u8]) -> Outcome {
     limit_engine_threads();
     let run = || -> Result<Outcome, String> {
-        let (mode, config, masks) = parse_options(options_json)?;
+        let CompareOptions { tolerance, masks } = parse_options(options_json)?;
+        let (mode, config) = tolerance.engine_config();
+
+        let started = Instant::now();
         let mut baseline_img = decode("baseline", baseline)?;
         let mut candidate_img = decode("candidate", candidate)?;
+        let decoded = Instant::now();
         let baseline_size = baseline_img.dimensions();
         let candidate_size = candidate_img.dimensions();
         if !masks.is_empty() && baseline_size == candidate_size {
             apply_masks(&mut baseline_img, &masks);
             apply_masks(&mut candidate_img, &masks);
         }
+        let result = compare_images(&baseline_img, &candidate_img, mode, &config);
+        let compared = Instant::now();
+        let mut timings = Timings {
+            decode: micros(decoded - started),
+            compare: micros(compared - decoded),
+            encode: 0,
+        };
+
         let mut report = Report {
             abi: ABI_VERSION,
             policy_version: gleon_engine::ssim::POLICY_VERSION,
             verdict: Verdict::Match,
-            detail: None,
-            baseline_size: Some(baseline_size),
-            candidate_size: Some(candidate_size),
-            total_pixels: Some(u64::from(baseline_size.0) * u64::from(baseline_size.1)),
+            baseline: Some(baseline_size.into()),
+            candidate: Some(candidate_size.into()),
+            metrics: None,
+            regions: Vec::new(),
+            timings_us: Some(timings),
             error: None,
         };
-        match compare_images(&baseline_img, &candidate_img, mode, &config) {
-            ComparisonResult::Match => Ok(Outcome::from_report(&report, None)),
+        let total_pixels = u64::from(baseline_size.0) * u64::from(baseline_size.1);
+        let with_metrics = |report: &mut Report, measurement| {
+            let metrics = Metrics::from_measurement(&measurement, &tolerance, total_pixels)
+                .ok_or("internal error: the engine measurement does not match the tolerance")?;
+            report.metrics = Some(metrics);
+            report.regions = vec![RegionMetrics::whole_image(metrics)];
+            Ok::<_, String>(())
+        };
+        match result {
+            ComparisonResult::Match { measurement } => {
+                with_metrics(&mut report, measurement)?;
+                Ok(Outcome::from_serializable(&report, None))
+            }
             ComparisonResult::TooLarge {
                 size: (width, height),
             } => Err(format!(
@@ -256,16 +245,19 @@ pub fn compare(baseline: &[u8], candidate: &[u8], options_json: &[u8]) -> Outcom
             )),
             ComparisonResult::DimensionMismatch { .. } => {
                 report.verdict = Verdict::DimensionMismatch;
-                report.total_pixels = None;
-                Ok(Outcome::from_report(&report, None))
+                Ok(Outcome::from_serializable(&report, None))
             }
-            ComparisonResult::Mismatch { detail, diff_image } => {
+            ComparisonResult::Mismatch {
+                measurement,
+                diff_image,
+            } => {
                 report.verdict = Verdict::Mismatch;
-                report.detail = Some(detail);
-                Ok(Outcome::from_report(
-                    &report,
-                    Some(encode_png(&diff_image)?),
-                ))
+                with_metrics(&mut report, measurement)?;
+                let encoding = Instant::now();
+                let diff_png = encode_png(&diff_image)?;
+                timings.encode = micros(encoding.elapsed());
+                report.timings_us = Some(timings);
+                Ok(Outcome::from_serializable(&report, Some(diff_png)))
             }
         }
     };
@@ -299,12 +291,54 @@ mod tests {
 
     const RED: Rgba<u8> = Rgba([255, 0, 0, 255]);
     const BLUE: Rgba<u8> = Rgba([0, 0, 255, 255]);
+    const EXACT: &[u8] = br#"{"tolerance":{"kind":"exact"}}"#;
+    const SSIM: &[u8] =
+        br#"{"tolerance":{"kind":"ssim","min_similarity":0.8,"color_tolerance":8.0}}"#;
+
+    /// A report whose serialization fails, to reach the static fallback document.
+    struct Unserializable;
+
+    impl Serialize for Unserializable {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("unserializable"))
+        }
+    }
 
     #[test]
-    fn test_exact_match() {
+    fn test_serialization_failure_is_an_error_for_both_contracts() {
+        let out = Outcome::from_serializable(&Unserializable, None);
+        let r = report(&out);
+        assert_eq!(r["abi"], ABI_VERSION);
+        // The compare parser keys on `verdict`, the resolve parser on `kind`.
+        assert_eq!(
+            (&r["verdict"], &r["kind"]),
+            (&"error".into(), &"error".into())
+        );
+        assert_eq!(r["error"], "failed to serialize report");
+    }
+
+    #[test]
+    fn test_exact_match_reports_metrics_and_timings() {
         let a = png(10, 10, |_, _| RED);
-        let out = compare(&a, &a, br#"{"mode":"exact"}"#);
-        assert_eq!(report(&out)["verdict"], "match");
+        let out = compare(&a, &a, EXACT);
+        let r = report(&out);
+        assert_eq!(r["abi"], 4);
+        assert_eq!(r["verdict"], "match");
+        assert_eq!(
+            r["metrics"],
+            serde_json::json!({
+                "kind": "pixel", "total_pixels": 100, "diff_pixels": 0,
+                "diff_ratio": 0.0, "headroom": 0.0
+            })
+        );
+        assert_eq!(r["regions"][0]["kind"], "image");
+        assert_eq!(r["regions"][0]["metrics"], r["metrics"]);
+        assert_eq!(
+            r["baseline"],
+            serde_json::json!({"width": 10, "height": 10})
+        );
+        assert_eq!(r["timings_us"]["encode"], 0);
+        assert!(r["timings_us"]["decode"].is_u64());
         assert!(out.diff_png.is_none());
     }
 
@@ -312,48 +346,61 @@ mod tests {
     fn test_exact_single_pixel_mismatch_has_diff() {
         let a = png(10, 10, |_, _| RED);
         let b = png(10, 10, |x, y| if (x, y) == (3, 3) { BLUE } else { RED });
-        let out = compare(&a, &b, br#"{"mode":"exact"}"#);
+        let out = compare(&a, &b, EXACT);
         let r = report(&out);
         assert_eq!(r["verdict"], "mismatch");
-        assert_eq!(r["detail"]["Pixel"]["diff_count"], 1);
-        assert_eq!(r["total_pixels"], 100);
+        assert_eq!(r["metrics"]["diff_pixels"], 1);
+        assert_eq!(r["metrics"]["total_pixels"], 100);
+        assert_eq!(r["metrics"]["headroom"], -0.01);
         assert!(out.diff_png.is_some());
     }
 
     #[test]
-    fn test_pixel_threshold_tolerates_small_change() {
+    fn test_pixel_threshold_tolerates_small_change_with_headroom() {
         let a = png(10, 10, |_, _| RED);
         let b = png(10, 10, |x, y| if (x, y) == (3, 3) { BLUE } else { RED });
-        let out = compare(&a, &b, br#"{"mode":"pixel","threshold":0.05}"#);
-        assert_eq!(report(&out)["verdict"], "match");
+        let opts = br#"{"tolerance":{"kind":"pixel","max_diff_ratio":0.05}}"#;
+        let r = report(&compare(&a, &b, opts));
+        assert_eq!(r["verdict"], "match");
+        assert_eq!(r["metrics"]["diff_pixels"], 1);
+        assert!((r["metrics"]["headroom"].as_f64().unwrap() - 0.04).abs() < 1e-12);
     }
 
     #[test]
     fn test_ssim_reports_policy_metrics_on_mismatch() {
         let a = png(64, 64, |_, _| RED);
         let b = png(64, 64, |x, _| if x < 32 { BLUE } else { RED });
-        let opts = br#"{"mode":"ssim","min_similarity":0.8,"color_tolerance":8.0}"#;
-        let r = report(&compare(&a, &b, opts));
+        let r = report(&compare(&a, &b, SSIM));
         assert_eq!(r["verdict"], "mismatch");
         assert_eq!(r["policy_version"], 2);
-        let ssim = &r["detail"]["Ssim"];
-        assert!(ssim["max_excess"].as_f64().unwrap() > 100.0, "{r}");
-        assert_eq!(ssim["region"]["width"], 32);
+        let m = &r["metrics"];
+        assert_eq!(m["kind"], "ssim");
+        assert!(m["peak_excess"].as_f64().unwrap() > 100.0, "{r}");
+        assert!(m["headroom"]["color"].as_f64().unwrap() < 0.0, "{r}");
+        assert_eq!(m["failing_region"]["width"], 32);
+        assert_eq!(m["changed_pixels"], 32 * 64);
     }
 
     #[test]
-    fn test_ssim_tolerates_imperceptible_drift() {
+    fn test_ssim_match_reports_headroom() {
         let a = png(32, 32, |_, _| Rgba([63, 81, 181, 255]));
         let b = png(32, 32, |_, _| Rgba([63, 81, 183, 255]));
-        let opts = br#"{"mode":"ssim","min_similarity":0.8,"color_tolerance":8.0}"#;
-        assert_eq!(report(&compare(&a, &b, opts))["verdict"], "match");
+        let r = report(&compare(&a, &b, SSIM));
+        assert_eq!(r["verdict"], "match");
+        let m = &r["metrics"];
+        assert_eq!(m["peak_excess"], 2.0);
+        assert_eq!(m["headroom"]["color"], 6.0);
+        assert!(m["headroom"]["similarity"].as_f64().unwrap() > 0.0, "{r}");
+        assert_eq!(m["failing_pixels"], 0);
+        assert!(m.get("failing_region").is_none(), "{r}");
     }
 
     #[test]
     fn test_masks_hide_changed_region() {
         let a = png(10, 10, |_, _| RED);
         let b = png(10, 10, |x, y| if x < 2 && y < 2 { BLUE } else { RED });
-        let opts = br#"{"mode":"exact","masks":[{"x":0,"y":0,"width":2,"height":2}]}"#;
+        let opts =
+            br#"{"tolerance":{"kind":"exact"},"masks":[{"x":0,"y":0,"width":2,"height":2}]}"#;
         assert_eq!(report(&compare(&a, &b, opts))["verdict"], "match");
     }
 
@@ -361,19 +408,26 @@ mod tests {
     fn test_masks_with_dimension_mismatch_still_report_sizes() {
         let a = png(10, 10, |_, _| RED);
         let b = png(12, 10, |_, _| RED);
-        let opts = br#"{"mode":"exact","masks":[{"x":0,"y":0,"width":"50%","height":2}]}"#;
+        let opts =
+            br#"{"tolerance":{"kind":"exact"},"masks":[{"x":0,"y":0,"width":"50%","height":2}]}"#;
         let r = report(&compare(&a, &b, opts));
         assert_eq!(r["verdict"], "dimension_mismatch");
-        assert_eq!(r["baseline_size"], serde_json::json!([10, 10]));
-        assert_eq!(r["candidate_size"], serde_json::json!([12, 10]));
-        assert!(r.get("total_pixels").is_none(), "{r}");
+        assert_eq!(
+            r["baseline"],
+            serde_json::json!({"width": 10, "height": 10})
+        );
+        assert_eq!(
+            r["candidate"],
+            serde_json::json!({"width": 12, "height": 10})
+        );
+        assert!(r.get("metrics").is_none(), "{r}");
+        assert_eq!(r["regions"], serde_json::json!([]));
     }
 
     #[test]
     fn test_ssim_over_analysis_budget_is_an_error() {
         let big = png(4097, 4096, |_, _| RED);
-        let opts = br#"{"mode":"ssim","min_similarity":0.8,"color_tolerance":8}"#;
-        let r = report(&compare(&big, &big, opts));
+        let r = report(&compare(&big, &big, SSIM));
         assert_eq!(r["verdict"], "error");
         assert!(
             r["error"]
@@ -385,49 +439,49 @@ mod tests {
     }
 
     #[test]
-    fn test_dimension_mismatch() {
-        let a = png(10, 10, |_, _| RED);
-        let b = png(10, 11, |_, _| RED);
-        let r = report(&compare(&a, &b, br#"{"mode":"exact"}"#));
-        assert_eq!(r["verdict"], "dimension_mismatch");
-        assert_eq!(r["baseline_size"], serde_json::json!([10, 10]));
-        assert_eq!(r["candidate_size"], serde_json::json!([10, 11]));
-    }
-
-    #[test]
     fn test_invalid_inputs_are_errors_not_passes() {
         let a = png(4, 4, |_, _| RED);
         for (baseline, candidate, opts) in [
-            (&b"garbage"[..], &a[..], &br#"{"mode":"exact"}"#[..]),
-            (&a[..], &b"garbage"[..], &br#"{"mode":"exact"}"#[..]),
-            (&a[..], &a[..], &br#"{"mode":"pixel"}"#[..]),
-            (&a[..], &a[..], &br#"{"mode":"exact","threshold":0.1}"#[..]),
+            (&b"garbage"[..], &a[..], EXACT),
+            (&a[..], &b"garbage"[..], EXACT),
+            (&a[..], &a[..], &br#"{"tolerance":{"kind":"pixel"}}"#[..]),
             (
                 &a[..],
                 &a[..],
-                &br#"{"mode":"ssim","min_similarity":1.5,"color_tolerance":8}"#[..],
+                &br#"{"tolerance":{"kind":"exact","max_diff_ratio":0.1}}"#[..],
             ),
             (
                 &a[..],
                 &a[..],
-                &br#"{"mode":"ssim","min_similarity":0.8}"#[..],
+                &br#"{"tolerance":{"kind":"ssim","min_similarity":1.5,"color_tolerance":8}}"#[..],
             ),
             (
                 &a[..],
                 &a[..],
-                &br#"{"mode":"ssim","min_similarity":0.8,"color_tolerance":-1}"#[..],
+                &br#"{"tolerance":{"kind":"ssim","min_similarity":0.8}}"#[..],
             ),
             (
                 &a[..],
                 &a[..],
-                &br#"{"mode":"pixel","threshold":0.1,"color_tolerance":8}"#[..],
+                &br#"{"tolerance":{"kind":"ssim","min_similarity":0.8,"color_tolerance":-1}}"#[..],
             ),
-            (&a[..], &a[..], &br#"{"mode":"fuzzy"}"#[..]),
-            (&a[..], &a[..], &br#"{"mode":"exact","typo":1}"#[..]),
+            (
+                &a[..],
+                &a[..],
+                &br#"{"tolerance":{"kind":"pixel","max_diff_ratio":0.1,"color_tolerance":8}}"#[..],
+            ),
+            (&a[..], &a[..], &br#"{"tolerance":{"kind":"fuzzy"}}"#[..]),
+            (
+                &a[..],
+                &a[..],
+                &br#"{"tolerance":{"kind":"exact"},"typo":1}"#[..],
+            ),
+            (&a[..], &a[..], &br#"{"mode":"exact"}"#[..]),
         ] {
             let r = report(&compare(baseline, candidate, opts));
             assert_eq!(r["verdict"], "error", "{r}");
             assert!(r["error"].as_str().is_some_and(|e| !e.is_empty()));
+            assert!(r.get("timings_us").is_none());
         }
     }
 }

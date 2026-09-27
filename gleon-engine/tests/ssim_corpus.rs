@@ -514,7 +514,7 @@ fn test_corpus_separates_benign_noise_from_regressions() {
 fn test_compare_images_uses_the_same_policy() {
     let golden = render(Scene::default());
     let config = DiffConfig::default();
-    assert_eq!(
+    assert!(matches!(
         compare_images(
             &golden,
             &render(Scene {
@@ -524,8 +524,8 @@ fn test_compare_images_uses_the_same_policy() {
             Mode::Ssim,
             &config
         ),
-        ComparisonResult::Match
-    );
+        ComparisonResult::Match { .. }
+    ));
     assert!(matches!(
         compare_images(
             &golden,

@@ -1,0 +1,27 @@
+[package]
+name = "gleon-model"
+description = "Shared gleon data model: workspace config, test naming, platform keys and case reports."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT OR Apache-2.0"
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gleon-engine = { path = "../gleon-engine", features = ["schemars"] }
+chrono = { workspace = true }
+globset = { workspace = true }
+schemars = { workspace = true, features = ["chrono04"] }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }

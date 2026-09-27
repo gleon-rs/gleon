@@ -1,11 +1,10 @@
-//! Shared directory-traversal and glob-set construction helpers built on `ignore`/`globset`.
+//! Shared directory-traversal helpers built on `ignore`.
 
 use std::path::Path;
 
-use globset::{GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 
-use crate::{config::GlobPattern, naming::DEFAULT_PRUNED_DIRECTORIES};
+use crate::naming::DEFAULT_PRUNED_DIRECTORIES;
 
 /// Returns `true` if `name` is one of [`DEFAULT_PRUNED_DIRECTORIES`].
 #[must_use]
@@ -46,19 +45,6 @@ pub fn manifest_walker(dir: &Path) -> WalkBuilder {
         !is_hidden_subdir
     });
     builder
-}
-
-/// Compiles a `GlobSet` from a list of patterns.
-///
-/// # Errors
-/// Returns the underlying `globset::Error` if any pattern fails to compile (this should not
-/// happen for patterns already validated by [`GlobPattern`]).
-pub fn build_globset(patterns: &[GlobPattern]) -> Result<GlobSet, globset::Error> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(pattern.as_glob().clone());
-    }
-    builder.build()
 }
 
 #[cfg(all(test, not(miri)))]
@@ -123,13 +109,5 @@ mod tests {
         assert!(!names.contains(&"dead.txt".to_string()));
         assert!(names.contains(&"live.json".to_string()));
         assert!(names.contains(&"header.json".to_string()));
-    }
-
-    #[test]
-    fn test_build_globset_matches_patterns() {
-        let patterns = vec![GlobPattern::new("**/*.png").unwrap()];
-        let set = build_globset(&patterns).unwrap();
-        assert!(set.is_match("billing/stripe.png"));
-        assert!(!set.is_match("billing/stripe.jpg"));
     }
 }

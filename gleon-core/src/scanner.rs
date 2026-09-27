@@ -2,11 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{
-    config::GleonConfig,
-    naming::{normalize_test_name, validate_test_name},
-    walk::build_globset,
-};
+use gleon_model::rules::{RuleSet, Selection, test_name};
+
+use crate::{config::GleonConfig, naming::normalize_test_name};
 
 /// Errors that can occur during visual regression testing files scanning.
 #[derive(Debug, thiserror::Error)]
@@ -64,17 +62,11 @@ impl FileScanner {
         config: &GleonConfig,
         base_dir: &Path,
     ) -> Result<Vec<TestCase>, ScannerError> {
-        let exclude_set = build_globset(&config.exclude)?;
+        // Rule selection is `gleon-model`'s, shared with the Flutter package through `gleon-ffi`;
+        // the walker only prunes early what `RuleSet::select` would exclude anyway.
+        let rule_set = RuleSet::new(config)?;
 
-        let mut rule_sets = Vec::new();
-        for rule in &config.screenshots {
-            rule_sets.push((
-                std::sync::Arc::new(rule.clone()),
-                build_globset(&rule.include)?,
-            ));
-        }
-
-        let walker = Self::build_walker(base_dir, &exclude_set);
+        let walker = Self::build_walker(base_dir, rule_set.exclude_set());
 
         let mut temp_cases = std::collections::BTreeMap::<
             String,
@@ -110,44 +102,35 @@ impl FileScanner {
                 }
             };
             let rel_path_str = Self::normalize_path_str(rel_path);
-
-            if exclude_set.is_match(rel_path_str.as_ref()) {
+            let Selection::Rule(index) = rule_set.select(&rel_path.to_string_lossy()) else {
                 continue;
-            }
+            };
+            let test_name_norm =
+                test_name(&rel_path_str).map_err(|reason| ScannerError::InvalidTestName {
+                    name: rel_path_str
+                        .strip_suffix(".png")
+                        .unwrap_or(&rel_path_str)
+                        .to_owned(),
+                    reason: reason.to_string(),
+                })?;
 
-            let matched_rule = rule_sets
-                .iter()
-                .find(|(_, inc_set)| inc_set.is_match(rel_path_str.as_ref()));
-
-            if let Some((rule_arc, _)) = matched_rule {
-                let path_without_ext = rel_path.with_extension("");
-                let test_name_cow = Self::normalize_path_str(&path_without_ext);
-                let test_name_norm = test_name_cow.as_ref();
-
-                if temp_cases.contains_key(test_name_norm) {
-                    tracing::warn!(
-                        "Duplicate test name '{}' detected for relative path {:?}. Skipping duplicate.",
-                        test_name_norm,
-                        rel_path
-                    );
-                } else {
-                    if let Err(reason) = validate_test_name(test_name_norm) {
-                        return Err(ScannerError::InvalidTestName {
-                            name: test_name_norm.to_string(),
-                            reason: reason.to_string(),
-                        });
-                    }
-                    temp_cases.insert(
-                        test_name_norm.to_string(),
-                        (
-                            TestImage {
-                                relative_path: rel_path.to_path_buf(),
-                                absolute_path: path.to_path_buf(),
-                            },
-                            rule_arc.clone(),
-                        ),
-                    );
-                }
+            if temp_cases.contains_key(test_name_norm) {
+                tracing::warn!(
+                    "Duplicate test name '{}' detected for relative path {:?}. Skipping duplicate.",
+                    test_name_norm,
+                    rel_path
+                );
+            } else {
+                temp_cases.insert(
+                    test_name_norm.to_owned(),
+                    (
+                        TestImage {
+                            relative_path: rel_path.to_path_buf(),
+                            absolute_path: path.to_path_buf(),
+                        },
+                        rule_set.rule(index).clone(),
+                    ),
+                );
             }
         }
 
@@ -243,7 +226,7 @@ mod tests {
             ..GleonConfig::default()
         }
     }
-    use gleon_engine::MismatchDetail;
+    use gleon_engine::Measurement;
 
     use super::*;
     use crate::results::{TestCaseResult, TestImageResult};
@@ -309,6 +292,98 @@ mod tests {
             cases[1].image.relative_path,
             Path::new("settings/corrupt.png")
         );
+    }
+
+    #[test]
+    fn test_scan_selects_exactly_what_the_shared_rules_resolve() {
+        // Drift guard: the Flutter package resolves goldens with `RuleSet::resolve` instead of
+        // walking, so the walker's pruning must never change which files become test cases.
+        let yaml = r#"
+required_version: ">=0.1.0"
+exclude: ["**/drafts", "test/goldens/wip/**"]
+screenshots:
+  - include: "test/goldens/**/*.png"
+    mode: ssim
+  - include: "test/**/*.png"
+"#;
+        let config = GleonConfig::from_yaml_str(yaml).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let files = [
+            "test/goldens/a.png",
+            "test/goldens/Upper/B.PNG",
+            "test/goldens/drafts/c.png",
+            "test/goldens/wip/d.png",
+            "test/goldens/build/e.png",
+            "test/goldens/notes.txt",
+            "test/unit/f.png",
+            "lib/g.png",
+        ];
+        for file in files {
+            let path = temp_dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, VALID_PNG_BYTES).unwrap();
+        }
+
+        let scanned: Vec<(String, bool)> = FileScanner::scan_workspace(&config, temp_dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|case| {
+                (
+                    case.name,
+                    case.rule.mode == gleon_engine::config::Mode::Ssim,
+                )
+            })
+            .collect();
+        let rules = RuleSet::new(&config).unwrap();
+        let mut resolved: Vec<(String, bool)> = files
+            .iter()
+            .filter_map(|file| match rules.resolve(file).unwrap() {
+                gleon_model::rules::RuleMatch::Matched { index, name, .. } => {
+                    Some((name, index == 0))
+                }
+                _ => None,
+            })
+            .collect();
+        resolved.sort();
+
+        assert_eq!(scanned, resolved);
+        assert_eq!(
+            scanned,
+            [
+                ("test/goldens/a".to_owned(), true),
+                ("test/goldens/upper/b".to_owned(), true),
+                ("test/unit/f".to_owned(), false),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_files_with_the_same_canonical_name_are_scanned_once() {
+        // On Unix `\` is a valid file name character, and canonicalization turns it into `/`,
+        // so `a\b.png` and `a/b.png` are one test; the first one walked wins, the other is
+        // skipped with a warning instead of overwriting it.
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("a")).unwrap();
+        std::fs::write(temp_dir.path().join("a").join("b.png"), VALID_PNG_BYTES).unwrap();
+        std::fs::write(temp_dir.path().join("a\\b.png"), VALID_PNG_BYTES).unwrap();
+        let include = vec![GlobPattern::new("**/*.png").unwrap()];
+
+        // `&File` is `io::Write`, so a shared file collects the formatted log.
+        let log_path = temp_dir.path().join("scan.log");
+        let log = std::sync::Arc::new(std::fs::File::create(&log_path).unwrap());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(log)
+            .finish();
+        let cases = tracing::subscriber::with_default(subscriber, || {
+            FileScanner::scan_workspace(&config_from(&include, &[]), temp_dir.path()).unwrap()
+        });
+
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].name, "a/b");
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("Duplicate test name 'a/b' detected"), "{log}");
     }
 
     #[test]
@@ -589,15 +664,19 @@ screenshots:
         let pattern_err = ScannerError::Pattern(globset::Glob::new("[").unwrap_err());
         assert!(!format!("{pattern_err:?}").is_empty());
 
-        let mismatch_detail = MismatchDetail::Pixel { diff_count: 42 };
+        let mismatch_detail = Measurement::Pixel { diff_count: 42 };
         assert!(!format!("{mismatch_detail:?}").is_empty());
-        assert_eq!(mismatch_detail, MismatchDetail::Pixel { diff_count: 42 });
+        assert_eq!(mismatch_detail, Measurement::Pixel { diff_count: 42 });
 
-        let ssim_detail = MismatchDetail::Ssim {
-            ssim_score: 0.99,
+        let ssim_detail = Measurement::Ssim {
+            mean_ssim: 0.99,
             min_ssim: 0.99,
             max_excess: 0.0,
-            region: None,
+            peak_excess: 0.0,
+            changed_pixels: 1,
+            changed_region: None,
+            failing_pixels: 1,
+            failing_region: None,
         };
         assert!(!format!("{ssim_detail:?}").is_empty());
 

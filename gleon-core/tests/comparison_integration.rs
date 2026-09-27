@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use gleon_engine::{
-    ComparisonResult, MismatchDetail, compare_images,
+    ComparisonResult, Measurement, compare_images,
     config::{DiffConfig, Mode},
 };
 use image::{Rgba, RgbaImage};
@@ -44,7 +44,7 @@ fn test_integration_1_pixel_difference() {
         matches!(
             result,
             ComparisonResult::Mismatch {
-                detail: MismatchDetail::Pixel { diff_count: 1 },
+                measurement: Measurement::Pixel { diff_count: 1 },
                 ..
             }
         ),
@@ -74,7 +74,7 @@ fn test_integration_16_pixels_corners() {
         matches!(
             result,
             ComparisonResult::Mismatch {
-                detail: MismatchDetail::Pixel { diff_count: 16 },
+                measurement: Measurement::Pixel { diff_count: 16 },
                 ..
             }
         ),
@@ -113,7 +113,7 @@ fn test_integration_transparency_difference() {
         matches!(
             result,
             ComparisonResult::Mismatch {
-                detail: MismatchDetail::Pixel { diff_count: 10 },
+                measurement: Measurement::Pixel { diff_count: 10 },
                 ..
             }
         ),
@@ -159,7 +159,7 @@ fn test_integration_ssim_large_diff() {
         matches!(
             result,
             ComparisonResult::Mismatch {
-                detail: MismatchDetail::Ssim { .. },
+                measurement: Measurement::Ssim { .. },
                 ..
             }
         ),

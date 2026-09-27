@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Comparison mode for visual regression testing.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Pixel-by-pixel color comparison.
@@ -39,16 +40,29 @@ impl<'de> Deserialize<'de> for Dimension {
             RawDimension::Integer(px) => Ok(Self::Pixels(px)),
             RawDimension::Str(s) => {
                 let trimmed = s.trim();
+                // Exactly the grammar of the JSON Schema below: `u32::from_str` and
+                // `f64::from_str` alone would also accept signs, exponents and `.5`.
                 trimmed.strip_suffix('%').map_or_else(
                     || {
-                        trimmed
-                            .parse::<u32>()
-                            .map(Dimension::Pixels)
-                            .map_err(D::Error::custom)
+                        if is_decimal(trimmed, false) {
+                            trimmed
+                                .parse::<u32>()
+                                .map(Dimension::Pixels)
+                                .map_err(D::Error::custom)
+                        } else {
+                            Err(D::Error::custom(format!(
+                                "expected a pixel count or a percentage such as \"25%\", got \"{trimmed}\""
+                            )))
+                        }
                     },
                     |pct| {
-                        pct.trim()
-                            .parse::<f64>()
+                        let pct = pct.trim_end();
+                        if !is_decimal(pct, true) {
+                            return Err(D::Error::custom(format!(
+                                "expected a percentage such as \"25%\", got \"{trimmed}\""
+                            )));
+                        }
+                        pct.parse::<f64>()
                             .map_err(D::Error::custom)
                             .and_then(|val| {
                                 if (0.0..=100.0).contains(&val) {
@@ -62,6 +76,32 @@ impl<'de> Deserialize<'de> for Dimension {
                     },
                 )
             }
+        })
+    }
+}
+
+/// Whether `s` is ASCII digits, optionally (`fraction`) followed by `.` and more digits.
+fn is_decimal(s: &str, fraction: bool) -> bool {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    match s.split_once('.') {
+        Some((int, frac)) => fraction && digits(int) && digits(frac),
+        None => digits(s),
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Dimension {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Dimension".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A pixel count, or a percentage of the image size such as \"25%\".",
+            "oneOf": [
+                { "type": "integer", "minimum": 0, "maximum": u32::MAX },
+                { "type": "string", "pattern": "^\\s*(\\d+|\\d+(\\.\\d+)?\\s*%)\\s*$" }
+            ]
         })
     }
 }
@@ -80,27 +120,29 @@ impl Serialize for Dimension {
 
 /// Configuration parameters for the diff engine.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DiffConfig {
     /// Pixel comparison threshold [0.0, 1.0].
     #[serde(default = "default_threshold", deserialize_with = "deserialize_ratio")]
+    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
     pub threshold: f64,
     /// Whether to apply anti-aliasing detection.
     #[serde(default = "default_anti_alias")]
     pub anti_alias: bool,
-    /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode, see
-    /// [`crate::ssim`]).
+    /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).
     #[serde(
         default = "default_min_similarity",
         deserialize_with = "deserialize_ratio"
     )]
+    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
     pub min_similarity: f64,
-    /// Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode, see
-    /// [`crate::ssim`]).
+    /// Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode).
     #[serde(
         default = "default_color_tolerance",
         deserialize_with = "deserialize_color_tolerance"
     )]
+    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0)))]
     pub color_tolerance: f64,
 }
 
@@ -147,6 +189,7 @@ impl Default for DiffConfig {
 
 /// A bounding zone to ignore.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Zone {
     /// The X coordinate of the top-left corner.
@@ -221,6 +264,21 @@ mod tests {
         // Test invalid float inside percentage
         let d_invalid_pct_float: Result<Dimension, _> = serde_yaml::from_str("\"abc%\"");
         assert!(d_invalid_pct_float.is_err());
+    }
+
+    #[test]
+    fn test_dimension_strings_follow_the_schema_grammar() {
+        let parse = |yaml: &str| serde_yaml::from_str::<Dimension>(yaml);
+        assert_eq!(parse("\" 12.5 % \"").unwrap(), Dimension::Percent(12.5));
+        assert_eq!(parse("\"0%\"").unwrap(), Dimension::Percent(0.0));
+        assert_eq!(parse("\" 7 \"").unwrap(), Dimension::Pixels(7));
+        // `f64`/`u32` parsing alone would accept all of these.
+        for bad in [
+            "+5%", "1e1%", ".5%", "5.%", "inf%", "NaN%", "+150", "1.5", "12 5",
+        ] {
+            let err = parse(&format!("\"{bad}\"")).unwrap_err().to_string();
+            assert!(err.contains("expected a"), "{bad}: {err}");
+        }
     }
 
     #[test]

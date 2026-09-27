@@ -184,15 +184,8 @@ pub(crate) fn process_diff_case(
         &case.rule.diff,
     );
 
-    let raw_file_name = case
-        .image
-        .relative_path
-        .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("screenshot.png"))
-        .to_string_lossy();
-
     match comp_result {
-        ComparisonResult::Match => TestImageResult::Success {
+        ComparisonResult::Match { .. } => TestImageResult::Success {
             relative_path: case.image.relative_path.clone(),
         },
         ComparisonResult::TooLarge {
@@ -214,7 +207,10 @@ pub(crate) fn process_diff_case(
             baseline_path: baseline_blob_path,
             actual_path: actual_dest_path,
         },
-        ComparisonResult::Mismatch { detail, diff_image } => {
+        ComparisonResult::Mismatch {
+            measurement: detail,
+            diff_image,
+        } => {
             let case_diff_dir = diffs_dir.join(&test_name);
             if let Err(e) = std::fs::create_dir_all(&case_diff_dir) {
                 return TestImageResult::IoError {
@@ -222,8 +218,10 @@ pub(crate) fn process_diff_case(
                     error: format!("Failed to create directory for diff: {e}"),
                 };
             }
+            // Pushed as `OsStr`, so non-UTF-8 file names survive unchanged. Scanned paths always
+            // end in a file name, so the default is never used.
             let mut diff_file_name = std::ffi::OsString::from("diff_");
-            diff_file_name.push(&*raw_file_name);
+            diff_file_name.push(case.image.relative_path.file_name().unwrap_or_default());
             let diff_file_path = case_diff_dir.join(&diff_file_name);
 
             let mut cursor = std::io::Cursor::new(Vec::new());

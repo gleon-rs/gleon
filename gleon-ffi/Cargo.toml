@@ -16,6 +16,7 @@ workspace = true
 
 [dependencies]
 gleon-engine = { path = "../gleon-engine" }
+gleon-model = { path = "../gleon-model" }
 image = { workspace = true }
 rayon = { workspace = true }
 safer-ffi = { workspace = true }

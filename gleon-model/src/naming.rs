@@ -1,8 +1,5 @@
-//! Test name normalization and validation shared by the scanner and manifest layers.
-//!
-//! Both `scanner` and `manifest` need to agree on what a valid, normalized test name looks
-//! like. Keeping that logic here (rather than in either module) avoids a circular dependency
-//! between the two.
+//! Test name normalization and validation shared by the CLI scanner and manifest layers and by
+//! other integrations (a golden's case report is named after its test name).
 
 use std::borrow::Cow;
 

@@ -1,6 +1,6 @@
 //! HTML report generation.
 
-use gleon_engine::MismatchDetail;
+use gleon_engine::Measurement;
 use minijinja::context;
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 
@@ -24,7 +24,7 @@ impl Serialize for FormattedDimensions {
     }
 }
 
-struct HtmlMismatchMessageView<'a>(&'a MismatchDetail);
+struct HtmlMismatchMessageView<'a>(&'a Measurement);
 
 impl std::fmt::Display for HtmlMismatchMessageView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -33,12 +33,12 @@ impl std::fmt::Display for HtmlMismatchMessageView<'_> {
 }
 
 /// The `error` cell of a failure row: either a plain borrowed message, a static literal, or a
-/// [`MismatchDetail`] rendered lazily — kept as an enum (instead of an eagerly-formatted
+/// [`Measurement`] rendered lazily — kept as an enum (instead of an eagerly-formatted
 /// `String`) so the common non-`Mismatch` cases stay allocation-free.
 enum HtmlFailureError<'a> {
     Str(&'a str),
     Static(&'static str),
-    Mismatch(&'a MismatchDetail),
+    Mismatch(&'a Measurement),
 }
 
 impl Serialize for HtmlFailureError<'_> {
@@ -171,8 +171,8 @@ fn html_failure_dto<'a>(
             actual_path,
         } => {
             let diff_count = match detail {
-                MismatchDetail::Pixel { diff_count } => Some(*diff_count),
-                MismatchDetail::Ssim { .. } => None,
+                Measurement::Pixel { diff_count } => Some(*diff_count),
+                Measurement::Ssim { .. } => None,
             };
             HtmlFailureDto {
                 actual_path: Some(with_report_dir(actual_path)),
@@ -299,7 +299,7 @@ mod tests {
             name: "billing".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("form.png"),
-                detail: MismatchDetail::Pixel { diff_count: 5 },
+                detail: Measurement::Pixel { diff_count: 5 },
                 diff_path: PathBuf::from(".gleon/diffs/diff.png"),
                 baseline_path: PathBuf::from("baseline.png"),
                 actual_path: PathBuf::from(".gleon/actual/actual.png"),
@@ -322,7 +322,7 @@ mod tests {
             name: "billing".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("form.png"),
-                detail: MismatchDetail::Pixel { diff_count: 5 },
+                detail: Measurement::Pixel { diff_count: 5 },
                 diff_path: std::env::current_dir().unwrap().join(".gleon/diffs/d.png"),
                 baseline_path: PathBuf::from("baseline.png"),
                 actual_path: std::env::current_dir().unwrap().join(".gleon/actual/a.png"),
@@ -397,11 +397,15 @@ mod tests {
                     actual_path: PathBuf::from("actual.png"),
                     baseline_path: PathBuf::from("baseline.png"),
                     diff_path: PathBuf::from("diff.png"),
-                    detail: MismatchDetail::Ssim {
-                        ssim_score: 0.5,
+                    detail: Measurement::Ssim {
+                        mean_ssim: 0.5,
                         min_ssim: 0.5,
                         max_excess: 0.0,
-                        region: None,
+                        peak_excess: 0.0,
+                        changed_pixels: 1,
+                        changed_region: None,
+                        failing_pixels: 1,
+                        failing_region: None,
                     },
                 },
             },

@@ -74,6 +74,7 @@ pub struct SsimPolicy {
 
 /// An axis-aligned pixel rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Region {
     /// Left edge.
     pub x: u32,
@@ -92,9 +93,22 @@ pub struct SsimAnalysis {
     pub mean_ssim: f64,
     /// Lowest local SSIM (the structural gate's value).
     pub min_ssim: f64,
-    /// Largest deviation beyond the local envelope among failing regions, in 8-bit channel units
-    /// (0 when the envelope gate passed).
+    /// Largest deviation beyond the local envelope *and* `color_tolerance` among failing regions,
+    /// in 8-bit channel units (0 when the envelope gate passed): how far the failure overshoots.
     pub max_excess: f64,
+    /// Largest deviation beyond the local envelope over *all* changed pixels, in 8-bit channel
+    /// units, with `color_tolerance` **not** subtracted (the contrast allowance is), clamped at 0.
+    ///
+    /// Comparable with `color_tolerance` directly: `peak_excess <= color_tolerance` means every
+    /// changed pixel is explained, so `color_tolerance - peak_excess` is the color headroom of a
+    /// passing comparison. A larger value does not always fail, because isolated unexplained
+    /// regions below [`MIN_REGION_PIXELS`] with a weak excess are tolerated. 0 for identical
+    /// images or when every changed pixel lies inside its neighbors' envelope.
+    pub peak_excess: f64,
+    /// Number of full-resolution pixels whose RGBA bytes differ.
+    pub changed_pixels: u64,
+    /// Bounding box of all changed pixels, tolerated or not (`None` for identical images).
+    pub changed_region: Option<Region>,
     /// Number of full-resolution pixels failing the policy.
     pub failing_pixels: u64,
     /// Bounding box of the changed pixels responsible for the failure.
@@ -207,11 +221,12 @@ impl Img<'_> {
     }
 }
 
-/// How far `value` lies outside `other`'s 3x3 envelope at `(x, y)`, minus the allowance.
+/// How far `value` lies outside `other`'s 3x3 envelope at `(x, y)`, minus the contrast allowance
+/// (the color tolerance is applied by the caller, so the value is comparable with it directly).
 ///
 /// Neighbors are premultiplied on the fly: precomputing premultiplied planes was measured slower
 /// on full-screen changes (memory traffic outweighs the arithmetic).
-fn envelope_excess(value: [f32; 4], other: Img<'_>, x: usize, y: usize, tolerance: f32) -> f32 {
+fn envelope_excess(value: [f32; 4], other: Img<'_>, x: usize, y: usize) -> f32 {
     let mut lo = [f32::MAX; 4];
     let mut hi = [f32::MIN; 4];
     for ny in y.saturating_sub(1)..=(y + 1).min(other.height - 1) {
@@ -224,45 +239,59 @@ fn envelope_excess(value: [f32; 4], other: Img<'_>, x: usize, y: usize, toleranc
         }
     }
     let contrast = (0..4).map(|c| hi[c] - lo[c]).fold(0.0f32, f32::max);
-    let allowance = CONTRAST_ALLOWANCE.mul_add(contrast, tolerance);
+    let allowance = CONTRAST_ALLOWANCE * contrast;
     (0..4)
         .map(|c| (lo[c] - value[c]).max(value[c] - hi[c]) - allowance)
         .fold(f32::MIN, f32::max)
 }
 
-/// Symmetric envelope excess at `(x, y)`; positive means unexplained.
-fn pixel_excess(base: Img<'_>, cand: Img<'_>, x: usize, y: usize, tolerance: f32) -> f32 {
-    envelope_excess(cand.premultiplied(x, y), base, x, y, tolerance).max(envelope_excess(
+/// Symmetric envelope excess at `(x, y)`; above the color tolerance means unexplained.
+fn pixel_excess(base: Img<'_>, cand: Img<'_>, x: usize, y: usize) -> f32 {
+    envelope_excess(cand.premultiplied(x, y), base, x, y).max(envelope_excess(
         base.premultiplied(x, y),
         cand,
         x,
         y,
-        tolerance,
     ))
 }
 
-/// Unexplained pixels over `changed`, grouped into regions; returns the failing mask (over
-/// `changed`) and the largest excess among *failing* regions (tolerated regions don't count, so
-/// the reported excess always explains an envelope failure).
-fn envelope_gate(base: Img<'_>, cand: Img<'_>, changed: Rect, tolerance: f32) -> (Vec<bool>, f32) {
+/// Envelope gate result over the changed rect.
+struct EnvelopeGate {
+    /// Failing mask over the changed rect.
+    failing: Vec<bool>,
+    /// Largest excess beyond the tolerance among *failing* regions; tolerated regions don't
+    /// count, so it always explains an envelope failure.
+    max_excess: f32,
+    /// Largest excess over all changed pixels, tolerance not subtracted (see
+    /// [`SsimAnalysis::peak_excess`]); `f32::MIN` when no pixel differs.
+    peak_excess: f32,
+}
+
+/// Unexplained pixels over `changed`, grouped into regions.
+fn envelope_gate(base: Img<'_>, cand: Img<'_>, changed: Rect, tolerance: f32) -> EnvelopeGate {
     let cw = changed.width();
+    // Excess of every changed pixel (`f32::MIN` for unchanged ones), and its peak in the same pass.
     let mut excess = vec![f32::MIN; cw * changed.height()];
-    excess
+    let peak_excess = excess
         .par_chunks_mut(cw)
         .enumerate()
-        .for_each(|(row, out)| {
+        .map(|(row, out)| {
             let y = changed.y0 + row;
+            let mut peak = f32::MIN;
             for (col, e) in out.iter_mut().enumerate() {
                 let x = changed.x0 + col;
                 if base.rgba(x, y) != cand.rgba(x, y) {
-                    *e = pixel_excess(base, cand, x, y, tolerance);
+                    *e = pixel_excess(base, cand, x, y);
+                    peak = peak.max(*e);
                 }
             }
-        });
+            peak
+        })
+        .reduce(|| f32::MIN, f32::max);
     // 8-connected components of unexplained pixels. Indices are `u32` (the analysis budget is far
     // below 2^32 pixels) and no per-component list is kept: a failing component is re-flooded to
     // mark it, so the workspace stays at a few bytes per pixel.
-    let (ch, unexplained) = (changed.height(), |i: usize| excess[i] > 0.0);
+    let (ch, unexplained) = (changed.height(), |i: usize| excess[i] > tolerance);
     let neighbors = |i: u32| {
         let i = i as usize;
         let (cx, cy) = (i % cw, i / cw);
@@ -292,8 +321,8 @@ fn envelope_gate(base: Img<'_>, cand: Img<'_>, changed: Rect, tolerance: f32) ->
                 }
             }
         }
-        if size >= MIN_REGION_PIXELS || strongest >= STRONG_EXCESS {
-            max_excess = max_excess.max(strongest);
+        if size >= MIN_REGION_PIXELS || strongest - tolerance >= STRONG_EXCESS {
+            max_excess = max_excess.max(strongest - tolerance);
             failing[start] = true;
             stack.push(to_u32(start));
             while let Some(i) = stack.pop() {
@@ -306,7 +335,11 @@ fn envelope_gate(base: Img<'_>, cand: Img<'_>, changed: Rect, tolerance: f32) ->
             }
         }
     }
-    (failing, max_excess)
+    EnvelopeGate {
+        failing,
+        max_excess,
+        peak_excess,
+    }
 }
 
 /// Luma (0–255) of a straight-alpha pixel composited over white.
@@ -463,12 +496,13 @@ fn structural_gate(
     (eval, fails, sum, min)
 }
 
-/// Bounding box of pixels whose RGBA bytes differ, or `None` if the images are identical.
+/// Bounding box and count of pixels whose RGBA bytes differ, or `None` if the images are identical.
 ///
 /// A plain scan: the coordinate division runs only for differing pixels, and a row-wise `memcmp`
 /// variant measured no faster (the cost of a failing comparison is dominated by the diff image).
-fn diff_bbox(base: Img<'_>, cand: Img<'_>) -> Option<Rect> {
+fn diff_bbox(base: Img<'_>, cand: Img<'_>) -> Option<(Rect, u64)> {
     let mut bbox = BBox::default();
+    let mut count = 0u64;
     for (i, (b, a)) in base
         .raw
         .as_chunks::<4>()
@@ -479,9 +513,10 @@ fn diff_bbox(base: Img<'_>, cand: Img<'_>) -> Option<Rect> {
     {
         if b != a {
             bbox.add(i % base.width, i / base.width);
+            count += 1;
         }
     }
-    bbox.0
+    bbox.0.map(|rect| (rect, count))
 }
 
 /// Compares two images of identical dimensions under the decision policy.
@@ -512,11 +547,14 @@ pub fn analyze(baseline: &RgbaImage, actual: &RgbaImage, policy: &SsimPolicy) ->
         height,
     };
 
-    let Some(changed) = diff_bbox(base, cand) else {
+    let Some((changed, changed_pixels)) = diff_bbox(base, cand) else {
         return SsimAnalysis {
             mean_ssim: 1.0,
             min_ssim: 1.0,
             max_excess: 0.0,
+            peak_excess: 0.0,
+            changed_pixels: 0,
+            changed_region: None,
             failing_pixels: 0,
             failing_region: None,
             diff_image: None,
@@ -528,7 +566,11 @@ pub fn analyze(baseline: &RgbaImage, actual: &RgbaImage, policy: &SsimPolicy) ->
         reason = "the tolerance is an 8-bit channel amount; f32 precision is ample"
     )]
     let tolerance = policy.color_tolerance as f32;
-    let (envelope_fails, max_excess) = envelope_gate(base, cand, changed, tolerance);
+    let EnvelopeGate {
+        failing: envelope_fails,
+        max_excess,
+        peak_excess,
+    } = envelope_gate(base, cand, changed, tolerance);
     let (coarse_eval, coarse_fails, ssim_sum, min_ssim) =
         structural_gate(base, cand, changed, policy.min_similarity);
 
@@ -575,6 +617,9 @@ pub fn analyze(baseline: &RgbaImage, actual: &RgbaImage, policy: &SsimPolicy) ->
         mean_ssim,
         min_ssim: f64::from(min_ssim),
         max_excess: f64::from(max_excess),
+        peak_excess: f64::from(peak_excess.max(0.0)),
+        changed_pixels,
+        changed_region: BBox(Some(changed)).to_region(),
         failing_pixels,
         failing_region: if changed_failing.0.is_some() {
             changed_failing.to_region()
@@ -643,7 +688,67 @@ mod tests {
         let a = analyze(&img, &img, &POLICY);
         assert!(a.passed());
         assert_eq!((a.mean_ssim, a.min_ssim, a.max_excess), (1.0, 1.0, 0.0));
+        assert_eq!((a.peak_excess, a.changed_pixels), (0.0, 0));
+        assert_eq!((a.changed_region, a.failing_region), (None, None));
         assert!(a.diff_image.is_none());
+    }
+
+    #[test]
+    fn test_peak_excess_is_measured_before_subtracting_the_tolerance() {
+        // A uniform +2 blue drift: on a flat area each pixel lies 2 units outside its neighbors'
+        // envelope and there is no contrast allowance, so the peak is exactly 2 for any tolerance.
+        let base = solid(64, 64, [63, 81, 181, 255]);
+        let cand = solid(64, 64, [63, 81, 183, 255]);
+        let whole = Some(Region {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        });
+
+        let tolerant = analyze(&base, &cand, &POLICY);
+        assert!(tolerant.passed(), "{tolerant:?}");
+        assert_eq!(tolerant.peak_excess, 2.0);
+        assert_eq!(tolerant.max_excess, 0.0, "nothing failed");
+        assert_eq!(tolerant.changed_pixels, 64 * 64);
+        assert_eq!(tolerant.changed_region, whole);
+
+        // Without tolerance the same drift fails; the peak is unchanged and the failing excess is
+        // the peak minus the (zero) tolerance.
+        let strict = analyze(
+            &base,
+            &cand,
+            &SsimPolicy {
+                color_tolerance: 0.0,
+                ..POLICY
+            },
+        );
+        assert!(!strict.passed(), "{strict:?}");
+        assert_eq!(strict.peak_excess, 2.0);
+        assert_eq!(strict.max_excess, 2.0);
+        assert_eq!(strict.changed_region, whole);
+    }
+
+    #[test]
+    fn test_changes_inside_the_envelope_have_zero_peak_excess() {
+        // A one-pixel step moved by one pixel stays inside the 3x3 envelope of the other image.
+        let base = RgbaImage::from_fn(32, 32, |x, _| {
+            if x < 16 {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        let cand = RgbaImage::from_fn(32, 32, |x, _| {
+            if x < 17 {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        let a = analyze(&base, &cand, &POLICY);
+        assert_eq!(a.peak_excess, 0.0, "{a:?}");
+        assert_eq!(a.changed_pixels, 32);
     }
 
     #[test]

@@ -17,11 +17,12 @@ use std::{
 };
 
 use gleon_core::{
+    dashboard::{RunHistoryEntry, TestHistoryStatus},
     report::ReportGenerator,
     results::{TestCaseResult, TestImageResult},
 };
 use gleon_engine::{
-    ComparisonResult, MismatchDetail, compare_images,
+    ComparisonResult, Measurement, compare_images,
     config::{DiffConfig, Mode},
 };
 
@@ -54,7 +55,10 @@ fn test_report_generation_with_real_images_and_durability() {
     };
     let comp_pixel_res = compare_images(&baseline_img, &actual_img, Mode::Pixel, &diff_config);
     let (pixel_detail, pixel_diff_img) = match comp_pixel_res {
-        ComparisonResult::Mismatch { detail, diff_image } => (detail, diff_image),
+        ComparisonResult::Mismatch {
+            measurement,
+            diff_image,
+        } => (measurement, diff_image),
         other => panic!("Expected ComparisonResult::Mismatch, got {other:?}"),
     };
 
@@ -65,7 +69,10 @@ fn test_report_generation_with_real_images_and_durability() {
     };
     let comp_ssim_res = compare_images(&baseline_img, &actual_img, Mode::Ssim, &ssim_config);
     let (ssim_detail, ssim_diff_img) = match comp_ssim_res {
-        ComparisonResult::Mismatch { detail, diff_image } => (detail, diff_image),
+        ComparisonResult::Mismatch {
+            measurement,
+            diff_image,
+        } => (measurement, diff_image),
         other => panic!("Expected ComparisonResult::Mismatch, got {other:?}"),
     };
 
@@ -111,7 +118,7 @@ fn test_report_generation_with_real_images_and_durability() {
         name: "billing_dashboard_3".to_string(),
         result: TestImageResult::Mismatch {
             relative_path: PathBuf::from("security_alert_banner.png"),
-            detail: MismatchDetail::Pixel { diff_count: 14205 },
+            detail: Measurement::Pixel { diff_count: 14205 },
             diff_path: diff_pixel_path,
             baseline_path: baseline_path.clone(),
             actual_path: actual_path.clone(),
@@ -222,4 +229,71 @@ fn test_report_generation_with_real_images_and_durability() {
         fs::read_to_string(&fallback_demo_path).expect("Failed to read fallback_demo.html fixture");
     assert!(fallback_content.contains("document.addEventListener('error'"));
     assert!(!fallback_content.contains("onerror="));
+}
+
+/// `gleon diff` writes `gleon-report.json`; `gleon report`, the dashboard and `history.json` read
+/// it back. This real report pins the on-disk shape of both measurement variants (the SSIM one
+/// carries the match-time metrics) and what the history keeps of them.
+#[test]
+fn test_report_json_with_measurements_round_trips_into_history() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("report_measurements.json");
+    let raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&fixture).unwrap()).unwrap();
+    let cases: Vec<TestCaseResult> = serde_json::from_value(raw.clone()).unwrap();
+
+    // Byte-for-byte shape: nothing renamed, dropped or added on the way through the types.
+    assert_eq!(serde_json::to_value(&cases).unwrap(), raw);
+    let TestImageResult::Mismatch { detail, .. } = &cases[2].result else {
+        panic!("expected the SSIM mismatch, got {:?}", cases[2].result);
+    };
+    assert_eq!(
+        *detail,
+        Measurement::Ssim {
+            mean_ssim: 0.999,
+            min_ssim: 0.9955,
+            max_excess: 146.0,
+            peak_excess: 154.0,
+            changed_pixels: 412,
+            changed_region: Some(gleon_engine::Region {
+                x: 30,
+                y: 17,
+                width: 30,
+                height: 19,
+            }),
+            failing_pixels: 390,
+            failing_region: Some(gleon_engine::Region {
+                x: 32,
+                y: 19,
+                width: 26,
+                height: 15,
+            }),
+        }
+    );
+
+    let run = RunHistoryEntry::from_test_results(
+        "run-1",
+        chrono::DateTime::UNIX_EPOCH,
+        "main",
+        "macos-aarch64",
+        None,
+        &cases,
+    );
+    assert_eq!((run.summary.total, run.summary.failed), (3, 2));
+    let ssim = &run.tests[2];
+    assert_eq!(ssim.status, TestHistoryStatus::Mismatch);
+    assert_eq!(
+        ssim.error.as_deref(),
+        Some("min local SSIM 0.9955, colors exceed tolerance by 146.0 at (32, 19) 26x15px")
+    );
+    assert_eq!(ssim.diff_count, None);
+    assert_eq!(run.tests[1].diff_count, Some(128));
+    // The history entry survives its own JSON round trip (`history.json`).
+    let history_json = serde_json::to_string(&run).unwrap();
+    assert_eq!(
+        serde_json::from_str::<RunHistoryEntry>(&history_json).unwrap(),
+        run
+    );
 }

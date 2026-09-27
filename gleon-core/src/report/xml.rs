@@ -1,6 +1,6 @@
 //! `JUnit` XML report generation.
 
-use gleon_engine::MismatchDetail;
+use gleon_engine::Measurement;
 use minijinja::context;
 use serde::{
     Serialize, Serializer,
@@ -48,7 +48,7 @@ impl Serialize for XmlDimensionMismatchView {
     }
 }
 
-struct XmlMismatchMessageView<'a>(&'a MismatchDetail);
+struct XmlMismatchMessageView<'a>(&'a Measurement);
 
 impl std::fmt::Display for XmlMismatchMessageView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -240,7 +240,7 @@ mod tests {
             name: "billing".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("form.png"),
-                detail: MismatchDetail::Pixel { diff_count: 5 },
+                detail: Measurement::Pixel { diff_count: 5 },
                 diff_path: PathBuf::from("diff.png"),
                 baseline_path: PathBuf::from("baseline.png"),
                 actual_path: PathBuf::from("actual.png"),
@@ -250,11 +250,15 @@ mod tests {
             name: "billing".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("ssim_form.png"),
-                detail: MismatchDetail::Ssim {
-                    ssim_score: 0.9412,
+                detail: Measurement::Ssim {
+                    mean_ssim: 0.9412,
                     min_ssim: 0.9412,
                     max_excess: 0.0,
-                    region: None,
+                    peak_excess: 0.0,
+                    changed_pixels: 1,
+                    changed_region: None,
+                    failing_pixels: 1,
+                    failing_region: None,
                 },
                 diff_path: PathBuf::from("diff.png"),
                 baseline_path: PathBuf::from("baseline.png"),
@@ -315,7 +319,7 @@ mod tests {
                     actual_path: PathBuf::from("actual.png"),
                     baseline_path: PathBuf::from("baseline.png"),
                     diff_path: PathBuf::from("diff.png"),
-                    detail: MismatchDetail::Pixel { diff_count: 5 },
+                    detail: Measurement::Pixel { diff_count: 5 },
                 },
             },
             TestCaseResult {
