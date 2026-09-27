@@ -28,14 +28,14 @@ gleon init
 
 This creates the `.gleon/` workspace scaffold:
 
-- `gleon.yaml`: Workspace configuration file.
+- `.gleon/gleon.yaml`: Workspace configuration file (always inside `.gleon/`, not the repository root).
 - `.gleon/.gitignore`: Automatically ignores large binary blobs (`blobs/`) and run outputs (`runs/`).
 - `.gleon/.env.template`: Storage credentials template.
 - `.gleon/manifests/`: Directory where lightweight, deterministic JSON baseline manifests will be stored in Git.
 
-### 3. Configure `gleon.yaml`
+### 3. Configure `.gleon/gleon.yaml`
 
-Edit `gleon.yaml` to point to where your test framework outputs golden screenshots. For example:
+Edit `.gleon/gleon.yaml` to point to where your test framework outputs golden screenshots. For example:
 
 ```yaml
 required_version: ">=0.1.0"
@@ -66,7 +66,7 @@ gleon stage
 Commit these manifest files to Git:
 
 ```bash
-git add gleon.yaml .gleon/manifests/
+git add .gleon/gleon.yaml .gleon/.gitignore .gleon/manifests/
 git commit -m "chore: record initial visual regression baselines"
 ```
 
@@ -91,7 +91,7 @@ gleon report html --out report.html
 
 | Command                    | Description                                                                                 | Example                                                                         |
 | :------------------------- | :------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------ |
-| `gleon init`               | Scaffolds the `.gleon/` directory tree and default `gleon.yaml`.                            | `gleon init`                                                                    |
+| `gleon init`               | Scaffolds the `.gleon/` directory tree and default `.gleon/gleon.yaml`.                     | `gleon init`                                                                    |
 | `gleon stage [PATHS...]`   | Records matching screenshots as official baseline manifests for the current platform.       | `gleon stage`<br>`gleon stage test/goldens/login.png`                           |
 | `gleon status`             | Reports the status (`Clean`, `Added`, `Modified`, `Deleted`) of all discovered screenshots. | `gleon status`<br>`gleon status --json`                                         |
 | `gleon diff`               | Runs visual comparison between actual screenshots and committed baselines.                  | `gleon diff`<br>`gleon diff --target-branch main`                               |
@@ -107,7 +107,7 @@ gleon report html --out report.html
 
 All commands support the following global options:
 
-- `--config <PATH>`: Specify an explicit path to `gleon.yaml`.
+- `--config <PATH>`: Specify an explicit path to the configuration file (default: `.gleon/gleon.yaml`, searched upwards from the current directory).
 - `--target-branch <BRANCH>`: Target branch for baseline comparison (defaults to `main`, or `GLEON_TARGET_BRANCH`).
 - `--platform <STRING>`: Override platform context with an opaque string (e.g. `--platform my-custom-env`).
 - `--os <OS>` / `--arch <ARCH>` / `--renderer <RENDERER>`: Override individual platform context dimensions.
@@ -117,15 +117,17 @@ All commands support the following global options:
 
 ---
 
-## ⚙️ Configuration Reference (`gleon.yaml`)
+## ⚙️ Configuration Reference (`.gleon/gleon.yaml`)
 
-Below is a complete, annotated `gleon.yaml` reference:
+Below is a complete, annotated `.gleon/gleon.yaml` reference. Unknown keys are rejected. A JSON Schema is committed at [`gleon-model/schema/config.v1.json`](../gleon-model/schema/config.v1.json).
 
 ```yaml
 # Enforce minimum CLI version across the team and CI
 required_version: ">=0.1.0"
 
-# Rules for discovering and comparing screenshots
+# Rules for discovering and comparing screenshots. A file is excluded if it matches `exclude`;
+# otherwise the FIRST rule whose `include` matches applies (paths are matched case-insensitively,
+# relative to the workspace root, with `/` separators).
 screenshots:
   - include: "test/**/goldens/**/*.png" # Single pattern or list of glob patterns
     mode: pixel # 'pixel' (exact per-pixel compare) or 'ssim' (tolerates rendering noise, see below)
@@ -155,12 +157,19 @@ fallback_platform:
   os: macos
   arch: aarch64
 
-# Optional: Remote blob storage (AWS S3, Cloudflare R2, Google Cloud Storage)
-storage:
-  url: "s3://my-visual-baselines-bucket/blobs"
-  options:
-    region: "us-east-1"
+# Optional: per-golden comparison metrics, recorded by integrations such as the gleon Flutter
+# package into `.gleon/runs/latest/cases/<test name>.json` (git-ignored with `runs/`).
+# The GLEON_METRICS environment variable (1/true or 0/false) overrides `enabled`.
+metrics:
+  enabled: false # default: false
+  console: true # also print one line per golden (default: true)
 ```
+
+Remote blob storage (AWS S3, Cloudflare R2, Google Cloud Storage) is configured through environment variables, not in `gleon.yaml`, so credentials never end up in Git: copy `.gleon/.env.template` to `.gleon/.env.local` and set `GLEON_STORAGE_URL` (e.g. `s3://my-visual-baselines-bucket/blobs`) plus the provider credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, ...).
+
+### Case reports (`metrics`)
+
+With metrics enabled, every comparison writes a case report (schema: [`gleon-model/schema/case.v1.json`](../gleon-model/schema/case.v1.json)) with the golden and candidate SHA-256, the effective tolerance and masks, the outcome and, for pixel comparisons, the metrics including their headroom to the thresholds (for example `min_ssim - min_similarity` and `color_tolerance - peak_excess` in SSIM mode). Passing goldens report their margin too, so thresholds can be tuned from measurements instead of guesses.
 
 ---
 
@@ -310,7 +319,7 @@ Different operating systems (macOS vs Ubuntu CI) render fonts and anti-aliasing 
 
 Instead, use **Sparse Multi-Platform Baselines with Fallback**:
 
-1. Configure `fallback_platform` in `gleon.yaml` (e.g. `os: macos`, `arch: aarch64`).
+1. Configure `fallback_platform` in `.gleon/gleon.yaml` (e.g. `os: macos`, `arch: aarch64`).
 2. Tests that render identically across platforms dynamically inherit the fallback baseline in memory.
 3. Only genuine platform-specific differences generate override manifests when approved (`/gleon approve`).
 4. If an override later becomes byte-identical to the fallback, `gleon approve` automatically prunes the redundant manifest.
@@ -354,4 +363,6 @@ cargo fmt --all
 
 ## 📄 License
 
-Gleon is licensed under the [Business Source License 1.1](../LICENSE) (BUSL-1.1), converting to Apache 2.0 after 4 years. Free for non-commercial use, open-source projects, and evaluation.
+The crates shared with other integrations — `gleon-engine` (comparison engine), `gleon-model` (configuration, naming, platform keys and case reports) and `gleon-ffi` (C ABI for the Flutter package) — are licensed `MIT OR Apache-2.0`.
+
+The rest of Gleon is licensed under the [Business Source License 1.1](../LICENSE) (BUSL-1.1), converting to Apache 2.0 after 4 years. Free for non-commercial use, open-source projects, and evaluation.

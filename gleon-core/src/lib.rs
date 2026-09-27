@@ -4,7 +4,9 @@
 // the library reports through return values and `tracing`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-pub mod config;
+// The config and naming modules moved to the permissive `gleon-model` crate (shared with the
+// Flutter package); re-exported so `gleon_core::config` / `crate::naming` paths stay valid.
+pub use gleon_model::{config, naming};
 /// Resolves the effective run context (platform, branch, renderer) from CLI flags, config, and environment.
 pub mod context;
 /// Historical test results logging and static dashboard compiler.
@@ -15,8 +17,6 @@ pub mod io;
 /// License validation and enforcement for gated features.
 pub mod license;
 pub mod manifest;
-/// Test name normalization and validation shared by the scanner and manifest layers.
-pub mod naming;
 /// High-level workspace operations (init, stage, approve, diff, push, pull, etc.) invoked by the CLI.
 pub mod ops;
 /// Canonical layout of the `.gleon` workspace directory.
@@ -31,5 +31,5 @@ pub mod scanner;
 /// Remote storage integration and baseline blob synchronization.
 pub mod storage;
 pub mod ui;
-/// Shared directory-traversal and glob-set construction helpers.
+/// Shared directory-traversal helpers.
 pub mod walk;

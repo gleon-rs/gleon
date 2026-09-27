@@ -17,38 +17,67 @@ pub use ssim::{Region, SsimAnalysis, SsimPolicy};
 
 use crate::config::{DiffConfig, Mode};
 
-/// Detailed breakdown of a mismatch between baseline and actual images.
+/// What a comparison measured, reported for matches and mismatches alike, so callers can see how
+/// much headroom a passing comparison had.
+///
+/// The derived serde form (externally tagged, `"Pixel"`/`"Ssim"`) is the dialect of the CLI
+/// `gleon-report.json`; integrations report `gleon_model::case::Metrics` instead. See
+/// `TODO(json-dialects)` on `gleon_core::results::TestImageResult`.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum MismatchDetail {
-    /// Pixel difference count.
+pub enum Measurement {
+    /// Pixel (and exact) mode: the differing pixel count.
     Pixel {
-        /// Number of mismatched pixels.
+        /// Number of pixels whose RGBA bytes differ.
         diff_count: u64,
     },
-    /// Tolerant (SSIM) policy failure; see [`ssim`] for the decision policy.
+    /// Tolerant (SSIM) mode; see [`ssim`] for the decision policy and [`SsimAnalysis`] for the
+    /// meaning of each value.
     Ssim {
         /// Mean local SSIM over the whole (half-resolution) image; diagnostic only.
-        ssim_score: f64,
+        mean_ssim: f64,
         /// Lowest local SSIM, the value gated by `min_similarity`.
         min_ssim: f64,
-        /// Largest deviation beyond the local envelope (8-bit channel units), gated by
-        /// `color_tolerance`.
+        /// Largest deviation beyond `color_tolerance` among failing envelope regions (0 unless
+        /// the envelope gate failed).
         max_excess: f64,
+        /// Largest envelope deviation over all changed pixels, `color_tolerance` not subtracted.
+        peak_excess: f64,
+        /// Number of pixels whose RGBA bytes differ.
+        changed_pixels: u64,
+        /// Bounding box of the changed pixels.
+        changed_region: Option<Region>,
+        /// Number of pixels failing the policy.
+        failing_pixels: u64,
         /// Bounding box of the changed pixels that failed the policy.
-        region: Option<Region>,
+        failing_region: Option<Region>,
     },
+}
+
+impl From<&SsimAnalysis> for Measurement {
+    fn from(analysis: &SsimAnalysis) -> Self {
+        Self::Ssim {
+            mean_ssim: analysis.mean_ssim,
+            min_ssim: analysis.min_ssim,
+            max_excess: analysis.max_excess,
+            peak_excess: analysis.peak_excess,
+            changed_pixels: analysis.changed_pixels,
+            changed_region: analysis.changed_region,
+            failing_pixels: analysis.failing_pixels,
+            failing_region: analysis.failing_region,
+        }
+    }
 }
 
 /// Short reason used by every report format, e.g. `"42 pixels"` or
 /// `"min local SSIM 0.9955, colors exceed tolerance by 146.0 at (32, 19) 26x15px"`.
-impl std::fmt::Display for MismatchDetail {
+impl std::fmt::Display for Measurement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             Self::Pixel { diff_count } => write!(f, "{diff_count} pixels"),
             Self::Ssim {
                 min_ssim,
                 max_excess,
-                region,
+                failing_region: region,
                 ..
             } => {
                 write!(f, "min local SSIM {min_ssim:.4}")?;
@@ -67,11 +96,14 @@ impl std::fmt::Display for MismatchDetail {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComparisonResult {
     /// The images match within the configured tolerance thresholds.
-    Match,
+    Match {
+        /// What the comparison measured (headroom to the thresholds).
+        measurement: Measurement,
+    },
     /// The images differ.
     Mismatch {
-        /// Detailed information about the mismatch.
-        detail: MismatchDetail,
+        /// What the comparison measured, including why it failed.
+        measurement: Measurement,
         /// The generated visualization diff image.
         diff_image: RgbaImage,
     },
@@ -97,7 +129,9 @@ fn execute_pixel_comparison(
 ) -> ComparisonResult {
     let total_pixels = u64::from(baseline.width()) * u64::from(baseline.height());
     if total_pixels == 0 {
-        return ComparisonResult::Match;
+        return ComparisonResult::Match {
+            measurement: Measurement::Pixel { diff_count: 0 },
+        };
     }
 
     // Count mismatched pixels first without allocating a diff image buffer, so the common
@@ -117,14 +151,15 @@ fn execute_pixel_comparison(
         mismatch_ratio <= threshold
     };
 
+    let measurement = Measurement::Pixel { diff_count };
     if is_match {
-        return ComparisonResult::Match;
+        return ComparisonResult::Match { measurement };
     }
 
     // Only generate the diff image once we know there's actually a mismatch to report.
     let (_, diff_image) = compare_pixels(baseline, actual);
     ComparisonResult::Mismatch {
-        detail: MismatchDetail::Pixel { diff_count },
+        measurement,
         diff_image,
     }
 }
@@ -165,18 +200,15 @@ pub fn compare_images(
                     color_tolerance: config.color_tolerance,
                 },
             );
-            match analysis.diff_image {
-                None => ComparisonResult::Match,
-                Some(diff_image) => ComparisonResult::Mismatch {
-                    detail: MismatchDetail::Ssim {
-                        ssim_score: analysis.mean_ssim,
-                        min_ssim: analysis.min_ssim,
-                        max_excess: analysis.max_excess,
-                        region: analysis.failing_region,
-                    },
-                    diff_image,
-                },
-            }
+            let measurement = Measurement::from(&analysis);
+            analysis
+                .diff_image
+                .map_or(ComparisonResult::Match { measurement }, |diff_image| {
+                    ComparisonResult::Mismatch {
+                        measurement,
+                        diff_image,
+                    }
+                })
         }
     }
 }
@@ -208,7 +240,9 @@ mod tests {
         // Pixel mode has no analysis workspace and keeps working at that size.
         assert_eq!(
             compare_images(&big, &big, Mode::Pixel, &DiffConfig::default()),
-            ComparisonResult::Match
+            ComparisonResult::Match {
+                measurement: Measurement::Pixel { diff_count: 0 }
+            }
         );
     }
 
@@ -217,17 +251,23 @@ mod tests {
         let empty = RgbaImage::new(0, 0);
         assert_eq!(
             compare_images(&empty, &empty, Mode::Pixel, &DiffConfig::default()),
-            ComparisonResult::Match
+            ComparisonResult::Match {
+                measurement: Measurement::Pixel { diff_count: 0 }
+            }
         );
     }
 
     #[test]
     fn test_ssim_detail_display_names_the_failing_gate_and_region() {
-        let detail = MismatchDetail::Ssim {
-            ssim_score: 0.999,
+        let detail = Measurement::Ssim {
+            mean_ssim: 0.999,
             min_ssim: 0.9955,
             max_excess: 146.0,
-            region: Some(Region {
+            peak_excess: 154.0,
+            changed_pixels: 390,
+            changed_region: None,
+            failing_pixels: 390,
+            failing_region: Some(Region {
                 x: 32,
                 y: 19,
                 width: 26,
@@ -272,8 +312,14 @@ mod tests {
             ..Default::default()
         };
 
+        // The measurement is reported on a match too.
         let result = compare_images(&img1, &img2, Mode::Pixel, &config);
-        assert_eq!(result, ComparisonResult::Match);
+        assert_eq!(
+            result,
+            ComparisonResult::Match {
+                measurement: Measurement::Pixel { diff_count: 5 }
+            }
+        );
 
         // With 2% threshold, it should mismatch
         let config2 = DiffConfig {
@@ -284,7 +330,7 @@ mod tests {
         assert!(matches!(
             result2,
             ComparisonResult::Mismatch {
-                detail: MismatchDetail::Pixel { diff_count: 5 },
+                measurement: Measurement::Pixel { diff_count: 5 },
                 ..
             }
         ));
@@ -305,7 +351,7 @@ mod tests {
         assert_eq!(
             result,
             ComparisonResult::Mismatch {
-                detail: MismatchDetail::Pixel { diff_count: 1 },
+                measurement: Measurement::Pixel { diff_count: 1 },
                 diff_image: compare_pixels(&img1, &img2).1,
             }
         );
@@ -322,16 +368,29 @@ mod tests {
             ..Default::default()
         };
 
-        // Imperceptible color drift is tolerated.
+        // Imperceptible color drift is tolerated, and the match still reports its measurement.
         let result = compare_images(&img1, &img2, Mode::Ssim, &config);
-        assert_eq!(result, ComparisonResult::Match);
+        assert!(
+            matches!(
+                result,
+                ComparisonResult::Match {
+                    measurement: Measurement::Ssim {
+                        changed_pixels: 10_000,
+                        failing_pixels: 0,
+                        failing_region: None,
+                        ..
+                    }
+                }
+            ),
+            "{result:?}"
+        );
 
         // A single saturated pixel on a flat area is a visible change and fails.
         img2.put_pixel(50, 50, Rgba([0, 255, 0, 255]));
         assert!(matches!(
             compare_images(&img1, &img2, Mode::Ssim, &config),
             ComparisonResult::Mismatch {
-                detail: MismatchDetail::Ssim { .. },
+                measurement: Measurement::Ssim { .. },
                 ..
             }
         ));
@@ -346,7 +405,7 @@ mod tests {
         assert!(matches!(
             result2,
             ComparisonResult::Mismatch {
-                detail: MismatchDetail::Ssim { .. },
+                measurement: Measurement::Ssim { .. },
                 ..
             }
         ));

@@ -64,6 +64,16 @@ reviews:
         - Watch out for `clap` argument ID shadowing between global flags and subcommand arguments.
         - When reviewing integration tests utilizing `assert_cmd` / `Command::cargo_bin`, ensure they are conditionally compiled with `#[cfg(not(miri))]` as Miri cannot execute compiled binaries.
 
+    - path: "gleon-{model,engine,ffi}/**"
+      instructions: >
+        Permissive (MIT OR Apache-2.0) crates shared with the gleon Flutter package through
+        gleon-ffi. They must not depend on BUSL crates (gleon-core, gleon). Any change to the
+        gleon-ffi JSON contract (options, report, resolve response) must bump `ABI_VERSION`.
+        Changes to `gleon-model` types must regenerate `gleon-model/schema/*.v1.json`
+        (`GLEON_UPDATE_SCHEMAS=1 cargo test -p gleon-model --test schema`); breaking case report
+        changes need a new schema version. Engine policy changes must keep
+        `gleon-engine/tests/ssim_corpus.rs` green and bump `POLICY_VERSION` when verdicts change.
+
     - path: ".github/workflows/*.yaml"
       instructions: >
         GitHub Actions CI workflows. Ensure path triggers match the source files, and dependencies/linters (rustfmt, clippy, codebook-lsp) are correctly configured.

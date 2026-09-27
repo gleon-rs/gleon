@@ -1,4 +1,5 @@
-//! Configuration and manifest models for gleon.
+//! The `.gleon/gleon.yaml` workspace configuration, shared by the gleon CLI and the gleon
+//! Flutter package (through `gleon-ffi`).
 
 use std::path::{Path, PathBuf};
 
@@ -24,10 +25,6 @@ pub enum ConfigError {
     #[error("Failed to parse YAML configuration: {0}")]
     YamlParse(#[from] serde_yaml::Error),
 
-    /// Deserialization/serialization error for JSON manifest files.
-    #[error("Failed to parse JSON manifest: {0}")]
-    JsonParse(#[from] serde_json::Error),
-
     /// gleon CLI version does not satisfy the `required_version`.
     #[error("Incompatible version. Required: {0}, Current: {1}")]
     IncompatibleVersion(String, String),
@@ -39,9 +36,20 @@ pub enum ConfigError {
     /// Configuration is semantically invalid (e.g. empty screenshots list).
     #[error("Invalid configuration: {0}")]
     Validation(String),
+
+    /// A boolean environment override (e.g. [`METRICS_ENV`]) has an unsupported value.
+    #[error("{name} must be 1, 0, true or false (got '{value}')")]
+    InvalidEnvFlag {
+        /// Name of the environment variable.
+        name: &'static str,
+        /// Its trimmed value.
+        value: String,
+    },
 }
 
 /// A compiled glob pattern for fast file matching, serialized as a simple string.
+///
+/// Matching is case-insensitive and `*` does not cross `/` (use `**` for that).
 #[derive(Debug, Clone)]
 pub struct GlobPattern {
     glob: globset::Glob,
@@ -97,6 +105,19 @@ impl<'de> Deserialize<'de> for GlobPattern {
     }
 }
 
+impl schemars::JsonSchema for GlobPattern {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "GlobPattern".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Case-insensitive glob relative to the workspace root; `*` stays within a path segment, `**` crosses segments."
+        })
+    }
+}
+
 impl Serialize for GlobPattern {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -107,10 +128,14 @@ impl Serialize for GlobPattern {
 }
 
 /// The root configuration structure for gleon.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(title = "gleon workspace configuration (.gleon/gleon.yaml)")]
 pub struct GleonConfig {
     /// The required version range of the CLI to run this configuration.
+    ///
+    /// Enforced by the CLI only; other readers (the Flutter package) just check its syntax.
+    #[schemars(with = "String")]
     pub required_version: semver::VersionReq,
     /// The platform identifier for which these rules apply (e.g. macos-aarch64).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,7 +147,75 @@ pub struct GleonConfig {
     pub screenshots: Vec<ScreenshotRule>,
     /// Globs of paths to exclude from testing.
     #[serde(default, with = "item_or_vec")]
+    #[schemars(with = "item_or_vec::OneOrMany<GlobPattern>")]
     pub exclude: Vec<GlobPattern>,
+    /// Per-golden comparison metrics recorded by integrations such as the Flutter package.
+    #[serde(default, skip_serializing_if = "MetricsConfig::is_default")]
+    pub metrics: MetricsConfig,
+}
+
+/// The `metrics:` section: opt-in per-golden comparison metrics.
+///
+/// The `GLEON_METRICS` environment variable (`1`/`true` or `0`/`false`) overrides `enabled`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsConfig {
+    /// Record a JSON case report per golden under `.gleon/runs/latest/cases/`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Print one summary line per golden while metrics are enabled.
+    #[serde(default = "default_true")]
+    pub console: bool,
+}
+
+/// Name of the environment variable that overrides [`MetricsConfig::enabled`].
+pub const METRICS_ENV: &str = "GLEON_METRICS";
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            console: default_true(),
+        }
+    }
+}
+
+impl MetricsConfig {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde passes a reference to `skip_serializing_if` functions"
+    )]
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Applies the [`METRICS_ENV`] override (`env_value` is its raw value, `None` when unset).
+    ///
+    /// An empty value counts as unset.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidEnvFlag`] for any value other than `1`, `true`, `0` or
+    /// `false` (ASCII case-insensitive, surrounding whitespace ignored).
+    pub fn effective(self, env_value: Option<&str>) -> Result<Self, ConfigError> {
+        let Some(raw) = env_value.map(str::trim).filter(|v| !v.is_empty()) else {
+            return Ok(self);
+        };
+        let enabled = if raw == "1" || raw.eq_ignore_ascii_case("true") {
+            true
+        } else if raw == "0" || raw.eq_ignore_ascii_case("false") {
+            false
+        } else {
+            return Err(ConfigError::InvalidEnvFlag {
+                name: METRICS_ENV,
+                value: raw.to_owned(),
+            });
+        };
+        Ok(Self { enabled, ..self })
+    }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// Helper module for serde to deserialize a single item or a list of items into a `Vec<T>`.
@@ -143,6 +236,16 @@ pub mod item_or_vec {
         } else {
             vec.serialize(serializer)
         }
+    }
+
+    /// JSON Schema shape of a field serialized through this module.
+    #[derive(schemars::JsonSchema)]
+    #[serde(untagged)]
+    pub enum OneOrMany<T> {
+        /// A single item.
+        One(T),
+        /// A list of items.
+        Many(Vec<T>),
     }
 
     /// Deserializes either a single item or a list of items into a `Vec<T>`.
@@ -169,11 +272,12 @@ pub mod item_or_vec {
 }
 
 /// A rule specifying how to match and process screenshots.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScreenshotRule {
     /// Glob patterns representing the files to include.
     #[serde(with = "item_or_vec")]
+    #[schemars(with = "item_or_vec::OneOrMany<GlobPattern>")]
     pub include: Vec<GlobPattern>,
     /// Diffing mode (pixel or ssim).
     #[serde(default = "default_mode")]
@@ -202,7 +306,7 @@ impl ScreenshotRule {
 }
 
 /// A mask rule specifying which regions of an image to ignore.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MaskRule {
     /// Image path pattern this mask applies to.
@@ -238,10 +342,21 @@ impl GleonConfig {
             }
             Err(error) => return Err(ConfigError::Io(error)),
         };
-        let reader = std::io::BufReader::new(file);
-        let config: Self = serde_yaml::from_reader(reader)?;
-        config.validate()?;
-        Ok(config)
+        serde_yaml::from_reader::<_, Self>(std::io::BufReader::new(file))?.validated()
+    }
+
+    /// Parses and validates a configuration from YAML text (the contents of `.gleon/gleon.yaml`).
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::YamlParse`] if `yaml` does not match the schema, or
+    /// [`ConfigError::Validation`] if the parsed configuration is semantically invalid.
+    pub fn from_yaml_str(yaml: &str) -> Result<Self, ConfigError> {
+        serde_yaml::from_str::<Self>(yaml)?.validated()
+    }
+
+    /// `self` if it passes [`Self::validate`]; the single post-parse step of every loader.
+    fn validated(self) -> Result<Self, ConfigError> {
+        self.validate().map(|()| self)
     }
 
     /// Verifies if the current CLI version satisfies the configuration's `required_version`.
@@ -340,6 +455,7 @@ impl Default for GleonConfig {
             required_version,
             platform: None,
             fallback_platform: None,
+            metrics: MetricsConfig::default(),
             screenshots: vec![ScreenshotRule {
                 #[expect(
                     clippy::expect_used,
@@ -754,6 +870,78 @@ screenshots:
 ";
         let res2: Result<GleonConfig, _> = serde_yaml::from_str(yaml_neg_sim);
         assert!(res2.is_err());
+    }
+
+    #[test]
+    fn test_metrics_section() {
+        let yaml = "
+required_version: \">=0.1.0\"
+screenshots:
+  - include: \"test.png\"
+metrics:
+  enabled: true
+";
+        let config = GleonConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(
+            config.metrics,
+            MetricsConfig {
+                enabled: true,
+                console: true
+            }
+        );
+        let typo = yaml.replace("enabled", "enable");
+        assert!(matches!(
+            GleonConfig::from_yaml_str(&typo),
+            Err(ConfigError::YamlParse(_))
+        ));
+        // The default section is omitted when serializing (the `gleon init` snapshot is unchanged).
+        assert!(
+            !serde_yaml::to_string(&GleonConfig::default())
+                .unwrap()
+                .contains("metrics")
+        );
+    }
+
+    #[test]
+    fn test_metrics_env_override() {
+        let yaml_off = MetricsConfig::default();
+        let on = MetricsConfig {
+            enabled: true,
+            console: false,
+        };
+        assert_eq!(yaml_off.effective(None).unwrap(), yaml_off);
+        assert_eq!(yaml_off.effective(Some("  ")).unwrap(), yaml_off);
+        assert!(yaml_off.effective(Some("1")).unwrap().enabled);
+        assert!(yaml_off.effective(Some("TRUE")).unwrap().enabled);
+        assert_eq!(
+            on.effective(Some("0")).unwrap(),
+            MetricsConfig {
+                enabled: false,
+                console: false
+            }
+        );
+        assert!(!on.effective(Some("false")).unwrap().enabled);
+        let err = on.effective(Some(" yes ")).unwrap_err();
+        assert!(matches!(
+            &err,
+            ConfigError::InvalidEnvFlag { name: "GLEON_METRICS", value } if value == "yes"
+        ));
+        assert_eq!(
+            err.to_string(),
+            "GLEON_METRICS must be 1, 0, true or false (got 'yes')"
+        );
+    }
+
+    #[test]
+    fn test_from_yaml_str_validates() {
+        assert!(matches!(
+            GleonConfig::from_yaml_str("required_version: \">=0.1.0\"\nscreenshots: []"),
+            Err(ConfigError::Validation(_))
+        ));
+        assert!(matches!(
+            GleonConfig::from_yaml_str("required_version: [1]"),
+            Err(ConfigError::YamlParse(_))
+        ));
     }
 
     #[test]

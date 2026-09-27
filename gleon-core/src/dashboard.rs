@@ -184,10 +184,10 @@ impl RunHistoryEntry {
                 let (status, error, diff_count) = match &tc.result {
                     TestImageResult::Success { .. } => (TestHistoryStatus::Success, None, None),
                     TestImageResult::Mismatch { detail, .. } => match detail {
-                        gleon_engine::MismatchDetail::Pixel { diff_count } => {
+                        gleon_engine::Measurement::Pixel { diff_count } => {
                             (TestHistoryStatus::Mismatch, None, Some(*diff_count))
                         }
-                        detail @ gleon_engine::MismatchDetail::Ssim { .. } => {
+                        detail @ gleon_engine::Measurement::Ssim { .. } => {
                             (TestHistoryStatus::Mismatch, Some(detail.to_string()), None)
                         }
                     },
@@ -1391,11 +1391,15 @@ mod tests {
                 name: "test_ssim".to_string(),
                 result: TestImageResult::Mismatch {
                     relative_path: PathBuf::from("ssim.png"),
-                    detail: gleon_engine::MismatchDetail::Ssim {
-                        ssim_score: 0.8542,
+                    detail: gleon_engine::Measurement::Ssim {
+                        mean_ssim: 0.8542,
                         min_ssim: 0.8542,
                         max_excess: 0.0,
-                        region: None,
+                        peak_excess: 0.0,
+                        changed_pixels: 1,
+                        changed_region: None,
+                        failing_pixels: 1,
+                        failing_region: None,
                     },
                     diff_path: PathBuf::from("diff.png"),
                     baseline_path: PathBuf::from("base.png"),

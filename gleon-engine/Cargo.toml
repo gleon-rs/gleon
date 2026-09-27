@@ -17,9 +17,14 @@ hex = { workspace = true }
 image = { workspace = true }
 image_hasher = { workspace = true }
 rayon = { workspace = true }
+schemars = { workspace = true, optional = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+# JSON Schema descriptions of the config and result types, used by `gleon-model`.
+schemars = ["dep:schemars"]
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

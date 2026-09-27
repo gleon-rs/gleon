@@ -153,6 +153,7 @@ words = [
     "rustlib",
     "rustup",
     "sanitization",
+    "schemars",
     "sed",
     "seg",
     "serde",
@@ -187,4 +188,6 @@ words = [
     "yamllint",
     "zeroize",
 ]
-ignore_paths = ["Cargo.lock", "**/LICENSE-*"]
+# Schemas are generated from doc comments that are spell-checked in the Rust sources; their JSON
+# `\n` escapes would only produce false positives.
+ignore_paths = ["Cargo.lock", "**/LICENSE-*", "gleon-model/schema/*.json"]

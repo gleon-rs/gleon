@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gleon workspace configuration (.gleon/gleon.yaml)",
+  "description": "The root configuration structure for gleon.",
+  "type": "object",
+  "properties": {
+    "exclude": {
+      "description": "Globs of paths to exclude from testing.",
+      "$ref": "#/$defs/OneOrMany",
+      "default": []
+    },
+    "fallback_platform": {
+      "description": "Optional fallback platform identifier used when current platform baselines are missing.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "metrics": {
+      "description": "Per-golden comparison metrics recorded by integrations such as the Flutter package.",
+      "$ref": "#/$defs/MetricsConfig"
+    },
+    "platform": {
+      "description": "The platform identifier for which these rules apply (e.g. macos-aarch64).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "required_version": {
+      "description": "The required version range of the CLI to run this configuration.\n\nEnforced by the CLI only; other readers (the Flutter package) just check its syntax.",
+      "type": "string"
+    },
+    "screenshots": {
+      "description": "List of screenshot match rules.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScreenshotRule"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "required_version",
+    "screenshots"
+  ],
+  "$defs": {
+    "DiffConfig": {
+      "description": "Configuration parameters for the diff engine.",
+      "type": "object",
+      "properties": {
+        "anti_alias": {
+          "description": "Whether to apply anti-aliasing detection.",
+          "type": "boolean",
+          "default": true
+        },
+        "color_tolerance": {
+          "description": "Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode).",
+          "type": "number",
+          "format": "double",
+          "default": 8.0,
+          "minimum": 0.0
+        },
+        "min_similarity": {
+          "description": "Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).",
+          "type": "number",
+          "format": "double",
+          "default": 0.8,
+          "maximum": 1.0,
+          "minimum": 0.0
+        },
+        "threshold": {
+          "description": "Pixel comparison threshold [0.0, 1.0].",
+          "type": "number",
+          "format": "double",
+          "default": 0.1,
+          "maximum": 1.0,
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Dimension": {
+      "description": "A pixel count, or a percentage of the image size such as \"25%\".",
+      "oneOf": [
+        {
+          "type": "integer",
+          "maximum": 4294967295,
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*(\\d+|\\d+(\\.\\d+)?\\s*%)\\s*$"
+        }
+      ]
+    },
+    "GlobPattern": {
+      "description": "Case-insensitive glob relative to the workspace root; `*` stays within a path segment, `**` crosses segments.",
+      "type": "string"
+    },
+    "MaskRule": {
+      "description": "A mask rule specifying which regions of an image to ignore.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Image path pattern this mask applies to.",
+          "$ref": "#/$defs/GlobPattern"
+        },
+        "zones": {
+          "description": "List of bounding zones to ignore.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Zone"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "zones"
+      ]
+    },
+    "MetricsConfig": {
+      "description": "The `metrics:` section: opt-in per-golden comparison metrics.\n\nThe `GLEON_METRICS` environment variable (`1`/`true` or `0`/`false`) overrides `enabled`.",
+      "type": "object",
+      "properties": {
+        "console": {
+          "description": "Print one summary line per golden while metrics are enabled.",
+          "type": "boolean",
+          "default": true
+        },
+        "enabled": {
+          "description": "Record a JSON case report per golden under `.gleon/runs/latest/cases/`.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "Mode": {
+      "description": "Comparison mode for visual regression testing.",
+      "oneOf": [
+        {
+          "description": "Pixel-by-pixel color comparison.",
+          "type": "string",
+          "const": "pixel"
+        },
+        {
+          "description": "Structural Similarity Index comparison.",
+          "type": "string",
+          "const": "ssim"
+        }
+      ]
+    },
+    "OneOrMany": {
+      "description": "JSON Schema shape of a field serialized through this module.",
+      "anyOf": [
+        {
+          "description": "A single item.",
+          "$ref": "#/$defs/GlobPattern"
+        },
+        {
+          "description": "A list of items.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GlobPattern"
+          }
+        }
+      ]
+    },
+    "PlatformConfig": {
+      "description": "A platform: an opaque key, or structured fields.",
+      "anyOf": [
+        {
+          "description": "Opaque `[a-z0-9_.-]` platform key.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        {
+          "description": "Structured platform fields.",
+          "$ref": "#/$defs/PlatformFields"
+        }
+      ]
+    },
+    "PlatformFields": {
+      "description": "A parsed representation of structured platform fields.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "CPU architecture override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "description": "Arbitrary key-value label overrides.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "os": {
+          "description": "Operating system override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "renderer": {
+          "description": "Renderer identifier override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ScreenshotRule": {
+      "description": "A rule specifying how to match and process screenshots.",
+      "type": "object",
+      "properties": {
+        "diff": {
+          "description": "Specific diffing configuration.",
+          "$ref": "#/$defs/DiffConfig",
+          "default": {
+            "anti_alias": true,
+            "color_tolerance": 8.0,
+            "min_similarity": 0.8,
+            "threshold": 0.1
+          }
+        },
+        "include": {
+          "description": "Glob patterns representing the files to include.",
+          "$ref": "#/$defs/OneOrMany"
+        },
+        "masks": {
+          "description": "Optional zones to mask out (ignore) during verification.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MaskRule"
+          }
+        },
+        "mode": {
+          "description": "Diffing mode (pixel or ssim).",
+          "$ref": "#/$defs/Mode",
+          "default": "pixel"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "include"
+      ]
+    },
+    "Zone": {
+      "description": "A bounding zone to ignore.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Height of the zone.",
+          "$ref": "#/$defs/Dimension"
+        },
+        "width": {
+          "description": "Width of the zone.",
+          "$ref": "#/$defs/Dimension"
+        },
+        "x": {
+          "description": "The X coordinate of the top-left corner.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "y": {
+          "description": "The Y coordinate of the top-left corner.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    }
+  }
+}

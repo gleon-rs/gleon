@@ -1,0 +1,690 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gleon case report (.gleon/runs/latest/cases/<name>.json)",
+  "description": "One golden comparison.",
+  "type": "object",
+  "properties": {
+    "candidate": {
+      "description": "The image of this run.",
+      "$ref": "#/$defs/CandidateImage"
+    },
+    "comparison": {
+      "description": "How the images were compared.",
+      "$ref": "#/$defs/Comparison"
+    },
+    "golden": {
+      "description": "The committed golden.",
+      "$ref": "#/$defs/GoldenImage"
+    },
+    "message": {
+      "description": "Human-readable detail (failure reason or error).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "metrics": {
+      "description": "Whole-image metrics; absent when no pixel comparison ran.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Metrics"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "name": {
+      "description": "Canonical test name (also the case file name): the golden path relative to the workspace\nroot without extension, as lowercase `[a-z0-9_.-]` segments separated by `/`.",
+      "type": "string",
+      "pattern": "^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$"
+    },
+    "outcome": {
+      "description": "Result of the case.",
+      "$ref": "#/$defs/CaseOutcome"
+    },
+    "platform": {
+      "description": "Platform the candidate was rendered on: auto-detected `os` and `arch`, named like in the CLI.",
+      "$ref": "#/$defs/PlatformConfig"
+    },
+    "recorded_at": {
+      "description": "When the case was recorded (RFC 3339).",
+      "type": "string",
+      "format": "date-time"
+    },
+    "regions": {
+      "description": "Per-region metrics (today a single whole-image region when `metrics` is present).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RegionMetrics"
+      }
+    },
+    "schema_version": {
+      "description": "Version of this format (`CASE_SCHEMA_VERSION`).",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1
+    },
+    "source": {
+      "description": "What produced the candidate.",
+      "$ref": "#/$defs/Source"
+    },
+    "test": {
+      "description": "The producing test, when known.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timings_ms": {
+      "description": "Durations.",
+      "$ref": "#/$defs/CaseTimings"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "golden",
+    "candidate",
+    "source",
+    "platform",
+    "comparison",
+    "outcome",
+    "regions",
+    "timings_ms",
+    "recorded_at"
+  ],
+  "$defs": {
+    "CandidateImage": {
+      "description": "The image produced by this run.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Height in pixels; absent if the PNG header could not be read.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sha256": {
+          "description": "SHA-256 of the PNG bytes.",
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "width": {
+          "description": "Width in pixels; absent if the PNG header could not be read.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sha256"
+      ]
+    },
+    "CaseOutcome": {
+      "description": "Result of the case.",
+      "oneOf": [
+        {
+          "description": "Byte-identical PNGs; decided without decoding, so there are no metrics.",
+          "type": "string",
+          "const": "identical"
+        },
+        {
+          "description": "Within the tolerance.",
+          "type": "string",
+          "const": "match"
+        },
+        {
+          "description": "Beyond the tolerance.",
+          "type": "string",
+          "const": "mismatch"
+        },
+        {
+          "description": "Different image sizes; no pixel comparison was attempted.",
+          "type": "string",
+          "const": "dimension_mismatch"
+        },
+        {
+          "description": "Invalid input or options; see `message`.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "The golden was rewritten from the candidate (update mode); nothing was compared.",
+          "type": "string",
+          "const": "updated"
+        }
+      ]
+    },
+    "CaseTimings": {
+      "description": "Wall-clock durations in milliseconds.",
+      "type": "object",
+      "properties": {
+        "native": {
+          "description": "Time spent in the native engine (decode, compare, encode), when it ran.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "total": {
+          "description": "The whole comparison as seen by the integration.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "total"
+      ]
+    },
+    "Comparison": {
+      "description": "How the images were compared.",
+      "type": "object",
+      "properties": {
+        "masks": {
+          "description": "Ignored zones, applied to both images.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Zone"
+          }
+        },
+        "policy_version": {
+          "description": "Version of the engine's tolerant (SSIM) decision policy.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tolerance": {
+          "description": "The effective tolerance.",
+          "$ref": "#/$defs/Tolerance"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tolerance",
+        "masks",
+        "policy_version"
+      ]
+    },
+    "Dimension": {
+      "description": "A pixel count, or a percentage of the image size such as \"25%\".",
+      "oneOf": [
+        {
+          "type": "integer",
+          "maximum": 4294967295,
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\s*(\\d+|\\d+(\\.\\d+)?\\s*%)\\s*$"
+        }
+      ]
+    },
+    "GoldenImage": {
+      "description": "The committed golden.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Height in pixels; absent if the PNG header could not be read.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "description": "Path relative to the workspace root, `/`-separated, case as on disk.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the PNG bytes.",
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "width": {
+          "description": "Width in pixels; absent if the PNG header could not be read.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ]
+    },
+    "Metrics": {
+      "description": "Comparison metrics of one image region.",
+      "oneOf": [
+        {
+          "description": "Exact and pixel tolerances.",
+          "type": "object",
+          "properties": {
+            "diff_pixels": {
+              "description": "Pixels whose RGBA bytes differ.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "diff_ratio": {
+              "description": "`diff_pixels / total_pixels` (0 for an empty image).",
+              "type": "number",
+              "format": "double"
+            },
+            "headroom": {
+              "description": "`max_diff_ratio - diff_ratio` (exact: `-diff_ratio`); negative means it failed.",
+              "type": "number",
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "const": "pixel"
+            },
+            "total_pixels": {
+              "description": "Pixels compared.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "total_pixels",
+            "diff_pixels",
+            "diff_ratio",
+            "headroom"
+          ]
+        },
+        {
+          "description": "SSIM tolerance (values as defined by the engine's `SsimAnalysis`).",
+          "type": "object",
+          "properties": {
+            "changed_pixels": {
+              "description": "Pixels whose RGBA bytes differ.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "changed_region": {
+              "description": "Bounding box of the changed pixels.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Region"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "failing_pixels": {
+              "description": "Pixels failing the policy.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "failing_region": {
+              "description": "Bounding box of the changed pixels that failed the policy.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Region"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "headroom": {
+              "description": "Distance to the thresholds; negative means that gate is exceeded.",
+              "$ref": "#/$defs/SsimHeadroom"
+            },
+            "kind": {
+              "type": "string",
+              "const": "ssim"
+            },
+            "mean_ssim": {
+              "description": "Mean local SSIM; diagnostic only.",
+              "type": "number",
+              "format": "double"
+            },
+            "min_ssim": {
+              "description": "Lowest local SSIM, gated by `min_similarity`.",
+              "type": "number",
+              "format": "double"
+            },
+            "peak_excess": {
+              "description": "Largest envelope deviation over the changed pixels, `color_tolerance` not subtracted.",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "min_ssim",
+            "mean_ssim",
+            "peak_excess",
+            "changed_pixels",
+            "failing_pixels",
+            "headroom"
+          ]
+        }
+      ]
+    },
+    "PlatformConfig": {
+      "description": "A platform: an opaque key, or structured fields.",
+      "anyOf": [
+        {
+          "description": "Opaque `[a-z0-9_.-]` platform key.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        {
+          "description": "Structured platform fields.",
+          "$ref": "#/$defs/PlatformFields"
+        }
+      ]
+    },
+    "PlatformFields": {
+      "description": "A parsed representation of structured platform fields.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "CPU architecture override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "description": "Arbitrary key-value label overrides.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "os": {
+          "description": "Operating system override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "renderer": {
+          "description": "Renderer identifier override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Region": {
+      "description": "An axis-aligned pixel rectangle.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Height in pixels.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "width": {
+          "description": "Width in pixels.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "x": {
+          "description": "Left edge.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "y": {
+          "description": "Top edge.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "RegionKind": {
+      "description": "Kind of a compared region.",
+      "oneOf": [
+        {
+          "description": "Pixels compared as an image (today: the whole golden).",
+          "type": "string",
+          "const": "image"
+        }
+      ]
+    },
+    "RegionMetrics": {
+      "description": "Metrics of one region of the golden.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "How the region was compared.",
+          "$ref": "#/$defs/RegionKind"
+        },
+        "metrics": {
+          "description": "The region's metrics.",
+          "$ref": "#/$defs/Metrics"
+        },
+        "rect": {
+          "description": "Region bounds in golden pixels; absent for the whole image.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Region"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "metrics"
+      ]
+    },
+    "Sha256Hex": {
+      "description": "Lowercase hex SHA-256 digest of the PNG bytes.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Source": {
+      "description": "What produced the candidate.",
+      "type": "object",
+      "properties": {
+        "renderer": {
+          "description": "Renderer identifier, e.g. `flutter-3.47.5`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "description": "Integration that ran the comparison, e.g. `gleon_flutter`.",
+          "type": "string"
+        },
+        "tool_version": {
+          "description": "Version of that integration.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "tool_version"
+      ]
+    },
+    "SsimHeadroom": {
+      "description": "Distance of SSIM metrics to their thresholds.",
+      "type": "object",
+      "properties": {
+        "color": {
+          "description": "`color_tolerance - peak_excess`. Negative does not always fail: small isolated regions\nwith a weak excess are tolerated by the policy.",
+          "type": "number",
+          "format": "double"
+        },
+        "similarity": {
+          "description": "`min_ssim - min_similarity`.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "similarity",
+        "color"
+      ]
+    },
+    "TestInfo": {
+      "description": "The test that produced the candidate, when the integration knows it.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Full test name (group names included).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Tolerance": {
+      "description": "Comparison tolerance.\n\nEach mode carries only its own parameters, so a parameter of another mode is unrepresentable.",
+      "oneOf": [
+        {
+          "description": "Every pixel must be identical (the Flutter SDK default).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "exact"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Tolerates a fraction of differing pixels.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pixel"
+            },
+            "max_diff_ratio": {
+              "description": "Largest tolerated fraction of differing pixels, `[0, 1]`.",
+              "type": "number",
+              "format": "double",
+              "maximum": 1.0,
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "max_diff_ratio"
+          ]
+        },
+        {
+          "description": "Tolerates rendering noise under the engine's SSIM policy.",
+          "type": "object",
+          "properties": {
+            "color_tolerance": {
+              "description": "Tolerated deviation beyond the local envelope, in 8-bit channel units.",
+              "type": "number",
+              "format": "double",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "const": "ssim"
+            },
+            "min_similarity": {
+              "description": "Minimum local SSIM `[0, 1]` every neighborhood must reach.",
+              "type": "number",
+              "format": "double",
+              "maximum": 1.0,
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "min_similarity",
+            "color_tolerance"
+          ]
+        }
+      ]
+    },
+    "Zone": {
+      "description": "A bounding zone to ignore.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Height of the zone.",
+          "$ref": "#/$defs/Dimension"
+        },
+        "width": {
+          "description": "Width of the zone.",
+          "$ref": "#/$defs/Dimension"
+        },
+        "x": {
+          "description": "The X coordinate of the top-left corner.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "y": {
+          "description": "The Y coordinate of the top-left corner.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    }
+  }
+}

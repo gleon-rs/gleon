@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Comparison mode for visual regression testing.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Pixel-by-pixel color comparison.
@@ -66,6 +67,23 @@ impl<'de> Deserialize<'de> for Dimension {
     }
 }
 
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Dimension {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Dimension".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A pixel count, or a percentage of the image size such as \"25%\".",
+            "oneOf": [
+                { "type": "integer", "minimum": 0, "maximum": u32::MAX },
+                { "type": "string", "pattern": "^\\s*(\\d+|\\d+(\\.\\d+)?\\s*%)\\s*$" }
+            ]
+        })
+    }
+}
+
 impl Serialize for Dimension {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -80,27 +98,29 @@ impl Serialize for Dimension {
 
 /// Configuration parameters for the diff engine.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DiffConfig {
     /// Pixel comparison threshold [0.0, 1.0].
     #[serde(default = "default_threshold", deserialize_with = "deserialize_ratio")]
+    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
     pub threshold: f64,
     /// Whether to apply anti-aliasing detection.
     #[serde(default = "default_anti_alias")]
     pub anti_alias: bool,
-    /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode, see
-    /// [`crate::ssim`]).
+    /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).
     #[serde(
         default = "default_min_similarity",
         deserialize_with = "deserialize_ratio"
     )]
+    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
     pub min_similarity: f64,
-    /// Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode, see
-    /// [`crate::ssim`]).
+    /// Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode).
     #[serde(
         default = "default_color_tolerance",
         deserialize_with = "deserialize_color_tolerance"
     )]
+    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0)))]
     pub color_tolerance: f64,
 }
 
@@ -147,6 +167,7 @@ impl Default for DiffConfig {
 
 /// A bounding zone to ignore.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Zone {
     /// The X coordinate of the top-left corner.

@@ -1,6 +1,6 @@
 //! Markdown report/PR-comment generation.
 
-use gleon_engine::MismatchDetail;
+use gleon_engine::Measurement;
 use minijinja::context;
 use serde::Serialize;
 
@@ -112,12 +112,12 @@ impl std::fmt::Display for ImgLinkFormatter<'_> {
     }
 }
 
-struct DeltaFormatter<'a>(&'a MismatchDetail);
+struct DeltaFormatter<'a>(&'a Measurement);
 impl std::fmt::Display for DeltaFormatter<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
-            MismatchDetail::Pixel { diff_count } => write!(f, "{diff_count} px"),
-            MismatchDetail::Ssim {
+            Measurement::Pixel { diff_count } => write!(f, "{diff_count} px"),
+            Measurement::Ssim {
                 min_ssim,
                 max_excess,
                 ..
@@ -386,11 +386,15 @@ mod tests {
 
     #[test]
     fn test_delta_formatter_mentions_color_excess() {
-        let detail = MismatchDetail::Ssim {
-            ssim_score: 0.99,
+        let detail = Measurement::Ssim {
+            mean_ssim: 0.99,
             min_ssim: 0.97,
             max_excess: 146.4,
-            region: None,
+            peak_excess: 0.0,
+            changed_pixels: 1,
+            changed_region: None,
+            failing_pixels: 1,
+            failing_region: None,
         };
         assert_eq!(
             DeltaFormatter(&detail).to_string(),
@@ -404,7 +408,7 @@ mod tests {
             name: "login_button".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("login.png"),
-                detail: MismatchDetail::Pixel { diff_count: 12 },
+                detail: Measurement::Pixel { diff_count: 12 },
                 diff_path: PathBuf::from("diffs/login.png"),
                 baseline_path: PathBuf::from("goldens/login.png"),
                 actual_path: PathBuf::from("actual/login.png"),
@@ -432,7 +436,7 @@ mod tests {
             name: "login".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("test/login.png"),
-                detail: MismatchDetail::Pixel { diff_count: 3 },
+                detail: Measurement::Pixel { diff_count: 3 },
                 diff_path: PathBuf::from("/Users/me/proj/.gleon/runs/latest/diffs/login.png"),
                 baseline_path: PathBuf::from("/Users/me/proj/.gleon/blobs/sha256/abc"),
                 actual_path: PathBuf::from("/Users/me/proj/.gleon/runs/latest/actual/login.png"),
@@ -461,7 +465,7 @@ mod tests {
             name: "login".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("test/login.png"),
-                detail: MismatchDetail::Pixel { diff_count: 3 },
+                detail: Measurement::Pixel { diff_count: 3 },
                 diff_path: PathBuf::from("diffs/login.png"),
                 baseline_path: PathBuf::from("goldens/login.png"),
                 actual_path: PathBuf::from("actual/login.png"),
@@ -485,7 +489,7 @@ mod tests {
                 name: format!("test_{i}"),
                 result: TestImageResult::Mismatch {
                     relative_path: PathBuf::from(format!("{i}.png")),
-                    detail: MismatchDetail::Pixel { diff_count: i + 1 },
+                    detail: Measurement::Pixel { diff_count: i + 1 },
                     diff_path: PathBuf::from(format!("diff_{i}.png")),
                     baseline_path: PathBuf::from(format!("base_{i}.png")),
                     actual_path: PathBuf::from(format!("act_{i}.png")),
@@ -650,7 +654,7 @@ mod tests {
                 name: format!("test_{i}"),
                 result: TestImageResult::Mismatch {
                     relative_path: PathBuf::from(format!("{i}.png")),
-                    detail: MismatchDetail::Pixel { diff_count: i + 1 },
+                    detail: Measurement::Pixel { diff_count: i + 1 },
                     diff_path: PathBuf::from(format!("diff_{i}.png")),
                     baseline_path: PathBuf::from(format!("base_{i}.png")),
                     actual_path: PathBuf::from(format!("act_{i}.png")),
@@ -698,7 +702,7 @@ mod tests {
             name: "login_btn".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("login.png"),
-                detail: MismatchDetail::Pixel { diff_count: 5 },
+                detail: Measurement::Pixel { diff_count: 5 },
                 diff_path: PathBuf::from("diffs/login.png"),
                 baseline_path: PathBuf::from("goldens/login.png"),
                 actual_path: PathBuf::from("actual/login.png"),
@@ -757,7 +761,7 @@ mod tests {
             name: "pixel_small".to_string(),
             result: TestImageResult::Mismatch {
                 relative_path: PathBuf::from("fb.png"),
-                detail: MismatchDetail::Pixel { diff_count: 10 },
+                detail: Measurement::Pixel { diff_count: 10 },
                 diff_path: PathBuf::from("diff.png"),
                 baseline_path: PathBuf::from("base.png"),
                 actual_path: PathBuf::from("actual.png"),
@@ -768,7 +772,7 @@ mod tests {
                 name: format!("mismatch_{i}"),
                 result: TestImageResult::Mismatch {
                     relative_path: PathBuf::from(format!("{i}.png")),
-                    detail: MismatchDetail::Pixel { diff_count: i + 1 },
+                    detail: Measurement::Pixel { diff_count: i + 1 },
                     diff_path: PathBuf::from(format!("diff_{i}.png")),
                     baseline_path: PathBuf::from(format!("base_{i}.png")),
                     actual_path: PathBuf::from(format!("actual_{i}.png")),
@@ -840,11 +844,15 @@ mod tests {
                     actual_path: PathBuf::from("actual.png"),
                     baseline_path: PathBuf::from("baseline.png"),
                     diff_path: PathBuf::from("diff.png"),
-                    detail: MismatchDetail::Ssim {
-                        ssim_score: 0.95,
+                    detail: Measurement::Ssim {
+                        mean_ssim: 0.95,
                         min_ssim: 0.95,
                         max_excess: 0.0,
-                        region: None,
+                        peak_excess: 0.0,
+                        changed_pixels: 1,
+                        changed_region: None,
+                        failing_pixels: 1,
+                        failing_region: None,
                     },
                 },
             },

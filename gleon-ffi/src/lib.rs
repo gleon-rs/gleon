@@ -7,18 +7,20 @@
 //!
 //! Contract:
 //! - Input buffers are borrowed only for the duration of a call and never retained.
-//! - [`gleon_compare`] never returns null and never unwinds: invalid input and panics become an
-//!   `"error"` verdict inside the returned result.
+//! - [`gleon_compare`] and [`gleon_config_resolve`] never return null and never unwind: invalid
+//!   input and panics become an error inside the returned result's JSON.
 //! - The caller owns the returned result and must release it with [`gleon_result_free`];
 //!   slices obtained from the result getters stay valid until then.
 
-// Only `borrow` and the raw input pointers of `gleon_compare` need it; all logic is safe `compare`.
+// Only `borrow` and the raw input pointers of the exports need it; all logic is in the safe
+// `compare` and `resolve` modules.
 #![expect(
     unsafe_code,
     reason = "C ABI boundary: raw input buffers handed over by Dart FFI without copying"
 )]
 
 mod compare;
+mod resolve;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -71,15 +73,30 @@ unsafe fn borrow<'a>(ptr: *const u8, len: usize, name: &str) -> Result<&'a [u8],
     Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
 }
 
+/// Runs `call` behind the ABI: a caught panic becomes the `on_panic` outcome.
+fn guarded(
+    call: impl FnOnce() -> Outcome,
+    on_panic: fn(&'static str) -> Outcome,
+) -> repr_c::Box<GleonResult> {
+    let outcome = catch_unwind(AssertUnwindSafe(call))
+        .unwrap_or_else(|_| on_panic("internal error: the native call panicked"));
+    Box::new(GleonResult(outcome)).into()
+}
+
 /// Compares two PNG-encoded images using JSON `options`.
 ///
 /// Options (unknown keys are rejected):
-/// - `"mode"`: `"exact"` (every pixel identical), `"pixel"` or `"ssim"`.
-/// - `"threshold"`: required for `"pixel"` only, max fraction of differing pixels in `[0, 1]`.
-/// - `"min_similarity"` and `"color_tolerance"`: both required for `"ssim"` only; minimum local
-///   SSIM in `[0, 1]` and tolerated envelope deviation in 8-bit units (see [`gleon_engine::ssim`]).
+/// - `"tolerance"` (required): `{"kind":"exact"}` (every pixel identical),
+///   `{"kind":"pixel","max_diff_ratio":R}` (max fraction of differing pixels in `[0, 1]`) or
+///   `{"kind":"ssim","min_similarity":S,"color_tolerance":C}` (minimum local SSIM in `[0, 1]`
+///   and tolerated envelope deviation in 8-bit units, see [`gleon_engine::ssim`]). Parameters of
+///   another kind are rejected.
 /// - `"masks"`: optional `[{"x":u32,"y":u32,"width":D,"height":D}]`, where `D` is a pixel count or
 ///   a percentage string such as `"25%"`.
+///
+/// The JSON report carries `abi`, `policy_version`, `verdict` (`match`, `mismatch`,
+/// `dimension_mismatch`, `error`), `baseline`/`candidate` sizes, whole-image `metrics` and
+/// `regions` (for matches too, see `gleon_model::case::Metrics`), `timings_us` and `error`.
 ///
 /// # Safety
 /// Each `(ptr, len)` pair must describe a readable buffer of `len` bytes (or be `(null, 0)`) that
@@ -94,22 +111,69 @@ pub unsafe fn gleon_compare(
     options_ptr: *const u8,
     options_len: usize,
 ) -> repr_c::Box<GleonResult> {
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: forwarded caller contract; the slices do not outlive this closure.
-        let inputs = unsafe {
-            borrow(baseline_ptr, baseline_len, "baseline").and_then(|baseline| {
-                borrow(candidate_ptr, candidate_len, "candidate").and_then(|candidate| {
-                    borrow(options_ptr, options_len, "options")
-                        .map(|options| (baseline, candidate, options))
+    guarded(
+        || {
+            // SAFETY: forwarded caller contract; the slices do not outlive this closure.
+            let inputs = unsafe {
+                borrow(baseline_ptr, baseline_len, "baseline").and_then(|baseline| {
+                    borrow(candidate_ptr, candidate_len, "candidate").and_then(|candidate| {
+                        borrow(options_ptr, options_len, "options")
+                            .map(|options| (baseline, candidate, options))
+                    })
                 })
+            };
+            inputs.map_or_else(Outcome::error, |(baseline, candidate, options)| {
+                compare::compare(baseline, candidate, options)
             })
-        };
-        inputs.map_or_else(Outcome::error, |(baseline, candidate, options)| {
-            compare::compare(baseline, candidate, options)
-        })
-    }))
-    .unwrap_or_else(|_| Outcome::error("internal error: comparison panicked"));
-    Box::new(GleonResult(outcome)).into()
+        },
+        Outcome::error,
+    )
+}
+
+/// Validates the UTF-8 `.gleon/gleon.yaml` text `yaml` and resolves the screenshot rule of the
+/// golden at `path` (UTF-8, relative to the workspace root, either separator) exactly like the
+/// gleon CLI scanner.
+///
+/// `metrics_env` is the caller's raw `GLEON_METRICS` value (UTF-8), or null when unset; the
+/// caller passes it so its environment stays the single source (and injectable in tests).
+///
+/// The JSON result is either
+/// `{"kind":"resolved","abi":4,"policy_version":2,"rule":..,"metrics":{"enabled":..,"console":..},"platform":{"os":..,"arch":..}}`
+/// (`rule.kind` is `matched` with `index`, the canonical test `name`, `tolerance` and `masks`,
+/// or `excluded`, or `unmatched`; `metrics` has the `GLEON_METRICS` override applied;
+/// `platform` is the host, named like in the CLI) or `{"kind":"error","abi":4,"error":".."}` with
+/// the message of the parser.
+///
+/// # Safety
+/// Each `(ptr, len)` pair must describe a readable buffer of `len` bytes (or be `(null, 0)`) that
+/// stays valid for the duration of this call.
+#[ffi_export]
+#[must_use]
+pub unsafe fn gleon_config_resolve(
+    yaml_ptr: *const u8,
+    yaml_len: usize,
+    path_ptr: *const u8,
+    path_len: usize,
+    metrics_env_ptr: *const u8,
+    metrics_env_len: usize,
+) -> repr_c::Box<GleonResult> {
+    guarded(
+        || {
+            // SAFETY: forwarded caller contract; the slices do not outlive this closure.
+            let inputs = unsafe {
+                borrow(yaml_ptr, yaml_len, "yaml").and_then(|yaml| {
+                    borrow(path_ptr, path_len, "path").and_then(|path| {
+                        borrow(metrics_env_ptr, metrics_env_len, "metrics_env")
+                            .map(|env| (yaml, path, (!metrics_env_ptr.is_null()).then_some(env)))
+                    })
+                })
+            };
+            inputs.map_or_else(resolve::error, |(yaml, path, env)| {
+                resolve::resolve(yaml, path, env)
+            })
+        },
+        resolve::error,
+    )
 }
 
 /// Returns the UTF-8 JSON report of `result` (null slice if `result` is null).
@@ -126,7 +190,8 @@ pub fn gleon_result_diff_png(result: Option<&GleonResult>) -> Option<c_slice::Re
     result.and_then(|r| r.0.diff_png.as_deref()).map(Into::into)
 }
 
-/// Releases a result returned by [`gleon_compare`]. Passing null is a no-op.
+/// Releases a result returned by [`gleon_compare`] or [`gleon_config_resolve`]. Passing null is a
+/// no-op.
 #[ffi_export]
 pub fn gleon_result_free(result: Option<repr_c::Box<GleonResult>>) {
     drop(result);
@@ -179,7 +244,7 @@ mod tests {
         let result = compare(
             (std::ptr::null(), 10),
             (std::ptr::null(), 0),
-            br#"{"mode":"exact"}"#,
+            br#"{"tolerance":{"kind":"exact"}}"#,
         );
         let json = read_json(&result);
         assert_eq!(json["verdict"], "error");
@@ -195,7 +260,7 @@ mod tests {
         let result = compare(
             (baseline.as_ptr(), baseline.len()),
             (std::ptr::null(), 0),
-            br#"{"mode":"exact"}"#,
+            br#"{"tolerance":{"kind":"exact"}}"#,
         );
         // The empty candidate is accepted by the ABI (not a `borrow` error) and rejected by the
         // decoder once the valid baseline has been decoded.
@@ -240,11 +305,72 @@ mod tests {
         let result = compare(
             (baseline.as_ptr(), baseline.len()),
             (candidate.as_ptr(), candidate.len()),
-            br#"{"mode":"exact"}"#,
+            br#"{"tolerance":{"kind":"exact"}}"#,
         );
         assert_eq!(read_json(&result)["verdict"], "mismatch");
         let diff = gleon_result_diff_png(Some(&result)).unwrap();
         assert!(image::load_from_memory(diff.as_slice()).is_ok());
+        gleon_result_free(Some(result));
+    }
+
+    #[test]
+    fn test_resolve_null_buffer_with_length_is_an_error() {
+        let result = unsafe {
+            gleon_config_resolve(
+                std::ptr::null(),
+                3,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        let json = read_json(&result);
+        assert_eq!(json["kind"], "error");
+        assert!(json["error"].as_str().unwrap().contains("yaml"), "{json}");
+        assert!(gleon_result_diff_png(Some(&result)).is_none());
+        gleon_result_free(Some(result));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "compiles globs, far too slow under Miri")]
+    fn test_resolve_round_trip_through_the_abi() {
+        let yaml = b"required_version: '>=0.1.0'\nscreenshots:\n  - include: '**/*.png'\n";
+        let path = b"test/goldens/a.png";
+        let resolve = |env: Option<&[u8]>| {
+            let (env_ptr, env_len) = env.map_or((std::ptr::null(), 0), |e| (e.as_ptr(), e.len()));
+            let result = unsafe {
+                gleon_config_resolve(
+                    yaml.as_ptr(),
+                    yaml.len(),
+                    path.as_ptr(),
+                    path.len(),
+                    env_ptr,
+                    env_len,
+                )
+            };
+            let json = read_json(&result);
+            gleon_result_free(Some(result));
+            json
+        };
+        let json = resolve(None);
+        assert_eq!(json["kind"], "resolved", "{json}");
+        assert_eq!(json["rule"]["name"], "test/goldens/a");
+        assert_eq!(json["metrics"]["enabled"], false);
+        assert_eq!(resolve(Some(b"1"))["metrics"]["enabled"], true);
+    }
+
+    #[test]
+    fn test_a_panic_becomes_an_error_result() {
+        let panicking = || -> Outcome { panic!("boom") };
+        let result = guarded(panicking, Outcome::error);
+        let json = read_json(&result);
+        assert_eq!(json["verdict"], "error");
+        assert_eq!(json["error"], "internal error: the native call panicked");
+        gleon_result_free(Some(result));
+
+        let result = guarded(panicking, resolve::error);
+        assert_eq!(read_json(&result)["kind"], "error");
         gleon_result_free(Some(result));
     }
 

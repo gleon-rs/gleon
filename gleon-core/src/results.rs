@@ -1,14 +1,24 @@
 //! Results of comparing a captured screenshot against its staged baseline.
 //!
-//! These types are produced by [`crate::ops::diff`] and [`crate::engine`], and consumed by
+//! These types are produced by [`crate::ops::diff`] from [`gleon_engine`] results, and consumed by
 //! [`crate::report`] — they describe comparison outcomes, not files being scanned, so they
 //! live apart from [`crate::scanner`].
 
 use std::path::{Path, PathBuf};
 
-use gleon_engine::MismatchDetail;
+use gleon_engine::Measurement;
 
 /// Represents the result of running a test on a single screenshot.
+///
+/// Serialized into `.gleon/runs/latest/gleon-report.json` with the default (externally tagged)
+/// serde enums (`{"Mismatch": {"detail": {"Ssim": {..}}}}`), shape pinned by
+/// `tests/fixtures/report_measurements.json`.
+// TODO(json-dialects): gleon-report.json and the case reports of `gleon-model` (`case.v1.json`,
+// written by the Flutter package) describe the same comparisons in two JSON dialects: externally
+// tagged `PascalCase` variants here and in `gleon_engine::Measurement`, internally tagged
+// `{"kind": ".."}` `snake_case` there, with differently named metrics (`diff_count` vs
+// `diff_pixels`, no headroom here). Move gleon-report.json to the `gleon-model` types (bumping its
+// format, no compat shim) once `gleon report` reads case reports; until then keep both fixtures.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum TestImageResult {
@@ -42,7 +52,7 @@ pub enum TestImageResult {
         /// Relative path of the screenshot file.
         relative_path: PathBuf,
         /// Specific detail about the comparison mismatch.
-        detail: MismatchDetail,
+        detail: Measurement,
         /// Path to the diff visualization image on disk.
         diff_path: PathBuf,
         /// Path to the baseline image on disk.
@@ -158,7 +168,7 @@ mod tests {
     fn test_baseline_path_only_for_results_that_have_one() {
         let mismatch = TestImageResult::Mismatch {
             relative_path: PathBuf::from("rel.png"),
-            detail: MismatchDetail::Pixel { diff_count: 1 },
+            detail: Measurement::Pixel { diff_count: 1 },
             diff_path: PathBuf::from("diff.png"),
             baseline_path: PathBuf::from("base.png"),
             actual_path: PathBuf::from("actual.png"),
@@ -213,7 +223,7 @@ mod tests {
             (
                 TestImageResult::Mismatch {
                     relative_path: PathBuf::from("b.png"),
-                    detail: MismatchDetail::Pixel { diff_count: 1 },
+                    detail: Measurement::Pixel { diff_count: 1 },
                     diff_path: PathBuf::from("diff.png"),
                     baseline_path: PathBuf::from("base.png"),
                     actual_path: PathBuf::from("act.png"),
