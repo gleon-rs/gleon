@@ -28,7 +28,7 @@ use safer_ffi::prelude::*;
 
 #[expect(
     clippy::expl_impl_clone_on_copy,
-    reason = "safer-ffi generates these impls for its opaque type marker"
+    reason = "safer-ffi generates these implementations for its opaque type marker"
 )]
 mod result {
     use safer_ffi::prelude::*;

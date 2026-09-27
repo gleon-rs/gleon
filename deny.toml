@@ -9,7 +9,13 @@ no-default-features = false
 feature-depth = 1
 
 [advisories]
-ignore = []
+ignore = [
+    # `paste` is archived ("unmaintained", not a vulnerability) and has no safe upgrade. It is a
+    # compile-time proc-macro pulled in only by `safer-ffi` (directly and via
+    # `macro_rules_attribute`), so none of its code ends up in gleon-ffi. Drop this once safer-ffi
+    # moves off it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro, transitive via safer-ffi; no runtime code" },
+]
 
 [licenses]
 allow = [
