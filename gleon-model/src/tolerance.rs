@@ -20,8 +20,8 @@ pub enum ToleranceError {
         /// The rejected value.
         value: f64,
     },
-    /// A negative or non-finite `color_tolerance`.
-    #[error("`color_tolerance` must be a finite, non-negative number (got {0})")]
+    /// A `color_tolerance` outside `[0, 255]` (NaN included).
+    #[error("`color_tolerance` must be between 0 and 255 (got {0})")]
     ColorTolerance(f64),
 }
 
@@ -46,8 +46,8 @@ pub enum Tolerance {
         /// Minimum local SSIM `[0, 1]` every neighborhood must reach.
         #[schemars(range(min = 0.0, max = 1.0))]
         min_similarity: f64,
-        /// Tolerated deviation beyond the local envelope, in 8-bit channel units.
-        #[schemars(range(min = 0.0))]
+        /// Tolerated deviation beyond the local envelope, in 8-bit channel units, `[0, 255]`.
+        #[schemars(range(min = 0.0, max = 255.0))]
         color_tolerance: f64,
     },
 }
@@ -72,7 +72,7 @@ impl Tolerance {
     ///
     /// # Errors
     /// Returns [`ToleranceError::Ratio`] if a ratio is outside `[0, 1]` (NaN included) or
-    /// [`ToleranceError::ColorTolerance`] if `color_tolerance` is negative or not finite.
+    /// [`ToleranceError::ColorTolerance`] if `color_tolerance` is outside `[0, 255]`.
     pub fn validate(&self) -> Result<(), ToleranceError> {
         let ratio = |name: &'static str, value: f64| {
             if (0.0..=1.0).contains(&value) {
@@ -88,7 +88,7 @@ impl Tolerance {
                 min_similarity,
                 color_tolerance,
             } => ratio("min_similarity", min_similarity).and_then(|()| {
-                if color_tolerance.is_finite() && color_tolerance >= 0.0 {
+                if gleon_engine::config::is_valid_color_tolerance(color_tolerance) {
                     Ok(())
                 } else {
                     Err(ToleranceError::ColorTolerance(color_tolerance))
@@ -205,12 +205,13 @@ mod tests {
                 })
             ));
         }
-        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+        for bad in [-1.0, 255.5, f64::NAN, f64::INFINITY] {
             assert!(matches!(
                 ssim(0.8, bad).validate(),
                 Err(ToleranceError::ColorTolerance(_))
             ));
         }
+        assert!(ssim(0.8, 255.0).validate().is_ok());
     }
 
     #[test]

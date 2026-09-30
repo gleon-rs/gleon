@@ -165,6 +165,11 @@
           "description": "The golden was rewritten from the candidate (update mode); nothing was compared.",
           "type": "string",
           "const": "updated"
+        },
+        {
+          "description": "The golden does not exist (a new test without a baseline); nothing was compared.",
+          "type": "string",
+          "const": "missing"
         }
       ]
     },
@@ -252,8 +257,15 @@
           "type": "string"
         },
         "sha256": {
-          "description": "SHA-256 of the PNG bytes.",
-          "$ref": "#/$defs/Sha256Hex"
+          "description": "SHA-256 of the PNG bytes; absent when the golden does not exist (`missing`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Hex"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "width": {
           "description": "Width in pixels; absent if the PNG header could not be read.",
@@ -267,8 +279,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "path",
-        "sha256"
+        "path"
       ]
     },
     "Metrics": {
@@ -627,9 +638,10 @@
           "type": "object",
           "properties": {
             "color_tolerance": {
-              "description": "Tolerated deviation beyond the local envelope, in 8-bit channel units.",
+              "description": "Tolerated deviation beyond the local envelope, in 8-bit channel units, `[0, 255]`.",
               "type": "number",
               "format": "double",
+              "maximum": 255.0,
               "minimum": 0.0
             },
             "kind": {

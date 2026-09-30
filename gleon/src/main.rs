@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use clap::Parser;
 use cli::{Cli, Commands};
 use exit_code::ExitCode;
 use gleon_core::env::EnvProvider;
@@ -13,7 +12,7 @@ mod exit_code;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_checked();
 
     // Determine the log level based on CLI flags
     let log_level = if cli.quiet {
@@ -121,22 +120,13 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         Commands::Stage { paths } => {
             commands::stage::run_stage(&resolve_context(cli, current_dir, env)?, paths)
         }
-        Commands::Diff {
-            auto_pull,
-            resolve: resolve_conflicts,
-        } => {
+        Commands::Diff { auto_pull } => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            commands::diff::run_diff(
-                &ctx,
-                *auto_pull,
-                *resolve_conflicts,
-                get_storage_config(env),
-            )
-            .await
+            commands::diff::run_diff(&ctx, *auto_pull, get_storage_config(env)).await
         }
-        Commands::LintManifests { platform } => {
+        Commands::LintManifests => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            commands::lint::run_lint(&ctx, platform.as_deref())
+            commands::lint::run_lint(&ctx, cli.platform.as_deref())
         }
         Commands::Resolve { test_path, fetch } => {
             let ctx = resolve_context(cli, current_dir, env)?;
@@ -148,23 +138,27 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
             )
             .await
         }
-        Commands::Pull {
-            all_platforms,
-            platform,
-        } => {
+        Commands::Pull { all_platforms } => {
             let ctx = resolve_context(cli, current_dir, env)?;
             let storage = get_storage_config(env);
-            commands::pull::run_pull(&ctx, storage.as_ref(), *all_platforms, platform.as_deref())
-                .await
+            commands::pull::run_pull(
+                &ctx,
+                storage.as_ref(),
+                *all_platforms,
+                cli.platform.as_deref(),
+            )
+            .await
         }
-        Commands::Push {
-            all_platforms,
-            platform,
-        } => {
+        Commands::Push { all_platforms } => {
             let ctx = resolve_context(cli, current_dir, env)?;
             let storage = get_storage_config(env);
-            commands::push::run_push(&ctx, storage.as_ref(), *all_platforms, platform.as_deref())
-                .await
+            commands::push::run_push(
+                &ctx,
+                storage.as_ref(),
+                *all_platforms,
+                cli.platform.as_deref(),
+            )
+            .await
         }
         Commands::Report {
             format,
@@ -192,7 +186,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
                 env,
                 report.as_deref(),
                 out.as_deref(),
-                *truncate_history,
+                Some(*truncate_history),
                 *push,
             )
             .await?

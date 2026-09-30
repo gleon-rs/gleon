@@ -251,6 +251,30 @@ pub(crate) fn process_diff_case(
     }
 }
 
+/// Removes the previous `gleon diff` output from `runs_latest`, keeping the case reports of
+/// integrations (`cases/`): they are written by other tools (test runs) and consumed separately.
+fn clear_previous_run(runs_latest: &Path) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(runs_latest) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    let cases = Path::new(gleon_model::case::CASES_DIR)
+        .file_name()
+        .unwrap_or_default();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name() == cases {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Executes diff comparison for the workspace at `base_dir`.
 ///
 /// # Errors
@@ -271,11 +295,7 @@ pub fn run_diff(context: &ResolvedContext) -> Result<DiffReportResult, DiffOpErr
     )?;
 
     let runs_dir = paths.runs_latest();
-    match std::fs::remove_dir_all(&runs_dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(CoreError::Io(e).into()),
-    }
+    clear_previous_run(&runs_dir).map_err(CoreError::Io)?;
     let diffs_dir = paths.runs_latest_diffs();
     let actual_dir = paths.runs_actual();
     std::fs::create_dir_all(&diffs_dir).map_err(CoreError::Io)?;
@@ -343,6 +363,26 @@ mod tests {
     use crate::{
         config::ConfigError, context::ContextError, manifest::ManifestError, scanner::ScannerError,
     };
+
+    #[test]
+    fn test_clearing_the_previous_run_keeps_the_case_reports() {
+        let temp = tempfile::tempdir().unwrap();
+        let latest = temp.path().join("runs/latest");
+        std::fs::create_dir_all(latest.join("cases/test")).unwrap();
+        std::fs::write(latest.join("cases/test/a.json"), "{}").unwrap();
+        std::fs::create_dir_all(latest.join("diffs/x")).unwrap();
+        std::fs::write(latest.join("gleon-report.json"), "{}").unwrap();
+
+        clear_previous_run(&latest).unwrap();
+        let mut left: Vec<_> = std::fs::read_dir(&latest)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["cases"]);
+        assert!(latest.join("cases/test/a.json").is_file());
+        clear_previous_run(&temp.path().join("missing")).unwrap();
+    }
 
     #[test]
     fn test_diff_error_display() {

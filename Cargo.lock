@@ -1711,13 +1711,15 @@ dependencies = [
 name = "gleon-ffi"
 version = "0.2.2"
 dependencies = [
+ "chrono",
  "gleon-engine",
  "gleon-model",
  "image",
  "rayon",
  "safer-ffi",
- "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

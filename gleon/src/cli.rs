@@ -69,6 +69,42 @@ pub struct Cli {
     pub command: Commands,
 }
 
+impl Cli {
+    /// Parses the process arguments like [`Parser::parse`], plus the checks clap cannot express
+    /// between a global flag and the flags of a subcommand: `--all` excludes `--platform` even when
+    /// the flag comes before the subcommand. Exits with clap's usage error otherwise.
+    #[must_use]
+    pub fn parse_checked() -> Self {
+        let cli = Self::parse();
+        if let Err(error) = cli.check() {
+            error.exit();
+        }
+        cli
+    }
+
+    /// The cross-level checks of [`Self::parse_checked`].
+    ///
+    /// # Errors
+    /// Returns an argument conflict when `--all` and `--platform` are both given.
+    pub fn check(&self) -> Result<(), clap::Error> {
+        let is_all = matches!(
+            self.command,
+            Commands::Pull {
+                all_platforms: true
+            } | Commands::Push {
+                all_platforms: true
+            }
+        );
+        if is_all && self.platform.is_some() {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                "the argument '--all' cannot be used with '--platform <PLATFORM>'\n",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl From<&Cli> for gleon_core::context::ContextOptions {
     fn from(cli: &Cli) -> Self {
         Self {
@@ -122,17 +158,11 @@ pub enum Commands {
         /// Automatically pull the latest remote baselines before diffing
         #[arg(long = "auto-pull")]
         auto_pull: bool,
-        /// Interactively resolve Git merge conflicts in baseline manifests
-        #[arg(long = "resolve")]
-        resolve: bool,
     },
-    /// Lint baseline JSON manifests for schema validity and Git conflict markers
+    /// Lint baseline JSON manifests for schema validity and Git conflict markers (only the
+    /// global `--platform`'s when it is given)
     #[command(alias = "lint")]
-    LintManifests {
-        /// Optional platform filter (e.g. macos-aarch64)
-        #[arg(short, long)]
-        platform: Option<String>,
-    },
+    LintManifests,
     /// Interactively resolve Git merge conflicts in baseline manifests
     Resolve {
         /// Optional specific test path filter
@@ -149,18 +179,12 @@ pub enum Commands {
         /// Pull blobs for all platforms under .gleon/manifests/ instead of only the active platform
         #[arg(short = 'a', long = "all", conflicts_with = "platform")]
         all_platforms: bool,
-        /// Optional target platform override (e.g. macos-aarch64)
-        #[arg(short = 'p', long = "platform")]
-        platform: Option<String>,
     },
     /// Push staged changes and report to remote storage
     Push {
         /// Push blobs for all platforms under .gleon/manifests/ instead of only the active platform
         #[arg(short = 'a', long = "all", conflicts_with = "platform")]
         all_platforms: bool,
-        /// Optional target platform override (e.g. macos-aarch64)
-        #[arg(short = 'p', long = "platform")]
-        platform: Option<String>,
     },
     /// Clean up unreferenced baseline blobs from remote storage
     Gc {
@@ -228,9 +252,10 @@ pub enum Commands {
         #[arg(short = 'o', long)]
         out: Option<std::path::PathBuf>,
 
-        /// Limit the maximum number of historical runs kept in history.json
-        #[arg(long = "truncate-history", value_name = "NUM")]
-        truncate_history: Option<std::num::NonZeroUsize>,
+        /// Maximum number of runs kept in history.json (the oldest are dropped): the file is read
+        /// and rewritten whole on every run, so it must not grow without bound
+        #[arg(long = "truncate-history", value_name = "NUM", default_value = "200")]
+        truncate_history: std::num::NonZeroUsize,
 
         /// Upload history.json and dashboard.html to remote storage
         #[arg(long)]
@@ -310,27 +335,22 @@ mod tests {
         let args = ["gleon", "--branch", "another-branch", "diff"];
         let cli = Cli::try_parse_from(args)?;
         assert_eq!(cli.branch, Some("another-branch".to_string()));
-        assert_eq!(
-            cli.command,
-            Commands::Diff {
-                auto_pull: false,
-                resolve: false
-            }
-        );
+        assert_eq!(cli.command, Commands::Diff { auto_pull: false });
         assert_eq!(cli.target_branch, "main"); // Default value
         Ok(())
     }
 
     #[test]
     fn test_parse_lint_and_resolve_commands() -> Result<(), clap::Error> {
-        let args_lint = ["gleon", "lint-manifests", "--platform", "linux-x86_64"];
-        let cli_lint = Cli::try_parse_from(args_lint)?;
-        assert_eq!(
-            cli_lint.command,
-            Commands::LintManifests {
-                platform: Some("linux-x86_64".to_string())
-            }
-        );
+        // `--platform` is one global flag, wherever it is written.
+        for args_lint in [
+            ["gleon", "lint-manifests", "--platform", "linux-x86_64"],
+            ["gleon", "--platform", "linux-x86_64", "lint-manifests"],
+        ] {
+            let cli_lint = Cli::try_parse_from(args_lint)?;
+            assert_eq!(cli_lint.command, Commands::LintManifests);
+            assert_eq!(cli_lint.platform.as_deref(), Some("linux-x86_64"));
+        }
 
         let args_resolve = ["gleon", "resolve", "--fetch", "auth/login"];
         let cli_resolve = Cli::try_parse_from(args_resolve)?;
@@ -342,14 +362,9 @@ mod tests {
             }
         );
 
-        let args_diff_resolve = ["gleon", "diff", "--resolve"];
-        let cli_diff_resolve = Cli::try_parse_from(args_diff_resolve)?;
-        assert_eq!(
-            cli_diff_resolve.command,
-            Commands::Diff {
-                auto_pull: false,
-                resolve: true,
-            }
+        assert!(
+            Cli::try_parse_from(["gleon", "diff", "--resolve"]).is_err(),
+            "conflicts are resolved by `gleon resolve`"
         );
         Ok(())
     }
@@ -453,6 +468,19 @@ mod tests {
 
         let push_conflict = Cli::try_parse_from(["gleon", "push", "-a", "-p", "macos-aarch64"]);
         assert!(push_conflict.is_err());
+        let global_conflict =
+            Cli::try_parse_from(["gleon", "-p", "macos-aarch64", "pull", "--all"]).unwrap();
+        assert_eq!(
+            global_conflict.check().unwrap_err().kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "the global flag before the subcommand conflicts too"
+        );
+        assert!(
+            Cli::try_parse_from(["gleon", "-p", "x", "pull"])
+                .unwrap()
+                .check()
+                .is_ok()
+        );
 
         let pull_ok = Cli::try_parse_from(["gleon", "pull", "--all"]);
         assert!(pull_ok.is_ok());
@@ -494,10 +522,15 @@ mod tests {
             Commands::Dashboard {
                 report: None,
                 out: None,
-                truncate_history: std::num::NonZeroUsize::new(5),
+                truncate_history: std::num::NonZeroUsize::new(5).unwrap(),
                 push: true,
             }
         );
+        let default = Cli::try_parse_from(["gleon", "dashboard"])?;
+        assert!(matches!(
+            default.command,
+            Commands::Dashboard { truncate_history, .. } if truncate_history.get() == 200
+        ));
         Ok(())
     }
 }

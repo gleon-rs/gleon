@@ -181,6 +181,17 @@ pub struct MetricsConfig {
 /// Name of the environment variable that overrides [`MetricsConfig::enabled`].
 pub const METRICS_ENV: &str = "GLEON_METRICS";
 
+/// Lines of `.gleon/.gitignore`: local caches, run output and secrets never belong in Git.
+pub const GITIGNORE_LINES: &[&str] = &[
+    "blobs/",
+    "runs/",
+    ".env",
+    ".env.local",
+    "credentials",
+    "dashboard.html",
+    "history.json",
+];
+
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
@@ -201,26 +212,35 @@ impl MetricsConfig {
 
     /// Applies the [`METRICS_ENV`] override (`env_value` is its raw value, `None` when unset).
     ///
-    /// An empty value counts as unset.
+    /// # Errors
+    /// Returns [`ConfigError::InvalidEnvFlag`] as [`Self::env_override`] does.
+    pub fn effective(self, env_value: Option<&str>) -> Result<Self, ConfigError> {
+        Ok(Self {
+            enabled: Self::env_override(env_value)?.unwrap_or(self.enabled),
+            ..self
+        })
+    }
+
+    /// The value of [`METRICS_ENV`] (`env_value` is its raw value, `None` when unset): `None` when
+    /// unset or empty, else whether it turns metrics on.
     ///
     /// # Errors
     /// Returns [`ConfigError::InvalidEnvFlag`] for any value other than `1`, `true`, `0` or
     /// `false` (ASCII case-insensitive, surrounding whitespace ignored).
-    pub fn effective(self, env_value: Option<&str>) -> Result<Self, ConfigError> {
+    pub fn env_override(env_value: Option<&str>) -> Result<Option<bool>, ConfigError> {
         let Some(raw) = env_value.map(str::trim).filter(|v| !v.is_empty()) else {
-            return Ok(self);
+            return Ok(None);
         };
-        let enabled = if raw == "1" || raw.eq_ignore_ascii_case("true") {
-            true
+        if raw == "1" || raw.eq_ignore_ascii_case("true") {
+            Ok(Some(true))
         } else if raw == "0" || raw.eq_ignore_ascii_case("false") {
-            false
+            Ok(Some(false))
         } else {
-            return Err(ConfigError::InvalidEnvFlag {
+            Err(ConfigError::InvalidEnvFlag {
                 name: METRICS_ENV,
                 value: raw.to_owned(),
-            });
-        };
-        Ok(Self { enabled, ..self })
+            })
+        }
     }
 }
 
@@ -425,9 +445,9 @@ impl GleonConfig {
                     rule.diff.min_similarity
                 )));
             }
-            if !(rule.diff.color_tolerance.is_finite() && rule.diff.color_tolerance >= 0.0) {
+            if !gleon_engine::config::is_valid_color_tolerance(rule.diff.color_tolerance) {
                 return Err(ConfigError::Validation(format!(
-                    "screenshots[{i}].diff.color_tolerance must be a finite, non-negative number (got {})",
+                    "screenshots[{i}].diff.color_tolerance must be between 0 and 255 (got {})",
                     rule.diff.color_tolerance
                 )));
             }
@@ -727,12 +747,12 @@ screenshots:
 
     #[test]
     fn test_validation_invalid_color_tolerance() {
-        for bad in [f64::NAN, -1.0, f64::INFINITY] {
+        for bad in [f64::NAN, -1.0, 255.5, f64::INFINITY] {
             let mut config = GleonConfig::default();
             config.screenshots[0].diff.color_tolerance = bad;
             assert!(matches!(
                 config.validate(),
-                Err(ConfigError::Validation(msg)) if msg.contains("color_tolerance must be a finite, non-negative number")
+                Err(ConfigError::Validation(msg)) if msg.contains("color_tolerance must be between 0 and 255")
             ));
         }
     }
@@ -944,6 +964,14 @@ metrics:
             }
         );
         assert!(!on.effective(Some("false")).unwrap().enabled);
+        for (value, expected) in [
+            (None, None),
+            (Some(""), None),
+            (Some(" 1 "), Some(true)),
+            (Some("False"), Some(false)),
+        ] {
+            assert_eq!(MetricsConfig::env_override(value).unwrap(), expected);
+        }
         let err = on.effective(Some(" yes ")).unwrap_err();
         assert!(matches!(
             &err,

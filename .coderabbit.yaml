@@ -68,7 +68,8 @@ reviews:
       instructions: >
         Permissive (MIT OR Apache-2.0) crates shared with the gleon Flutter package through
         gleon-ffi. They must not depend on BUSL crates (gleon-core, gleon). Any change to the
-        gleon-ffi JSON contract (options, report, resolve response) must bump `ABI_VERSION`.
+        gleon-ffi C contract (signatures, packed string order, flags, `GleonSummary`, verdict and
+        error codes) must bump `ABI_VERSION`.
         Changes to `gleon-model` types must regenerate `gleon-model/schema/*.v1.json`
         (`GLEON_UPDATE_SCHEMAS=1 cargo test -p gleon-model --test schema`); breaking case report
         changes need a new schema version. Engine policy changes must keep

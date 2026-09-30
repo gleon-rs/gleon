@@ -61,13 +61,13 @@ where
     }
 }
 
-/// Writes to a temporary file created next to `path` via the closure `f`, then atomically
-/// persists it to `path` (calling fsync on the file, and on non-Windows platforms, its directory).
+/// Writes to a temporary file created next to `path` via the closure `f`, then durably and
+/// atomically persists it to `path` (see [`gleon_model::fs::write_atomically_with`]).
 ///
 /// # Errors
-/// Returns `E` if the parent directory cannot be resolved or created, the temporary file
-/// cannot be created or written, the closure `f` returns an error, or the final
-/// persist/fsync step fails.
+/// Returns `E` if `path` is the root, the parent directory cannot be created, the temporary file
+/// cannot be created or written, the closure `f` returns an error, or the final persist/fsync
+/// step fails.
 pub fn write_file_atomically<P, F, E>(path: P, f: F) -> Result<(), E>
 where
     P: AsRef<Path>,
@@ -75,108 +75,20 @@ where
     E: From<IoError>,
 {
     let path = path.as_ref();
-    let parent = match path.parent() {
-        Some(p) if p.as_os_str().is_empty() => Path::new("."),
-        Some(p) => p,
-        None => {
-            return Err(E::from(IoError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Cannot resolve parent directory for root path",
-            ))));
-        }
-    };
-    std::fs::create_dir_all(parent).map_err(|e| E::from(IoError::Io(e)))?;
-
-    let file_name = path.file_name().ok_or_else(|| {
-        E::from(IoError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Invalid file name",
-        )))
-    })?;
-
-    let temp_file = tempfile::Builder::new()
-        .prefix(file_name)
-        .suffix(".tmp")
-        .tempfile_in(parent)
-        .map_err(|e| E::from(IoError::Io(e)))?;
-
-    {
-        use std::io::Write;
-        let mut writer = std::io::BufWriter::new(temp_file.as_file());
-        f(&mut writer)?;
-        writer.flush().map_err(|e| E::from(IoError::Io(e)))?;
-    }
-
-    #[cfg(all(unix, not(miri)))]
-    let perms_result = {
-        use std::os::unix::fs::PermissionsExt;
-        // An existing target keeps its own mode (a deliberately locked-down file stays that
-        // way). A brand-new one must NOT inherit `tempfile`'s 0600 default: these files
-        // (manifests, reports, `.gitignore`) are committed to Git and read back by other
-        // users/containers in CI, so they get the same 0644 a plain `File::create` would
-        // produce under the conventional 022 umask.
-        const DEFAULT_FILE_MODE: u32 = 0o644;
-        temp_file
-            .as_file()
-            .metadata()
-            .map_err(IoError::Io)
-            .and_then(|metadata| {
-                let mut perms = metadata.permissions();
-                perms.set_mode(
-                    std::fs::metadata(path)
-                        .map_or(DEFAULT_FILE_MODE, |existing| existing.permissions().mode()),
-                );
-                temp_file
-                    .as_file()
-                    .set_permissions(perms)
-                    .map_err(IoError::Io)
-            })
-            .map_err(E::from)
-    };
-    #[cfg(not(all(unix, not(miri))))]
-    let perms_result: Result<(), E> = Ok(());
-
-    perms_result
-        .and_then(|()| {
-            temp_file
-                .as_file()
-                .sync_all()
-                .map_err(|e| E::from(IoError::Io(e)))
+    // The closure's own error is carried out of the `io::Result` of the shared writer.
+    let mut closure_error = None;
+    gleon_model::fs::write_atomically_with(path, gleon_model::fs::Durability::Durable, |writer| {
+        f(writer).map_err(|e| {
+            closure_error = Some(e);
+            std::io::Error::other("the writer failed")
         })
-        .and_then(|()| {
-            temp_file.persist(path).map_err(|e| {
-                tracing::error!("Failed to save file atomically to {:?}: {}", path, e);
-                E::from(IoError::Io(e.error))
-            })
-        })
-        .map(|_persisted_file| {
-            #[cfg(not(windows))]
-            {
-                // Best-effort, like every other directory fsync in the codebase: the file itself
-                // is already durably persisted above. `fsync` on a *directory* descriptor is
-                // rejected with `EINVAL` on NFS/SMB/FUSE/9p (Docker volumes, WSL mounts), and
-                // failing the whole atomic save there would make gleon unusable on those mounts.
-                match std::fs::File::open(parent) {
-                    Ok(dir) => {
-                        if let Err(e) = dir.sync_all() {
-                            tracing::debug!(
-                                "Directory fsync not supported for {:?} ({e}); file contents are still durable",
-                                parent
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("Could not open {:?} to fsync directory entry: {e}", parent);
-                    }
-                }
-            }
-            #[cfg(windows)]
-            {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
-            }
-        })
+    })
+    .map_err(|e| {
+        tracing::error!("Failed to save file atomically to {:?}: {}", path, e);
+        closure_error
+            .take()
+            .unwrap_or_else(|| E::from(IoError::Io(e)))
+    })
 }
 
 /// Atomically writes raw bytes to `path`.
@@ -258,6 +170,17 @@ mod tests {
     #[derive(Serialize)]
     struct Dummy {
         value: String,
+    }
+
+    #[test]
+    fn test_write_file_atomically_returns_the_writer_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("a.json");
+        let result = write_file_atomically(&path, |_| {
+            Err(IoError::Io(std::io::Error::other("serializer failed")))
+        });
+        assert!(matches!(result, Err(IoError::Io(ref e)) if e.to_string() == "serializer failed"));
+        assert!(!path.exists());
     }
 
     #[test]

@@ -15,18 +15,22 @@ use crate::config::{Dimension, Zone};
 ///
 /// A width of `0%`, height of `0`, or an empty `zones` slice is treated as a no-op.
 ///
+/// Returns how many zones extended beyond the image and were clamped, so callers without a
+/// `tracing` subscriber (the FFI integrations) can tell their users.
+///
 /// # Panics
 /// Does not panic in practice: internal pixel-slice indices are always clamped to the
 /// image's bounds before use, so the internal `.expect()` calls documenting that invariant
 /// can never trigger.
-pub fn apply_masks(img: &mut RgbaImage, zones: &[Zone]) {
+pub fn apply_masks(img: &mut RgbaImage, zones: &[Zone]) -> usize {
     let img_w = img.width();
     let img_h = img.height();
 
     if img_w == 0 || img_h == 0 {
-        return;
+        return 0;
     }
 
+    let mut clamped = 0;
     for zone in zones {
         let w_px = resolve_dimension(zone.width, img_w);
         let h_px = resolve_dimension(zone.height, img_h);
@@ -41,6 +45,7 @@ pub fn apply_masks(img: &mut RgbaImage, zones: &[Zone]) {
         let is_out_of_bounds = zone.x >= img_w || zone.y >= img_h || x_end > img_w || y_end > img_h;
 
         if is_out_of_bounds {
+            clamped += 1;
             warn!(
                 "Mask zone extends beyond image bounds: \
                  zone = x:{}, y:{}, w:{:?}, h:{:?}, image_dims = {}x{}",
@@ -98,6 +103,7 @@ pub fn apply_masks(img: &mut RgbaImage, zones: &[Zone]) {
             fill_black(row_slice);
         }
     }
+    clamped
 }
 
 #[inline]
@@ -295,10 +301,11 @@ mod tests {
     fn mask_fills_exact_boundary() {
         let mut img = red_image(10, 10);
         // A zone that exactly covers the full image — no clamping needed.
-        apply_masks(
+        let clamped = apply_masks(
             &mut img,
             &[zone(0, 0, Dimension::Pixels(10), Dimension::Pixels(10))],
         );
+        assert_eq!(clamped, 0);
         for y in 0..10 {
             for x in 0..10 {
                 assert_eq!(*img.get_pixel(x, y), BLACK);
@@ -322,10 +329,14 @@ mod tests {
     fn oob_x_end_clamped_to_width() {
         let mut img = red_image(100, 100);
         // x:90, width:20 → x_end=110, clamped to 100 → pixels [90..99] painted black
-        apply_masks(
+        let clamped = apply_masks(
             &mut img,
-            &[zone(90, 0, Dimension::Pixels(20), Dimension::Pixels(100))],
+            &[
+                zone(90, 0, Dimension::Pixels(20), Dimension::Pixels(100)),
+                zone(0, 0, Dimension::Pixels(1), Dimension::Pixels(1)),
+            ],
         );
+        assert_eq!(clamped, 1, "only the zone reaching beyond the image counts");
         assert_eq!(*img.get_pixel(90, 0), BLACK);
         assert_eq!(*img.get_pixel(99, 0), BLACK);
         assert_eq!(*img.get_pixel(89, 0), RED);

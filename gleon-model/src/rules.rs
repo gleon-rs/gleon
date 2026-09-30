@@ -54,7 +54,7 @@ pub enum Selection {
     Unmatched,
 }
 
-/// How a golden relates to the configured rules (the JSON of `gleon_config_resolve`).
+/// How a golden relates to the configured rules.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuleMatch {
