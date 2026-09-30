@@ -17,8 +17,8 @@ pub enum Durability {
     /// the rename and its directory entry afterwards. Costly (`F_FULLFSYNC` on macOS, around
     /// 5 ms per flush).
     Durable,
-    /// Regenerable output (case reports, failure artifacts): atomic, but left to the OS cache. A
-    /// power loss may lose the newest version, never corrupt it.
+    /// Output the next run recreates (case reports, failure artifacts): atomic, but left to the OS
+    /// cache. A power loss may lose the newest version, never corrupt it.
     Atomic,
 }
 
@@ -82,12 +82,23 @@ pub fn write_atomically_with(
 /// # Errors
 /// Returns the I/O error of creating or writing the file.
 pub fn create_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    create_new_with(path, |file| file.write_all(bytes))
+}
+
+/// [`create_new`] with the content from `write`. A failed write removes the file: a partial one
+/// would never be completed, since the next call keeps it.
+fn create_new_with(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
     {
-        Ok(mut file) => file.write_all(bytes),
+        Ok(mut file) => write(&mut file).inspect_err(|_| {
+            let _ = fs::remove_file(path);
+        }),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e),
     }
@@ -295,6 +306,26 @@ mod tests {
         create_new(&path, b"runs/\n").unwrap();
         create_new(&path, b"other\n").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"runs/\n");
+    }
+
+    #[test]
+    fn test_create_new_removes_a_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let result = create_new_with(&path, |file| {
+            file.write_all(b"ru")?;
+            Err(io::Error::other("disk full"))
+        });
+        assert_eq!(result.unwrap_err().to_string(), "disk full");
+        assert!(!path.exists());
+        create_new(&path, b"runs/\n").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"runs/\n");
+    }
+
+    #[test]
+    fn test_a_directory_sync_is_best_effort() {
+        // Unsupported (Windows, network mounts) or failing: only logged, the file is durable.
+        sync_dir(&tempfile::tempdir().unwrap().path().join("gone"));
     }
 
     #[test]

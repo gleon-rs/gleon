@@ -46,8 +46,8 @@ pub enum Tolerance {
         /// Minimum local SSIM `[0, 1]` every neighborhood must reach.
         #[schemars(range(min = 0.0, max = 1.0))]
         min_similarity: f64,
-        /// Tolerated deviation beyond the local envelope, in 8-bit channel units.
-        #[schemars(range(min = 0.0))]
+        /// Tolerated deviation beyond the local envelope, in 8-bit channel units, `[0, 255]`.
+        #[schemars(range(min = 0.0, max = 255.0))]
         color_tolerance: f64,
     },
 }

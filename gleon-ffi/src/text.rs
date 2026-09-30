@@ -81,7 +81,7 @@ pub fn tolerance(tolerance: &Tolerance) -> String {
     }
 }
 
-/// A region as `(x, y) WxHpx`.
+/// A region, e.g. `(4, 8) 16x32px`.
 pub fn region(region: &Region) -> String {
     format!(
         "({}, {}) {}x{}px",
@@ -290,6 +290,7 @@ mod tests {
             (0.9995, 3, 4, "0.9995"),
             (0.999_95, 3, 4, "1.000"),
             (146.0, 1, 1, "146.0"),
+            (100.0, 0, 0, "100"),
             (-1.0, 2, 4, "-1.00"),
             (-0.0, 2, 4, "0.00"),
             (7.000_000_000_000_001, 2, 4, "7.00"),

@@ -638,9 +638,10 @@
           "type": "object",
           "properties": {
             "color_tolerance": {
-              "description": "Tolerated deviation beyond the local envelope, in 8-bit channel units.",
+              "description": "Tolerated deviation beyond the local envelope, in 8-bit channel units, `[0, 255]`.",
               "type": "number",
               "format": "double",
+              "maximum": 255.0,
               "minimum": 0.0
             },
             "kind": {

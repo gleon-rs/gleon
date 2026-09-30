@@ -43,7 +43,7 @@ pub struct Case<'a> {
     pub test_name: Option<&'a str>,
 }
 
-/// Width and height from a PNG header, without decoding (absent when the header is not a PNG's).
+/// Width and height from a PNG header, without decoding (absent when `bytes` do not start with one).
 fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
     let header = bytes.get(..24)?;

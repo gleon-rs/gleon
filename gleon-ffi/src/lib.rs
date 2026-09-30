@@ -181,7 +181,11 @@ fn split<'a, const N: usize>(
     if rest.is_empty() {
         Ok(strings)
     } else {
-        Err(format!("{} bytes follow the last string", rest.len()))
+        Err(format!(
+            "the lengths cover {} of {} bytes",
+            bytes.len() - rest.len(),
+            bytes.len()
+        ))
     }
 }
 
@@ -642,7 +646,7 @@ mod tests {
         for (bytes, lengths, needle) in [
             (&b"xyz"[..], &[1, 2, 0][..], "expected 2 strings, got 3"),
             (b"xy", &[1, 2], "`b` runs past the end"),
-            (b"xyzw", &[1, 2], "1 bytes follow the last string"),
+            (b"xyz.", &[1, 2], "the lengths cover 3 of 4 bytes"),
             (b"x\xff", &[1, 1], "`b` is not UTF-8"),
         ] {
             assert!(

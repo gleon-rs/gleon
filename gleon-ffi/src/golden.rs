@@ -456,7 +456,7 @@ mod tests {
     }
 
     /// `image` re-encoded as PNG in another pixel format.
-    fn reencode(image: &DynamicImage) -> Vec<u8> {
+    fn re_encode(image: &DynamicImage) -> Vec<u8> {
         let mut bytes = Vec::new();
         image
             .write_to(&mut io::Cursor::new(&mut bytes), ImageFormat::Png)
@@ -876,8 +876,8 @@ metrics:
 
         let decoded = image::load_from_memory(COUNTER_0).unwrap();
         for same_pixels in [
-            reencode(&decoded),
-            reencode(&DynamicImage::ImageRgba16(decoded.to_rgba16())),
+            re_encode(&decoded),
+            re_encode(&DynamicImage::ImageRgba16(decoded.to_rgba16())),
             with_text_chunk(COUNTER_0),
         ] {
             assert_ne!(same_pixels, COUNTER_0);
@@ -899,26 +899,26 @@ metrics:
     }
 
     #[test]
-    fn test_opaque_pngs_without_alpha_match_their_rgba_golden() {
+    fn test_opaque_images_without_alpha_match_their_rgba_golden() {
         let fixture = Fixture::new(None);
         let session = fixture.session(None);
         let rgba = image::load_from_memory(&png(4, 4, true)).unwrap();
-        fs::write(&fixture.golden, reencode(&rgba)).unwrap();
+        fs::write(&fixture.golden, re_encode(&rgba)).unwrap();
         for opaque in [
             DynamicImage::ImageRgb8(rgba.to_rgb8()),
             DynamicImage::ImageRgba16(rgba.to_rgba16()),
         ] {
-            let finished = fixture.run(&session, Mode::Compare, &reencode(&opaque));
+            let finished = fixture.run(&session, Mode::Compare, &re_encode(&opaque));
             assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
         }
         let gray = image::GrayImage::from_pixel(4, 4, image::Luma([128]));
         fs::write(
             &fixture.golden,
-            reencode(&DynamicImage::ImageLuma8(gray.clone())),
+            re_encode(&DynamicImage::ImageLuma8(gray.clone())),
         )
         .unwrap();
         let as_rgba = DynamicImage::ImageRgba8(DynamicImage::ImageLuma8(gray).to_rgba8());
-        let finished = fixture.run(&session, Mode::Compare, &reencode(&as_rgba));
+        let finished = fixture.run(&session, Mode::Compare, &re_encode(&as_rgba));
         assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
     }
 
@@ -1016,14 +1016,13 @@ metrics:
         let is_readable = fs::read(&fixture.golden).is_ok(); // Always readable as root.
         let finished = fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, true));
         fs::set_permissions(&fixture.golden, fs::Permissions::from_mode(0o644)).unwrap();
-        if !is_readable {
-            assert_eq!(finished.error_kind, ErrorKind::Io);
-            assert!(
-                finished.message.contains("cannot read the golden"),
-                "{}",
-                finished.message
-            );
-        }
+        assert_eq!(finished.error_kind == ErrorKind::Io, !is_readable);
+        assert_eq!(
+            finished.message.contains("cannot read the golden"),
+            !is_readable,
+            "{}",
+            finished.message
+        );
     }
 
     #[test]
@@ -1080,9 +1079,7 @@ metrics:
         let changed = fixture.run(&session, Mode::Update, &png(4, 4, true));
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(unchanged.verdict, Verdict::Updated, "{}", unchanged.message);
-        if !is_writable {
-            assert_eq!(changed.error_kind, ErrorKind::Io);
-        }
+        assert_eq!(changed.error_kind == ErrorKind::Io, !is_writable);
     }
 
     #[test]

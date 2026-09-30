@@ -71,8 +71,8 @@ pub struct Cli {
 
 impl Cli {
     /// Parses the process arguments like [`Parser::parse`], plus the checks clap cannot express
-    /// between a global flag and a subcommand's own: `--all` excludes `--platform` even when the
-    /// flag comes before the subcommand. Exits with clap's usage error otherwise.
+    /// between a global flag and the flags of a subcommand: `--all` excludes `--platform` even when
+    /// the flag comes before the subcommand. Exits with clap's usage error otherwise.
     #[must_use]
     pub fn parse_checked() -> Self {
         let cli = Self::parse();

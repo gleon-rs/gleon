@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use gleon_engine::{
-    ComparisonResult, compare_images,
+    ComparisonResult, Measurement, compare_images,
     config::Zone,
     decode::{DecodeError, decode_rgba},
     masking::apply_masks,
@@ -111,14 +111,7 @@ pub fn compare(
             0
         };
         let total_pixels = u64::from(golden_size.0) * u64::from(golden_size.1);
-        let metrics_of = |measurement| {
-            Metrics::from_measurement(&measurement, tolerance, total_pixels).ok_or_else(|| {
-                Failure::new(
-                    ErrorKind::Internal,
-                    "internal error: the engine measurement does not match the tolerance",
-                )
-            })
-        };
+        let metrics_of = |measurement| metrics_of(&measurement, tolerance, total_pixels);
         match compare_images(&golden_img, &candidate_img, mode, &config) {
             ComparisonResult::Match { measurement } => Ok(Comparison::Match {
                 metrics: metrics_of(measurement)?,
@@ -149,6 +142,21 @@ pub fn compare(
         }
     };
     run().unwrap_or_else(Comparison::Error)
+}
+
+/// The metrics of `measurement`; an internal failure if the engine measured in another mode than
+/// `tolerance` asked for (a bug).
+fn metrics_of(
+    measurement: &Measurement,
+    tolerance: &Tolerance,
+    total_pixels: u64,
+) -> Result<Metrics, Failure> {
+    Metrics::from_measurement(measurement, tolerance, total_pixels).ok_or_else(|| {
+        Failure::new(
+            ErrorKind::Internal,
+            "internal error: the engine measurement does not match the tolerance",
+        )
+    })
 }
 
 #[cfg(all(test, not(miri)))]
@@ -331,5 +339,15 @@ mod tests {
                     if message.contains(needle)
             ));
         }
+    }
+
+    #[test]
+    fn test_a_measurement_of_another_mode_is_an_internal_error() {
+        let pixel = Measurement::Pixel { diff_count: 0 };
+        assert!(metrics_of(&pixel, &EXACT, 1).is_ok());
+        assert!(matches!(
+            metrics_of(&pixel, &SSIM, 1),
+            Err(Failure { kind: ErrorKind::Internal, message }) if message.contains("internal error")
+        ));
     }
 }

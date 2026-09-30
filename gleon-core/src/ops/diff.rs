@@ -255,9 +255,8 @@ pub(crate) fn process_diff_case(
 /// integrations (`cases/`): they are written by other tools (test runs) and consumed separately.
 fn clear_previous_run(runs_latest: &Path) -> std::io::Result<()> {
     let entries = match std::fs::read_dir(runs_latest) {
-        Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
+        entries => entries?,
     };
     let cases = Path::new(gleon_model::case::CASES_DIR)
         .file_name()

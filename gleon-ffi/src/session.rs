@@ -258,12 +258,6 @@ fn canonical_file(path: &Path) -> io::Result<PathBuf> {
     let mut existing = path;
     loop {
         match canonical(existing) {
-            Ok(resolved) => {
-                return Ok(missing
-                    .into_iter()
-                    .rev()
-                    .fold(resolved, |dir, name| dir.join(name)));
-            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 missing.push(existing.file_name().ok_or(e)?);
                 existing = existing
@@ -271,7 +265,12 @@ fn canonical_file(path: &Path) -> io::Result<PathBuf> {
                     .filter(|dir| !dir.as_os_str().is_empty())
                     .unwrap_or_else(|| Path::new("."));
             }
-            Err(e) => return Err(e),
+            resolved => {
+                return Ok(missing
+                    .into_iter()
+                    .rev()
+                    .fold(resolved?, |dir, name| dir.join(name)));
+            }
         }
     }
 }
@@ -598,6 +597,17 @@ metrics:
             .plan(&root.join("test/gone/new.png"), None, vec![])
             .unwrap();
         assert!(plan.record.is_none(), "a missing directory is outside");
+    }
+
+    #[test]
+    fn test_a_golden_outside_the_given_workspace_has_no_rule() {
+        let (_dir, root) = workspace(YAML, "Clock.png");
+        let other = tempfile::tempdir().unwrap();
+        let rule = session(None).rule(
+            Arc::new(Workspace::new(root)),
+            &other.path().join("Clock.png"),
+        );
+        assert!(matches!(rule, Ok(None)));
     }
 
     #[test]
