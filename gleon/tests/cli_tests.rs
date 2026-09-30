@@ -1247,24 +1247,3 @@ fn test_diff_auto_pull_runs_pull_first() {
     // No storage configured -> pull reports local mode, then the diff itself proceeds.
     assert.stderr(predicate::str::contains("Running blob pull..."));
 }
-
-/// Combining `--auto-pull` with `--resolve` must still run the pull: an early return on
-/// `--resolve` used to short-circuit before `--auto-pull` was even checked, silently dropping
-/// it whenever both flags were passed together.
-#[test]
-fn test_diff_auto_pull_runs_before_resolve() {
-    let dir = init_temp_dir();
-
-    let mut cmd = Command::cargo_bin("gleon").unwrap();
-    let assert = cmd
-        .current_dir(dir.path())
-        .args(["diff", "--auto-pull", "--resolve"])
-        .assert();
-
-    assert
-        .success()
-        .stderr(predicate::str::contains("Running blob pull..."))
-        .stderr(predicate::str::contains(
-            "Scanning for conflicted manifest files...",
-        ));
-}

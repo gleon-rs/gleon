@@ -142,8 +142,17 @@ pub struct DiffConfig {
         default = "default_color_tolerance",
         deserialize_with = "deserialize_color_tolerance"
     )]
-    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0)))]
+    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 255.0)))]
     pub color_tolerance: f64,
+}
+
+/// The largest `color_tolerance`: a whole 8-bit channel.
+pub const MAX_COLOR_TOLERANCE: f64 = 255.0;
+
+/// Whether `value` is a valid `color_tolerance`: within `[0, 255]` 8-bit channel units.
+#[must_use]
+pub fn is_valid_color_tolerance(value: f64) -> bool {
+    (0.0..=MAX_COLOR_TOLERANCE).contains(&value)
 }
 
 fn deserialize_color_tolerance<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -151,11 +160,11 @@ where
     D: Deserializer<'de>,
 {
     f64::deserialize(deserializer).and_then(|val| {
-        if val.is_finite() && val >= 0.0 {
+        if is_valid_color_tolerance(val) {
             Ok(val)
         } else {
             Err(serde::de::Error::custom(
-                "color_tolerance must be a finite, non-negative 8-bit channel amount",
+                "color_tolerance must be between 0 and 255 (8-bit channel units)",
             ))
         }
     })
@@ -290,7 +299,8 @@ mod tests {
         };
         assert!(err("min_similarity: 1.5").contains("between 0.0 and 1.0"));
         assert!(err("threshold: -0.1").contains("between 0.0 and 1.0"));
-        assert!(err("color_tolerance: -1").contains("finite, non-negative"));
+        assert!(err("color_tolerance: -1").contains("between 0 and 255"));
+        assert!(err("color_tolerance: 256").contains("between 0 and 255"));
         let defaults: DiffConfig = serde_yaml::from_str("{}").unwrap();
         assert_eq!(defaults, DiffConfig::default());
     }

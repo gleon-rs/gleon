@@ -4,6 +4,12 @@
 //! Case reports are the input of future `gleon report` / dashboard aggregation; the schema is
 //! committed as `schema/case.v1.json`. Enums are internally tagged (`"kind"`) and every name is
 //! `snake_case`, so non-Rust writers never mirror Rust type names.
+//!
+//! The directory holds the latest result of every golden: integrations run tests in many
+//! processes, so no single writer can reset it, and each report replaces the previous one of its
+//! golden. Reports of goldens that were since removed or renamed stay behind until `gleon clean`;
+//! readers skip reports whose `golden.path` no longer exists and group a run by `recorded_at`. The
+//! gleon CLI never deletes this directory outside `gleon clean`.
 
 use gleon_engine::{Measurement, Region, config::Zone};
 use serde::{Deserialize, Serialize};
@@ -12,6 +18,9 @@ use crate::{platform::PlatformConfig, tolerance::Tolerance};
 
 /// Version of the case report format.
 pub const CASE_SCHEMA_VERSION: u32 = 1;
+
+/// Directory of the case reports, relative to `.gleon/`.
+pub const CASES_DIR: &str = "runs/latest/cases";
 
 /// Comparison metrics of one image region.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -159,6 +168,18 @@ impl Sha256Hex {
         }
     }
 
+    /// The hex form of a raw 32-byte digest (always valid).
+    #[must_use]
+    pub fn from_digest(digest: &[u8; 32]) -> Self {
+        use std::fmt::Write as _;
+
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            let _infallible = write!(hex, "{byte:02x}");
+        }
+        Self(hex)
+    }
+
     /// The lowercase hex digest.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -225,8 +246,9 @@ impl RegionMetrics {
 pub struct GoldenImage {
     /// Path relative to the workspace root, `/`-separated, case as on disk.
     pub path: String,
-    /// SHA-256 of the PNG bytes.
-    pub sha256: Sha256Hex,
+    /// SHA-256 of the PNG bytes; absent when the golden does not exist (`missing`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<Sha256Hex>,
     /// Width in pixels; absent if the PNG header could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
@@ -299,6 +321,24 @@ pub enum CaseOutcome {
     Error,
     /// The golden was rewritten from the candidate (update mode); nothing was compared.
     Updated,
+    /// The golden does not exist (a new test without a baseline); nothing was compared.
+    Missing,
+}
+
+impl CaseOutcome {
+    /// The name of this outcome in a case report (`dimension_mismatch`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Identical => "identical",
+            Self::Match => "match",
+            Self::Mismatch => "mismatch",
+            Self::DimensionMismatch => "dimension_mismatch",
+            Self::Error => "error",
+            Self::Updated => "updated",
+            Self::Missing => "missing",
+        }
+    }
 }
 
 /// Wall-clock durations in milliseconds.
@@ -454,6 +494,10 @@ mod tests {
     fn test_sha256_is_validated_and_lowercased() {
         let upper = "AB".repeat(32);
         assert_eq!(Sha256Hex::new(&upper).unwrap().as_str(), "ab".repeat(32));
+        assert_eq!(
+            Sha256Hex::from_digest(&[0xab; 32]).as_str(),
+            "ab".repeat(32)
+        );
         for bad in ["", "abc", &"g".repeat(64), &"a".repeat(65)] {
             assert_eq!(Sha256Hex::new(bad), Err(InvalidSha256(bad.to_owned())));
         }

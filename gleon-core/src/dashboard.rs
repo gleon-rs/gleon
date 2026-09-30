@@ -643,7 +643,21 @@ async fn upload_history_and_dashboard(
     expected_dashboard_version: Option<&str>,
     dashboard_create_only: bool,
 ) -> Result<(), StorageError> {
-    let res_html = adapter
+    // `history.json` is the source of truth, so it goes first: when its precondition fails
+    // (another run was faster), nothing is published and the caller retries on the newer history.
+    // A failed HTML upload after it only leaves the page one run behind until the next upload,
+    // which renders it again from the history.
+    adapter
+        .put_object_conditional(
+            "history.json",
+            bytes::Bytes::from(history_json),
+            Some("application/json"),
+            expected_history_etag,
+            expected_history_version,
+            history_create_only,
+        )
+        .await?;
+    adapter
         .put_object_conditional(
             "dashboard.html",
             bytes::Bytes::from(html_content),
@@ -652,23 +666,7 @@ async fn upload_history_and_dashboard(
             expected_dashboard_version,
             dashboard_create_only,
         )
-        .await;
-
-    match res_html {
-        Ok(()) => {
-            adapter
-                .put_object_conditional(
-                    "history.json",
-                    bytes::Bytes::from(history_json),
-                    Some("application/json"),
-                    expected_history_etag,
-                    expected_history_version,
-                    history_create_only,
-                )
-                .await
-        }
-        Err(e) => Err(e),
-    }
+        .await
 }
 
 /// Result summary of the dashboard execution.
@@ -1583,11 +1581,11 @@ mod tests {
             Err(StorageError::PreconditionFailed { .. })
         ));
 
-        // 4. First upload (dashboard.html) succeeds, second (history.json with mismatched etag) fails
-        let res_second_fail = upload_history_and_dashboard(
+        // 4. A stale history (mismatched etag) publishes nothing: the page is never ahead of it
+        let res_stale_history = upload_history_and_dashboard(
             &adapter,
             b"{}".to_vec(),
-            b"<html></html>".to_vec(),
+            b"<html>newer</html>".to_vec(),
             Some("mismatched_history_etag"),
             None,
             false,
@@ -1597,9 +1595,32 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            res_second_fail,
+            res_stale_history,
             Err(StorageError::PreconditionFailed { .. })
         ));
+        let page = adapter.get_object("dashboard.html").await.unwrap().unwrap();
+        assert_eq!(&page.bytes[..], b"<html></html>");
+
+        // 5. The history goes first: a failing page upload leaves the new history in place
+        let history = adapter.get_object("history.json").await.unwrap().unwrap();
+        let res_page_fail = upload_history_and_dashboard(
+            &adapter,
+            b"{\"runs\":[]}".to_vec(),
+            b"<html>newer</html>".to_vec(),
+            history.e_tag.as_deref(),
+            None,
+            false,
+            Some("mismatched_dashboard_etag"),
+            None,
+            false,
+        )
+        .await;
+        assert!(matches!(
+            res_page_fail,
+            Err(StorageError::PreconditionFailed { .. })
+        ));
+        let history = adapter.get_object("history.json").await.unwrap().unwrap();
+        assert_eq!(&history.bytes[..], b"{\"runs\":[]}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

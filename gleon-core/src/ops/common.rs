@@ -251,7 +251,7 @@ pub fn build_manifest(
 /// other than not existing, or if the atomic write fails.
 pub fn append_missing_gitignore_lines(
     path: &Path,
-    entries: &[String],
+    entries: &[impl AsRef<str>],
 ) -> Result<Vec<String>, CoreError> {
     // Read strictly: this rewrites the file wholesale below, so treating an unreadable or
     // non-UTF-8 existing file as "empty" would silently destroy the user's own ignore rules.
@@ -264,8 +264,8 @@ pub fn append_missing_gitignore_lines(
 
     let mut added = Vec::new();
     let mut to_append = String::new();
-    for entry in entries {
-        if !existing_lines.contains(entry.as_str()) {
+    for entry in entries.iter().map(AsRef::as_ref) {
+        if !existing_lines.contains(entry) {
             use std::fmt::Write as _;
             // Writing to a `String` via `fmt::Write` never fails.
             #[expect(
@@ -273,7 +273,7 @@ pub fn append_missing_gitignore_lines(
                 reason = "`fmt::Write` for `String` is infallible"
             )]
             writeln!(to_append, "{entry}").expect("write! to a String cannot fail");
-            added.push(entry.clone());
+            added.push(entry.to_owned());
         }
     }
 

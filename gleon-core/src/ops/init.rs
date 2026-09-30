@@ -54,18 +54,7 @@ pub fn init_workspace(context: &crate::context::ResolvedContext) -> Result<InitR
     }
 
     // Scaffold .gleon/.gitignore idempotently to prevent committing blobs/ or runs/ artifacts
-    append_missing_gitignore_lines(
-        &paths.gitignore(),
-        &[
-            "blobs/".to_string(),
-            "runs/".to_string(),
-            ".env".to_string(),
-            ".env.local".to_string(),
-            "credentials".to_string(),
-            "dashboard.html".to_string(),
-            "history.json".to_string(),
-        ],
-    )?;
+    append_missing_gitignore_lines(&paths.gitignore(), gleon_model::config::GITIGNORE_LINES)?;
 
     // Scaffold .gleon/.env.template if it does not exist
     let env_template_content = "# gleon Storage Configuration\n\

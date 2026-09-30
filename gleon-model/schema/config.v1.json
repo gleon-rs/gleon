@@ -67,6 +67,7 @@
           "type": "number",
           "format": "double",
           "default": 8.0,
+          "maximum": 255.0,
           "minimum": 0.0
         },
         "min_similarity": {

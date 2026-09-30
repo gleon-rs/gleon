@@ -1,6 +1,6 @@
 //! Shared gleon data model (`MIT OR Apache-2.0`).
 //!
-//! Everything the gleon CLI and other integrations (the Flutter package through `gleon-ffi`) must
+//! Everything the gleon CLI and other integrations (the Flutter package and other test frameworks through `gleon-ffi`) must
 //! agree on lives here, so both sides read the same `.gleon/gleon.yaml` the same way and write
 //! results in one format:
 //!
@@ -9,13 +9,15 @@
 //! - [`naming`]: canonical test names;
 //! - [`platform`]: platform identity and storage keys;
 //! - [`tolerance`]: how much two images may differ;
-//! - [`case`]: the per-golden case report (`.gleon/runs/latest/cases/<name>.json`).
+//! - [`case`]: the per-golden case report (`.gleon/runs/latest/cases/<name>.json`);
+//! - [`fs`]: atomic file writes.
 //!
 //! JSON Schemas for the config and the case report are committed under `schema/` and kept in sync
 //! by a test.
 
 pub mod case;
 pub mod config;
+pub mod fs;
 pub mod naming;
 pub mod platform;
 pub mod rules;
