@@ -1,6 +1,10 @@
 //! In-memory workspace index built from per-test manifest files.
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     manifest::{ManifestError, single::SingleTestManifest},
@@ -38,71 +42,34 @@ impl WorkspaceIndex {
     /// Loads the `WorkspaceIndex` by scanning the given platform manifest directory.
     /// If the directory does not exist on disk, returns an empty index.
     ///
+    /// The files are listed first and then parsed in parallel; errors are still reported in walk
+    /// order, like a sequential load.
+    ///
     /// # Errors
     /// Returns [`ManifestError::Walker`] if directory traversal fails, [`ManifestError::Validation`]
     /// if a manifest file has a non-UTF-8 path, an invalid test path, or collides with another
     /// entry after normalization, or any error from [`SingleTestManifest::load`] for a malformed
     /// manifest file.
     pub fn load<P: AsRef<Path>>(manifest_dir: P) -> Result<Self, ManifestError> {
-        let manifest_dir = manifest_dir.as_ref();
-
-        let mut entries = BTreeMap::new();
-        let mut source_paths = BTreeMap::new();
-        let walker = crate::walk::manifest_walker(manifest_dir).build();
-
-        for entry_res in walker {
-            let entry = match entry_res {
-                Ok(e) => e,
-                Err(err) => {
-                    let depth = err.depth();
-                    if let Some(io_err) = err.io_error()
-                        && io_err.kind() == std::io::ErrorKind::NotFound
-                        && depth == Some(0)
-                    {
-                        return Ok(Self::new());
-                    }
-                    return Err(ManifestError::Walker(err));
-                }
-            };
-            let path = entry.path();
-            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-
-            let Ok(rel_path) = path.strip_prefix(manifest_dir) else {
-                continue;
-            };
-
-            // Remove .json extension
-            let without_ext = rel_path.with_extension("");
-            let rel_str = without_ext.to_str().ok_or_else(|| {
-                ManifestError::Validation(format!(
-                    "Non UTF-8 path encountered in manifest directory: {}",
-                    without_ext.display()
-                ))
-            })?;
-            let normalized = normalize_test_name(rel_str);
-
-            validate_test_path(normalized.as_ref())?;
-
-            if entries.contains_key(normalized.as_ref()) {
+        let Some(listing) = list_manifests(manifest_dir.as_ref()) else {
+            return Ok(Self::new());
+        };
+        // Reading and parsing the files dominates, so it runs in parallel; the checks below go in
+        // walk order, so the first error is the one a sequential load would hit.
+        let loaded = load_all(&listing.files);
+        let mut index = Self::new();
+        for (file, manifest) in listing.files.into_iter().zip(loaded) {
+            if index.entries.contains_key(&file.key) {
                 return Err(ManifestError::Validation(format!(
-                    "Duplicate test case key collision in manifest index: '{normalized}'"
+                    "Duplicate test case key collision in manifest index: '{}'",
+                    file.key
                 )));
             }
-
-            let manifest = SingleTestManifest::load(path)?;
-            source_paths.insert(normalized.to_string(), rel_str.to_string());
-            entries.insert(normalized.into_owned(), manifest);
+            let manifest = manifest?;
+            index.source_paths.insert(file.key.clone(), file.source);
+            index.entries.insert(file.key, manifest);
         }
-
-        Ok(Self {
-            entries,
-            source_paths,
-        })
+        listing.error.map_or(Ok(index), Err)
     }
 
     /// Returns `true` if the index contains no test cases.
@@ -233,7 +200,133 @@ impl WorkspaceIndex {
     }
 }
 
-fn manifest_file_path(dir: &Path, key: &str) -> std::path::PathBuf {
+/// A manifest file found by [`WorkspaceIndex::load`].
+struct Listed {
+    path: PathBuf,
+    /// The path relative to the manifest directory without `.json`, as on disk.
+    source: String,
+    /// The normalized test name.
+    key: String,
+}
+
+/// The manifest files of a directory in walk order, up to the first path that cannot be indexed.
+struct Listing {
+    files: Vec<Listed>,
+    /// Why the walk stopped early.
+    error: Option<ManifestError>,
+}
+
+/// Most threads reading manifest files: beyond a few, file opens contend in the kernel. Loading
+/// 50k manifests (`tests/manifest_scale.rs`, M3 Max, 14 cores) takes:
+/// - macOS on APFS: 1.03 s on one thread, 0.57-0.62 s on three, 0.59-0.70 s on four, 0.87 s on
+///   six and 1.8 s on fourteen;
+/// - Linux 7.0 on ext4 (Docker VM on the same machine): 158 ms on one thread, 91 ms on three,
+///   78 ms on four, 70 ms on six, 69 ms on eight and 168 ms on fourteen.
+///
+/// Windows is not measured yet and keeps the cautious macOS value.
+#[cfg(target_os = "linux")]
+const LOAD_THREADS: usize = 6;
+/// See the Linux value.
+#[cfg(not(target_os = "linux"))]
+const LOAD_THREADS: usize = 3;
+
+/// Fewest manifests per loader thread: starting a thread costs tens of microseconds, reading 64
+/// manifests about a millisecond.
+const MIN_FILES_PER_THREAD: usize = 64;
+
+/// Loads `files`, in their order, on up to [`LOAD_THREADS`] threads (on this one for a few files).
+fn load_all(files: &[Listed]) -> Vec<Result<SingleTestManifest, ManifestError>> {
+    let load = |chunk: &[Listed]| -> Vec<_> {
+        chunk
+            .iter()
+            .map(|file| SingleTestManifest::load(&file.path))
+            .collect()
+    };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get().min(LOAD_THREADS))
+        .min(files.len().div_ceil(MIN_FILES_PER_THREAD));
+    if threads <= 1 {
+        return load(files);
+    }
+    std::thread::scope(|scope| {
+        #[expect(
+            clippy::needless_collect,
+            reason = "every worker must be spawned before the first is joined"
+        )]
+        let workers: Vec<_> = files
+            .chunks(files.len().div_ceil(threads))
+            .map(|chunk| scope.spawn(move || load(chunk)))
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+/// Lists the manifest files under `manifest_dir`; `None` if the directory does not exist.
+fn list_manifests(manifest_dir: &Path) -> Option<Listing> {
+    let mut files = Vec::new();
+    for entry in crate::walk::manifest_walker(manifest_dir).build() {
+        let listed = match entry {
+            Ok(entry) => listed(manifest_dir, entry),
+            Err(err) => {
+                let is_missing_root = err.depth() == Some(0)
+                    && err
+                        .io_error()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+                if is_missing_root {
+                    return None;
+                }
+                Err(ManifestError::Walker(err))
+            }
+        };
+        match listed {
+            Ok(Some(file)) => files.push(file),
+            Ok(None) => {}
+            Err(error) => {
+                return Some(Listing {
+                    files,
+                    error: Some(error),
+                });
+            }
+        }
+    }
+    Some(Listing { files, error: None })
+}
+
+/// `entry` as a manifest file of `manifest_dir`; `None` for directories and other files.
+fn listed(manifest_dir: &Path, entry: ignore::DirEntry) -> Result<Option<Listed>, ManifestError> {
+    let path = entry.path();
+    if !entry.file_type().is_some_and(|ft| ft.is_file())
+        || path.extension().and_then(|ext| ext.to_str()) != Some("json")
+    {
+        return Ok(None);
+    }
+    let Ok(rel_path) = path.strip_prefix(manifest_dir) else {
+        return Ok(None);
+    };
+    let without_ext = rel_path.with_extension("");
+    let source = without_ext.to_str().ok_or_else(|| {
+        ManifestError::Validation(format!(
+            "Non UTF-8 path encountered in manifest directory: {}",
+            without_ext.display()
+        ))
+    })?;
+    let key = normalize_test_name(source);
+    validate_test_path(key.as_ref())?;
+    Ok(Some(Listed {
+        key: key.into_owned(),
+        source: source.to_owned(),
+        path: entry.into_path(),
+    }))
+}
+
+fn manifest_file_path(dir: &Path, key: &str) -> PathBuf {
     let mut file_name = std::ffi::OsString::from(key);
     file_name.push(".json");
     dir.join(file_name)
@@ -248,7 +341,8 @@ fn remove_file_ignore_missing(path: &Path) -> Result<(), ManifestError> {
     }
 }
 
-#[cfg(test)]
+// The loads touch the file system and may run on threads, which Miri does not model.
+#[cfg(all(test, not(miri)))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -382,6 +476,66 @@ mod tests {
 
         let index = WorkspaceIndex::load(&manifest_dir);
         assert!(index.is_err());
+    }
+
+    #[test]
+    fn test_workspace_index_load_reports_a_malformed_manifest() {
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("macos-aarch64");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        let hash = ImageHash::new("sha256", "a".repeat(64)).unwrap();
+        let phash = ImageHash::new("dhash", "0000000000000000").unwrap();
+        let manifest = SingleTestManifest::new(hash, phash, 100, 100).unwrap();
+        for name in ["a", "b", "c"] {
+            manifest
+                .save(manifest_dir.join(format!("{name}.json")))
+                .unwrap();
+        }
+        fs::write(manifest_dir.join("broken.json"), "{").unwrap();
+
+        assert!(matches!(
+            WorkspaceIndex::load(&manifest_dir),
+            Err(ManifestError::Io(_))
+        ));
+    }
+
+    /// `a\b.json` is a file name on Unix; normalized, it is the test `a/b` of `a/b.json`.
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_index_load_rejects_keys_colliding_after_normalization() {
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("macos-aarch64");
+        fs::create_dir_all(manifest_dir.join("a")).unwrap();
+        let hash = ImageHash::new("sha256", "a".repeat(64)).unwrap();
+        let phash = ImageHash::new("dhash", "0000000000000000").unwrap();
+        let manifest = SingleTestManifest::new(hash, phash, 100, 100).unwrap();
+        manifest.save(manifest_dir.join("a/b.json")).unwrap();
+        manifest.save(manifest_dir.join("a\\b.json")).unwrap();
+
+        assert!(matches!(
+            WorkspaceIndex::load(&manifest_dir),
+            Err(ManifestError::Validation(message)) if message.contains("collision in manifest index: 'a/b'")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_index_load_reports_unreadable_directories() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("macos-aarch64");
+        let locked = manifest_dir.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let is_readable = fs::read_dir(&locked).is_ok(); // Always readable as root.
+        let result = WorkspaceIndex::load(&manifest_dir);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            matches!(result, Err(ManifestError::Walker(_))),
+            !is_readable,
+            "{result:?}"
+        );
     }
 
     #[test]

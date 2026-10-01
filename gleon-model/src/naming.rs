@@ -69,6 +69,37 @@ pub fn validate_test_name(name: &str) -> Result<(), TestNameError> {
     Ok(())
 }
 
+/// Validates a canonical test name: [`validate_test_name`] with `/` as the only separator, the
+/// form case reports and artifact directories are named after.
+///
+/// # Errors
+/// Returns a [`TestNameError`] as [`validate_test_name`] does, or
+/// [`TestNameError::InvalidCharacter`] for a `\\`.
+pub fn validate_canonical_test_name(name: &str) -> Result<(), TestNameError> {
+    if name.contains('\\') {
+        return Err(TestNameError::InvalidCharacter {
+            character: '\\',
+            segment: name.to_owned(),
+        });
+    }
+    validate_test_name(name)
+}
+
+/// Whether `path` is a portable path inside a workspace: `/`-separated names of ASCII letters,
+/// digits, `.`, `_` and `-`, without empty, `.` or `..` names (no absolute paths, no drive
+/// letters, no way out).
+#[must_use]
+pub fn is_portable_relative_path(path: &str) -> bool {
+    path.split('/').all(|name| {
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    })
+}
+
 /// Normalizes path separators (`\\` -> `/`) **without touching case**.
 ///
 /// Use this whenever the string is still a real filesystem or repository path (Git index
@@ -191,5 +222,34 @@ mod tests {
         assert!(DEFAULT_PRUNED_DIRECTORIES.contains(&".git"));
         assert!(DEFAULT_PRUNED_DIRECTORIES.contains(&"node_modules"));
         assert!(DEFAULT_PRUNED_DIRECTORIES.contains(&"target"));
+    }
+
+    #[test]
+    fn test_canonical_names_and_portable_paths() {
+        assert_eq!(validate_canonical_test_name("test/goldens/a.b-c_d"), Ok(()));
+        assert!(matches!(
+            validate_canonical_test_name("test\\a"),
+            Err(TestNameError::InvalidCharacter {
+                character: '\\',
+                ..
+            })
+        ));
+        assert_eq!(
+            validate_canonical_test_name("a/../b"),
+            Err(TestNameError::RelativeNavigation {
+                segment: "..".to_owned()
+            })
+        );
+        for good in [
+            "test/goldens/Clock.png",
+            ".gleon/runs/latest/artifacts/a/diff.png",
+        ] {
+            assert!(is_portable_relative_path(good), "{good}");
+        }
+        for bad in [
+            "", "/abs", "a//b", "a/", "./a", "a/..", "C:/x", "a\\b", "a b", "ü",
+        ] {
+            assert!(!is_portable_relative_path(bad), "{bad}");
+        }
     }
 }

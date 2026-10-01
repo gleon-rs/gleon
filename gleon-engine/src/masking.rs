@@ -32,17 +32,14 @@ pub fn apply_masks(img: &mut RgbaImage, zones: &[Zone]) -> usize {
 
     let mut clamped = 0;
     for zone in zones {
-        let w_px = resolve_dimension(zone.width, img_w);
-        let h_px = resolve_dimension(zone.height, img_h);
-
-        if w_px == 0 || h_px == 0 {
+        let Some(ResolvedZone {
+            x_end,
+            y_end,
+            is_out_of_bounds,
+        }) = resolve_zone(zone, img_w, img_h)
+        else {
             continue;
-        }
-
-        let x_end = zone.x.saturating_add(w_px);
-        let y_end = zone.y.saturating_add(h_px);
-
-        let is_out_of_bounds = zone.x >= img_w || zone.y >= img_h || x_end > img_w || y_end > img_h;
+        };
 
         if is_out_of_bounds {
             clamped += 1;
@@ -104,6 +101,47 @@ pub fn apply_masks(img: &mut RgbaImage, zones: &[Zone]) -> usize {
         }
     }
     clamped
+}
+
+/// How many of `zones` reach beyond a `width` x `height` image: the count [`apply_masks`] returns
+/// for such an image, without touching pixels (for callers that skip decoding, such as a
+/// byte-identical fast path).
+#[must_use]
+pub fn clamped_zones(zones: &[Zone], width: u32, height: u32) -> usize {
+    if width == 0 || height == 0 {
+        return 0;
+    }
+    zones
+        .iter()
+        .filter_map(|zone| resolve_zone(zone, width, height))
+        .filter(|zone| zone.is_out_of_bounds)
+        .count()
+}
+
+/// A zone resolved against an image of a non-zero size.
+struct ResolvedZone {
+    /// Exclusive right edge, not yet clamped.
+    x_end: u32,
+    /// Exclusive bottom edge, not yet clamped.
+    y_end: u32,
+    /// Whether the zone reaches beyond the image.
+    is_out_of_bounds: bool,
+}
+
+/// `zone` resolved against an `img_w` x `img_h` image; `None` for a zone of zero width or height.
+fn resolve_zone(zone: &Zone, img_w: u32, img_h: u32) -> Option<ResolvedZone> {
+    let w_px = resolve_dimension(zone.width, img_w);
+    let h_px = resolve_dimension(zone.height, img_h);
+    if w_px == 0 || h_px == 0 {
+        return None;
+    }
+    let x_end = zone.x.saturating_add(w_px);
+    let y_end = zone.y.saturating_add(h_px);
+    Some(ResolvedZone {
+        x_end,
+        y_end,
+        is_out_of_bounds: zone.x >= img_w || zone.y >= img_h || x_end > img_w || y_end > img_h,
+    })
 }
 
 #[inline]
@@ -340,6 +378,25 @@ mod tests {
         assert_eq!(*img.get_pixel(90, 0), BLACK);
         assert_eq!(*img.get_pixel(99, 0), BLACK);
         assert_eq!(*img.get_pixel(89, 0), RED);
+    }
+
+    #[test]
+    fn clamped_zones_counts_like_apply_masks() {
+        let zones = [
+            zone(90, 0, Dimension::Pixels(20), Dimension::Pixels(100)),
+            zone(0, 0, Dimension::Pixels(1), Dimension::Pixels(1)),
+            zone(0, 99, Dimension::Percent(10.0), Dimension::Pixels(2)),
+            zone(500, 500, Dimension::Pixels(1), Dimension::Pixels(1)),
+            zone(500, 500, Dimension::Pixels(0), Dimension::Pixels(1)),
+        ];
+        assert_eq!(
+            clamped_zones(&zones, 100, 100),
+            3,
+            "empty zones never count"
+        );
+        assert_eq!(apply_masks(&mut red_image(100, 100), &zones), 3);
+        assert_eq!(clamped_zones(&zones, 1000, 1000), 0);
+        assert_eq!(clamped_zones(&zones, 0, 100), 0);
     }
 
     #[test]

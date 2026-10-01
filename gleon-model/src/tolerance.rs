@@ -66,6 +66,30 @@ impl Tolerance {
                 color_tolerance: diff.color_tolerance,
             },
         }
+        .without_negative_zero()
+    }
+
+    /// `self` with `-0.0` parameters as `0.0`: both are valid and compare equal, but `-0.0` would
+    /// show up in case reports.
+    #[must_use]
+    pub const fn without_negative_zero(self) -> Self {
+        // `-0.0 + 0.0` is `0.0`; every other value (NaN included) stays as it is.
+        const fn positive_zero(value: f64) -> f64 {
+            value + 0.0
+        }
+        match self {
+            Self::Exact {} => Self::Exact {},
+            Self::Pixel { max_diff_ratio } => Self::Pixel {
+                max_diff_ratio: positive_zero(max_diff_ratio),
+            },
+            Self::Ssim {
+                min_similarity,
+                color_tolerance,
+            } => Self::Ssim {
+                min_similarity: positive_zero(min_similarity),
+                color_tolerance: positive_zero(color_tolerance),
+            },
+        }
     }
 
     /// Checks value ranges that serde cannot express.
@@ -238,5 +262,32 @@ mod tests {
 
         let (mode, config) = Tolerance::Exact {}.engine_config();
         assert_eq!((mode, config.threshold), (Mode::Pixel, 0.0));
+    }
+
+    #[test]
+    fn test_negative_zero_becomes_zero() {
+        let zeros = DiffConfig {
+            threshold: -0.0,
+            min_similarity: -0.0,
+            color_tolerance: -0.0,
+            ..DiffConfig::default()
+        };
+        assert!(matches!(
+            Tolerance::from_rule(Mode::Pixel, &zeros),
+            Tolerance::Pixel { max_diff_ratio } if max_diff_ratio.is_sign_positive()
+        ));
+        assert_eq!(
+            serde_json::to_string(&Tolerance::from_rule(Mode::Ssim, &zeros)).unwrap(),
+            r#"{"kind":"ssim","min_similarity":0.0,"color_tolerance":0.0}"#
+        );
+        let kept = Tolerance::Ssim {
+            min_similarity: -0.5,
+            color_tolerance: 3.0,
+        };
+        assert_eq!(kept.without_negative_zero(), kept);
+        assert_eq!(
+            Tolerance::Exact {}.without_negative_zero(),
+            Tolerance::Exact {}
+        );
     }
 }

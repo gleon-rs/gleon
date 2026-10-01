@@ -4,6 +4,17 @@
   "description": "One golden comparison.",
   "type": "object",
   "properties": {
+    "artifacts": {
+      "description": "The images kept for the case (failures only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Artifacts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "candidate": {
       "description": "The image of this run.",
       "$ref": "#/$defs/CandidateImage"
@@ -11,6 +22,17 @@
     "comparison": {
       "description": "How the images were compared.",
       "$ref": "#/$defs/Comparison"
+    },
+    "error_kind": {
+      "description": "Class of an `error` outcome.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CaseErrorKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "golden": {
       "description": "The committed golden.",
@@ -37,7 +59,7 @@
     "name": {
       "description": "Canonical test name (also the case file name): the golden path relative to the workspace\nroot without extension, as lowercase `[a-z0-9_.-]` segments separated by `/`.",
       "type": "string",
-      "pattern": "^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$"
+      "pattern": "^(?!\\.\\.?(/|$))[a-z0-9_.-]+(/(?!\\.\\.?(/|$))[a-z0-9_.-]+)*$"
     },
     "outcome": {
       "description": "Result of the case.",
@@ -59,12 +81,23 @@
         "$ref": "#/$defs/RegionMetrics"
       }
     },
+    "run_id": {
+      "description": "The run the case belongs to, when the run is named (`GLEON_RUN_ID`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RunId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "schema_version": {
       "description": "Version of this format (`CASE_SCHEMA_VERSION`).",
       "type": "integer",
       "format": "uint32",
-      "maximum": 1,
-      "minimum": 1
+      "maximum": 2,
+      "minimum": 2
     },
     "source": {
       "description": "What produced the candidate.",
@@ -101,6 +134,37 @@
     "recorded_at"
   ],
   "$defs": {
+    "Artifacts": {
+      "description": "The images of a case, as paths relative to the workspace root (`/`-separated) under the\nartifacts directory: `<artifacts dir>/<name>/{golden,candidate,diff}.png`.",
+      "type": "object",
+      "properties": {
+        "candidate": {
+          "description": "The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
+        },
+        "diff": {
+          "description": "The diff visualization (mismatches only).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
+        },
+        "golden": {
+          "description": "A copy of the golden (mismatches and dimension mismatches).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
+        }
+      },
+      "additionalProperties": false
+    },
     "CandidateImage": {
       "description": "The image produced by this run.",
       "type": "object",
@@ -131,6 +195,36 @@
       "additionalProperties": false,
       "required": [
         "sha256"
+      ]
+    },
+    "CaseErrorKind": {
+      "description": "Class of an `error` outcome, so readers tell a broken image from a broken file system or a\nbug without parsing messages.",
+      "oneOf": [
+        {
+          "description": "The integration passed invalid input.",
+          "type": "string",
+          "const": "invalid_input"
+        },
+        {
+          "description": "`.gleon/gleon.yaml`, an environment override or a golden name is invalid.",
+          "type": "string",
+          "const": "config"
+        },
+        {
+          "description": "A file could not be read or written.",
+          "type": "string",
+          "const": "io"
+        },
+        {
+          "description": "An image could not be decoded, is over the analysis budget or could not be encoded.",
+          "type": "string",
+          "const": "image"
+        },
+        {
+          "description": "A bug in gleon.",
+          "type": "string",
+          "const": "internal"
+        }
       ]
     },
     "CaseOutcome": {
@@ -243,6 +337,17 @@
       "description": "The committed golden.",
       "type": "object",
       "properties": {
+        "blob": {
+          "description": "The content-addressed baseline (`.gleon/blobs/<scheme>/…`) the golden comes from, as in its\nmanifest; absent for goldens committed as image files (the Flutter package).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageHash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "height": {
           "description": "Height in pixels; absent if the PNG header could not be read.",
           "type": [
@@ -254,7 +359,8 @@
         },
         "path": {
           "description": "Path relative to the workspace root, `/`-separated, case as on disk.",
-          "type": "string"
+          "type": "string",
+          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
         },
         "sha256": {
           "description": "SHA-256 of the PNG bytes; absent when the golden does not exist (`missing`).",
@@ -281,6 +387,11 @@
       "required": [
         "path"
       ]
+    },
+    "ImageHash": {
+      "description": "Content hash as `scheme:value`, lowercase, e.g. `sha256:<64 hex digits>`.",
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+:[a-z0-9_-]+$"
     },
     "Metrics": {
       "description": "Comparison metrics of one image region.",
@@ -371,6 +482,11 @@
               "type": "string",
               "const": "ssim"
             },
+            "max_excess": {
+              "description": "Largest deviation beyond `color_tolerance` among the failing regions (0 unless the\nenvelope gate failed).",
+              "type": "number",
+              "format": "double"
+            },
             "mean_ssim": {
               "description": "Mean local SSIM; diagnostic only.",
               "type": "number",
@@ -392,6 +508,7 @@
             "kind",
             "min_ssim",
             "mean_ssim",
+            "max_excess",
             "peak_excess",
             "changed_pixels",
             "failing_pixels",
@@ -527,6 +644,11 @@
         "kind",
         "metrics"
       ]
+    },
+    "RunId": {
+      "description": "Identifier of the test run (`GLEON_RUN_ID`), shared by its case reports.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$"
     },
     "Sha256Hex": {
       "description": "Lowercase hex SHA-256 digest of the PNG bytes.",

@@ -9,7 +9,9 @@
 //! - [`naming`]: canonical test names;
 //! - [`platform`]: platform identity and storage keys;
 //! - [`tolerance`]: how much two images may differ;
-//! - [`case`]: the per-golden case report (`.gleon/runs/latest/cases/<name>.json`);
+//! - [`case`]: the per-golden case report (`.gleon/runs/latest/cases/<name>.json`) and the
+//!   images of a failure next to it;
+//! - [`hash`]: content hashes of images (`sha256:<hex>`), shared by manifests and case reports;
 //! - [`fs`]: atomic file writes.
 //!
 //! JSON Schemas for the config and the case report are committed under `schema/` and kept in sync
@@ -18,6 +20,7 @@
 pub mod case;
 pub mod config;
 pub mod fs;
+pub mod hash;
 pub mod naming;
 pub mod platform;
 pub mod rules;

@@ -332,6 +332,7 @@ mod tests {
         Metrics::Ssim {
             min_ssim: 0.5,
             mean_ssim: 0.9,
+            max_excess: 138.0,
             peak_excess: 146.0,
             changed_pixels: 1,
             changed_region: failing_region,
@@ -379,6 +380,7 @@ mod tests {
         let ssim = Metrics::Ssim {
             min_ssim: 0.931,
             mean_ssim: 0.99,
+            max_excess: 0.0,
             peak_excess: 5.2,
             changed_pixels: 10,
             changed_region: None,

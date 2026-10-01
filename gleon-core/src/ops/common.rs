@@ -234,10 +234,10 @@ pub fn build_manifest(
     width: u32,
     height: u32,
 ) -> Result<SingleTestManifest, CoreError> {
-    let hash = ImageHash::new("sha256", sha256_hex).map_err(CoreError::Manifest)?;
+    let hash = ImageHash::new("sha256", sha256_hex).map_err(ManifestError::from)?;
     let phash = phash_str
         .parse::<ImageHash>()
-        .map_err(CoreError::Manifest)?;
+        .map_err(ManifestError::from)?;
     SingleTestManifest::new(hash, phash, width, height).map_err(CoreError::Manifest)
 }
 

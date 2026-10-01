@@ -21,8 +21,7 @@ gleon-model = { path = "../gleon-model" }
 image = { workspace = true }
 rayon = { workspace = true }
 safer-ffi = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = { workspace = true }

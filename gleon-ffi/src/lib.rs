@@ -30,7 +30,6 @@
     reason = "C ABI boundary: raw input buffers handed over by the caller without copying"
 )]
 
-mod case;
 mod compare;
 mod error;
 mod golden;
@@ -45,7 +44,11 @@ use std::{
 
 use error::{ErrorKind, Failure};
 use gleon_engine::config::{Dimension, Zone};
-use gleon_model::{config::METRICS_ENV, tolerance::Tolerance};
+use gleon_model::{
+    case::RUN_ID_ENV,
+    config::{ARTIFACTS_ENV, METRICS_ENV},
+    tolerance::Tolerance,
+};
 use golden::{Finished, Mode, Request};
 pub use handles::{GleonResult, GleonSession, GleonSummary};
 use safer_ffi::prelude::*;
@@ -53,19 +56,24 @@ use session::{ArtifactNames, Integration, Session, SessionOptions};
 
 /// Version of the C contract. Bumped on any breaking change so the caller can refuse a
 /// mismatched native library instead of misreading it.
-pub const ABI_VERSION: u32 = 6;
+pub const ABI_VERSION: u32 = 7;
 
 /// Session flag: goldens belong to workspaces, each golden to the nearest directory above it with
 /// `.gleon/gleon.yaml` (without, every golden compares exactly and nothing is recorded).
 pub const SESSION_FIND_WORKSPACE: u32 = 1;
 
-/// Session flag: use the `metrics_env` string as the `GLEON_METRICS` value (empty for unset)
-/// instead of reading the process environment. For tests of the integration.
-pub const SESSION_METRICS_ENV: u32 = 2;
+/// Session flag: take the environment from the session strings, not from the process.
+///
+/// `metrics_env`, `artifacts_env` and `run_id_env` become the values of `GLEON_METRICS`,
+/// `GLEON_ARTIFACTS_DIR` and `GLEON_RUN_ID` (empty for unset), so tests of an integration never
+/// depend on the shell they run in.
+pub const SESSION_ENV: u32 = 2;
 
 /// The strings of [`gleon_session_new`], in order.
-const SESSION_STRINGS: [&str; 7] = [
+const SESSION_STRINGS: [&str; 9] = [
     "metrics_env",
+    "artifacts_env",
+    "run_id_env",
     "tool",
     "tool_version",
     "renderer",
@@ -223,18 +231,21 @@ fn invalid_input(message: &str) -> Finished {
 
 /// Creates the session of a test process.
 ///
-/// `flags` combines [`SESSION_FIND_WORKSPACE`] and [`SESSION_METRICS_ENV`]. The strings are
-/// `lengths_count` (7) UTF-8 strings packed into `strings`, `lengths` giving their byte
+/// `flags` combines [`SESSION_FIND_WORKSPACE`] and [`SESSION_ENV`]. The strings are
+/// `lengths_count` (9) UTF-8 strings packed into `strings`, `lengths` giving their byte
 /// lengths, in this order:
-/// 1. `metrics_env`: the `GLEON_METRICS` value with [`SESSION_METRICS_ENV`]; otherwise the
-///    process environment is read;
-/// 2. `tool`, 3. `tool_version`: the integration in case reports (`gleon_flutter`, `0.1.0`);
-/// 4. `renderer`: e.g. `flutter-3.47.5`, may be empty;
-/// 5. to 7. the file name patterns of the failure artifacts of the golden, the candidate and the
+/// 1. to 3. `metrics_env`, `artifacts_env`, `run_id_env`: with [`SESSION_ENV`] the values of
+///    `GLEON_METRICS` (metrics on or off), `GLEON_ARTIFACTS_DIR` (the artifacts directory of
+///    every workspace) and `GLEON_RUN_ID` (the run in case reports), empty for unset; without
+///    it they are ignored and the process environment is read;
+/// 4. `tool`, 5. `tool_version`: the integration in case reports (`gleon_flutter`, `0.1.0`);
+/// 6. `renderer`: e.g. `flutter-3.47.5`, may be empty;
+/// 7. to 9. the file name patterns of the failure artifacts of the golden, the candidate and the
 ///    diff; each contains `{name}` (the golden's file name without extension), e.g.
 ///    `{name}_masterImage.png`.
 ///
-/// Invalid input yields a session whose every call fails with the reason.
+/// Invalid input, or an invalid value of one of the variables, yields a session whose every call
+/// fails with the reason.
 ///
 /// # Safety
 /// `(strings, strings_len)` must describe `strings_len` readable bytes and `(lengths,
@@ -269,12 +280,14 @@ pub unsafe fn gleon_session_new(
 
 /// The options of [`gleon_session_new`].
 fn session_options(flags: u32, strings: &[u8], lengths: &[u32]) -> Result<SessionOptions, String> {
-    let unknown = flags & !(SESSION_FIND_WORKSPACE | SESSION_METRICS_ENV);
+    let unknown = flags & !(SESSION_FIND_WORKSPACE | SESSION_ENV);
     if unknown != 0 {
         return Err(format!("unknown session flags {unknown:#x}"));
     }
     let [
         metrics_env,
+        artifacts_env,
+        run_id_env,
         tool,
         tool_version,
         renderer,
@@ -288,14 +301,18 @@ fn session_options(flags: u32, strings: &[u8], lengths: &[u32]) -> Result<Sessio
         diff: diff.to_owned(),
     };
     artifacts.validate()?;
-    let metrics_env = if flags & SESSION_METRICS_ENV == 0 {
-        std::env::var_os(METRICS_ENV).map(|value| value.to_string_lossy().into_owned())
-    } else {
-        non_empty(metrics_env).map(str::to_owned)
+    let env = |name: &str, given: &str| {
+        if flags & SESSION_ENV == 0 {
+            std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+        } else {
+            non_empty(given).map(str::to_owned)
+        }
     };
     Ok(SessionOptions {
         finds_workspaces: flags & SESSION_FIND_WORKSPACE != 0,
-        metrics_env,
+        metrics_env: env(METRICS_ENV, metrics_env),
+        artifacts_env: env(ARTIFACTS_ENV, artifacts_env),
+        run_id_env: env(RUN_ID_ENV, run_id_env),
         integration: Integration {
             tool: tool.to_owned(),
             tool_version: tool_version.to_owned(),
@@ -328,7 +345,8 @@ fn call_tolerance(
             color_tolerance,
         },
         other => return Err(format!("unknown tolerance kind {other}")),
-    };
+    }
+    .without_negative_zero();
     tolerance
         .validate()
         .map(|()| Some(tolerance))
@@ -493,13 +511,28 @@ mod tests {
         (strings.concat().into_bytes(), lengths)
     }
 
-    fn new_session(flags: u32, env: &str) -> repr_c::Box<GleonSession> {
+    /// A session of the Flutter integration; with [`SESSION_ENV`], `env` gives the values of
+    /// `GLEON_METRICS`, `GLEON_ARTIFACTS_DIR` and `GLEON_RUN_ID`.
+    fn new_session(flags: u32, env: [&str; 3]) -> repr_c::Box<GleonSession> {
+        let [metrics, artifacts, run_id] = env;
         let [golden, candidate, diff] = FLUTTER_ARTIFACTS;
         session_with(
             flags,
-            &[env, "gleon_flutter", "0.1.0", "", golden, candidate, diff],
+            &[
+                metrics,
+                artifacts,
+                run_id,
+                "gleon_flutter",
+                "0.1.0",
+                "",
+                golden,
+                candidate,
+                diff,
+            ],
         )
     }
+
+    const UNSET: [&str; 3] = ["", "", ""];
 
     fn session_with(flags: u32, strings: &[&str]) -> repr_c::Box<GleonSession> {
         let (bytes, lengths) = packed(strings);
@@ -589,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_invalid_inputs_are_errors() {
-        let session = new_session(SESSION_METRICS_ENV, "");
+        let session = new_session(SESSION_ENV, UNSET);
         let session = Some(&*session);
         for (call, needle) in [
             (
@@ -676,6 +709,10 @@ mod tests {
                 color_tolerance: 8.0
             }))
         );
+        assert!(matches!(
+            call_tolerance(2, -0.0, 0.0, 0.0),
+            Ok(Some(Tolerance::Pixel { max_diff_ratio })) if max_diff_ratio.is_sign_positive()
+        ));
     }
 
     #[test]
@@ -722,17 +759,47 @@ mod tests {
     fn test_invalid_session_inputs_fail_every_call() {
         let [golden_artifact, candidate, diff] = FLUTTER_ARTIFACTS;
         for (flags, strings, needle) in [
-            (4, vec![""; 7], "unknown session flags 0x4"),
-            (0, vec![""; 6], "expected 7 strings, got 6"),
+            (4, vec![""; 9], "unknown session flags 0x4"),
+            (0, vec![""; 8], "expected 9 strings, got 8"),
             (
                 0,
-                vec!["", "", "", "", "master.png", candidate, diff],
+                vec!["", "", "", "", "", "", "master.png", candidate, diff],
                 "must contain `{name}`",
             ),
             (
-                SESSION_METRICS_ENV,
-                vec!["maybe", "", "", "", golden_artifact, candidate, diff],
+                SESSION_ENV,
+                vec![
+                    "maybe",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    golden_artifact,
+                    candidate,
+                    diff,
+                ],
                 "GLEON_METRICS must be 1, 0, true or false (got 'maybe')",
+            ),
+            (
+                SESSION_ENV,
+                vec!["", "out", "", "", "", "", golden_artifact, candidate, diff],
+                "GLEON_ARTIFACTS_DIR: 'out' must be",
+            ),
+            (
+                SESSION_ENV,
+                vec![
+                    "",
+                    "",
+                    "run 1",
+                    "",
+                    "",
+                    "",
+                    golden_artifact,
+                    candidate,
+                    diff,
+                ],
+                "GLEON_RUN_ID: a run id must be",
             ),
         ] {
             let session = session_with(flags, &strings);
@@ -748,8 +815,8 @@ mod tests {
             assert!(answer.message.contains(needle), "{}", answer.message);
             gleon_session_free(Some(session));
         }
-        let (bytes, _) = packed(&[""; 7]);
-        let session = unsafe { gleon_session_new(0, bytes.as_ptr(), 0, std::ptr::null(), 7) };
+        let (bytes, _) = packed(&[""; 9]);
+        let session = unsafe { gleon_session_new(0, bytes.as_ptr(), 0, std::ptr::null(), 9) };
         let answer = golden(Some(&session), Call::default());
         assert_eq!(answer.error_kind, INVALID_INPUT);
         assert!(
@@ -762,9 +829,15 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_follow_the_process_environment_without_the_flag() {
-        let session = new_session(0, "ignored");
-        assert!(session.0.failure().is_none() || std::env::var_os(METRICS_ENV).is_some());
+    fn test_the_environment_is_read_without_the_flag() {
+        let session = new_session(0, ["maybe", "out", "run 1"]);
+        let is_set = [METRICS_ENV, ARTIFACTS_ENV, RUN_ID_ENV]
+            .into_iter()
+            .any(|name| std::env::var_os(name).is_some());
+        assert!(
+            session.0.failure().is_none() || is_set,
+            "the given values are ignored"
+        );
         gleon_session_free(Some(session));
     }
 
@@ -795,7 +868,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "touches the file system")]
     fn test_a_missing_golden_through_the_abi() {
-        let session = new_session(SESSION_METRICS_ENV, "");
+        let session = new_session(SESSION_ENV, UNSET);
         let masks = [0u32; 4];
         let answer = golden(
             Some(&session),
@@ -836,7 +909,7 @@ mod tests {
         let golden_path = root.join("test/goldens/counter.png");
         std::fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
         std::fs::write(&golden_path, COUNTER_0).unwrap();
-        let session = new_session(SESSION_FIND_WORKSPACE | SESSION_METRICS_ENV, "");
+        let session = new_session(SESSION_FIND_WORKSPACE | SESSION_ENV, ["", "", "ci-7"]);
         let path = golden_path.display().to_string();
         let failures = root.join("test/failures").display().to_string();
         let strings = [path.as_str(), "goldens/counter.png", failures.as_str(), "t"];
@@ -874,6 +947,9 @@ mod tests {
         );
         assert_eq!(case()["comparison"]["tolerance"]["kind"], "ssim");
         assert_eq!(std::fs::read_dir(&failures).unwrap().count(), 3);
+        let diff = ".gleon/runs/latest/artifacts/test/goldens/counter/diff.png";
+        assert_eq!(case()["artifacts"]["diff"], diff);
+        assert!(root.join(diff).is_file());
 
         // A whole-image mask through the ABI hides everything; the call's pixel tolerance wins.
         let masks = [0, 0, 360, 640, 350, 630, 20, 20];
@@ -899,6 +975,10 @@ mod tests {
             masked.warning
         );
         assert_eq!(case()["comparison"]["masks"].as_array().unwrap().len(), 2);
+        assert!(
+            !root.join(diff).exists(),
+            "a pass removes the images of the earlier failure"
+        );
 
         let updated = golden(
             Some(&session),
@@ -912,6 +992,9 @@ mod tests {
         assert_eq!(updated.verdict, golden::Verdict::Updated as u8);
         assert_eq!(std::fs::read(&golden_path).unwrap(), COUNTER_3);
         assert_eq!(case()["outcome"], "updated");
+        assert_eq!(case()["schema_version"], 2);
+        assert_eq!(case()["run_id"], "ci-7");
+        assert!(case().get("artifacts").is_none());
         gleon_session_free(Some(session));
     }
 }
