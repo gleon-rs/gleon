@@ -882,21 +882,27 @@ fn test_name<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Er
 }
 
 fn workspace_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    let path = String::deserialize(deserializer)?;
+    checked_workspace_path(String::deserialize(deserializer)?)
+}
+
+/// An optional [`workspace_path`]: `null` (which the schema allows) is `None`, like a missing key.
+fn optional_workspace_path<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(checked_workspace_path)
+        .transpose()
+}
+
+fn checked_workspace_path<E: serde::de::Error>(path: String) -> Result<String, E> {
     if is_portable_relative_path(&path) {
         Ok(path)
     } else {
-        Err(serde::de::Error::custom(format!(
+        Err(E::custom(format!(
             "'{path}' is not a path inside the workspace: `/`-separated names of ASCII letters, \
              digits, `.`, `_` and `-`, without `.` or `..`"
         )))
     }
-}
-
-fn optional_workspace_path<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error> {
-    workspace_path(deserializer).map(Some)
 }
 
 #[cfg(test)]
@@ -1202,6 +1208,30 @@ mod tests {
         assert!(!root.join("outside").exists());
     }
 
+    /// An emptied folder that cannot be removed is an error, unlike an absent one.
+    #[cfg(unix)]
+    #[test]
+    fn test_artifacts_report_a_folder_that_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let parent = root.join(".gleon/runs/latest/artifacts/test/goldens");
+        std::fs::create_dir_all(parent.join("a")).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = std::fs::create_dir(parent.join("probe")); // Always succeeds as root.
+        let result = write_artifacts(
+            root,
+            &ArtifactsDir::default(),
+            "test/goldens/a",
+            ArtifactImages::default(),
+        );
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if probe.is_err() {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
     #[test]
     fn test_reports_are_written_and_parse_back() {
         let temp = tempfile::tempdir().unwrap();
@@ -1283,6 +1313,14 @@ mod tests {
         });
         let parse = |json: &serde_json::Value| CaseReport::parse(json.to_string().as_bytes());
         assert!(parse(&valid).is_ok());
+
+        // Other writers may spell an absent image as `null`, which the schema allows.
+        let mut nulls = valid.clone();
+        nulls["artifacts"]["golden"] = serde_json::Value::Null;
+        nulls["artifacts"]["diff"] = serde_json::Value::Null;
+        let artifacts = parse(&nulls).unwrap().artifacts.unwrap();
+        assert_eq!((artifacts.golden, artifacts.diff), (None, None));
+        assert!(artifacts.candidate.is_some());
 
         let mut v1 = valid.clone();
         v1["schema_version"] = 1.into();

@@ -1031,6 +1031,14 @@ screenshots:
             "the images under .gleon/runs are ignored"
         );
 
+        let passing = Fixture::new(Some(RULE_WITHOUT_METRICS));
+        let finished = passing.run(&passing.session(None), Mode::Compare, &png(4, 4, false));
+        assert_eq!(finished.verdict, Verdict::Identical);
+        assert!(
+            !passing.root.join(".gleon/.gitignore").exists(),
+            "a pass without metrics writes nothing into the workspace"
+        );
+
         let unmatched = Fixture::new(Some(
             "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"other/*.png\" }]",
         ));

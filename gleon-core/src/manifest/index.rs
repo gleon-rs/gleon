@@ -499,6 +499,40 @@ mod tests {
         ));
     }
 
+    /// Enough manifests for several loader threads: all load, in walk order, and a broken file
+    /// in a later chunk is still reported.
+    #[test]
+    fn test_workspace_index_load_on_threads() {
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("macos-aarch64");
+        let count = MIN_FILES_PER_THREAD * LOAD_THREADS + 1;
+        for dir in 0..7 {
+            fs::create_dir_all(manifest_dir.join(format!("dir_{dir}"))).unwrap();
+        }
+        for id in 0..count {
+            // Plain writes: `save` syncs every file, which takes seconds for this many.
+            let manifest = format!(
+                r#"{{"schema_version":1,"hash":"sha256:{id:064x}","phash":"dhash:{id:016x}","width":{},"height":1}}"#,
+                id + 1
+            );
+            let path = manifest_dir.join(format!("dir_{}/case_{id:04}.json", id % 7));
+            fs::write(path, manifest).unwrap();
+        }
+
+        let index = WorkspaceIndex::load(&manifest_dir).unwrap();
+        assert_eq!(index.len(), count);
+        for id in 0..count {
+            let manifest = index.get(&format!("dir_{}/case_{id:04}", id % 7)).unwrap();
+            assert_eq!(manifest.width, u32::try_from(id + 1).unwrap());
+        }
+
+        fs::write(manifest_dir.join("dir_6/zz_broken.json"), "{").unwrap();
+        assert!(matches!(
+            WorkspaceIndex::load(&manifest_dir),
+            Err(ManifestError::Io(_))
+        ));
+    }
+
     /// `a\b.json` is a file name on Unix; normalized, it is the test `a/b` of `a/b.json`.
     #[cfg(unix)]
     #[test]
@@ -515,6 +549,24 @@ mod tests {
         assert!(matches!(
             WorkspaceIndex::load(&manifest_dir),
             Err(ManifestError::Validation(message)) if message.contains("collision in manifest index: 'a/b'")
+        ));
+    }
+
+    /// Linux file names are bytes; APFS rejects names that are not UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_workspace_index_load_rejects_non_utf8_names() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("linux-x86_64");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        let name = std::ffi::OsStr::from_bytes(b"bad\xff.json");
+        fs::write(manifest_dir.join(name), "{}").unwrap();
+
+        assert!(matches!(
+            WorkspaceIndex::load(&manifest_dir),
+            Err(ManifestError::Validation(message)) if message.contains("Non UTF-8 path")
         ));
     }
 
