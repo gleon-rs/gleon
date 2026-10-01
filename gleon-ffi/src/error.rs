@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+use gleon_model::case::CaseErrorKind;
+
 /// Class of a failed call (`u8` across the ABI), so an integration can report errors
 /// differently (a `JUnit` `error` versus a `failure`, a hint to fix the config) without parsing
 /// messages.
@@ -21,6 +23,20 @@ pub enum ErrorKind {
     Image = 4,
     /// A bug in this library (a caught panic).
     Internal = 5,
+}
+
+impl ErrorKind {
+    /// The kind recorded in a case report; `None` for [`Self::None`].
+    pub const fn case_kind(self) -> Option<CaseErrorKind> {
+        match self {
+            Self::None => None,
+            Self::InvalidInput => Some(CaseErrorKind::InvalidInput),
+            Self::Config => Some(CaseErrorKind::Config),
+            Self::Io => Some(CaseErrorKind::Io),
+            Self::Image => Some(CaseErrorKind::Image),
+            Self::Internal => Some(CaseErrorKind::Internal),
+        }
+    }
 }
 
 /// A failed call: its class and the complete message to show.
@@ -54,5 +70,34 @@ impl Failure {
     /// A file could not be read or written.
     pub fn io(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Io, message)
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::missing_panics_doc,
+    clippy::missing_errors_doc,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_case_kinds_share_the_names() {
+        assert_eq!(ErrorKind::None.case_kind(), None);
+        for (kind, name) in [
+            (ErrorKind::InvalidInput, "invalid_input"),
+            (ErrorKind::Config, "config"),
+            (ErrorKind::Io, "io"),
+            (ErrorKind::Image, "image"),
+            (ErrorKind::Internal, "internal"),
+        ] {
+            assert_eq!(kind.case_kind().unwrap().as_str(), name);
+        }
     }
 }

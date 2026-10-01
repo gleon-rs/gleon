@@ -55,6 +55,10 @@ pub enum ConfigError {
         /// Its trimmed value.
         value: String,
     },
+
+    /// [`ARTIFACTS_ENV`] is not a valid [`ArtifactsDir`].
+    #[error("{ARTIFACTS_ENV}: {0}")]
+    InvalidArtifactsEnv(#[source] InvalidArtifactsDir),
 }
 
 /// A compiled glob pattern for fast file matching, serialized as a simple string.
@@ -162,6 +166,118 @@ pub struct GleonConfig {
     /// Per-golden comparison metrics recorded by integrations such as the Flutter package.
     #[serde(default, skip_serializing_if = "MetricsConfig::is_default")]
     pub metrics: MetricsConfig,
+    /// Directory of the images of failed cases (golden, candidate, diff) relative to the workspace
+    /// root: `.gleon/runs/latest/artifacts` (the default) or a directory under `.gleon/runs/`
+    /// outside `latest/`; `GLEON_ARTIFACTS_DIR` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<ArtifactsDir>,
+}
+
+/// Default [`GleonConfig::artifacts`].
+pub const DEFAULT_ARTIFACTS_DIR: &str = ".gleon/runs/latest/artifacts";
+
+/// Name of the environment variable that overrides [`GleonConfig::artifacts`].
+pub const ARTIFACTS_ENV: &str = "GLEON_ARTIFACTS_DIR";
+
+/// The directory for the images of failed cases, relative to the workspace root: the default
+/// `.gleon/runs/latest/artifacts` or any directory under `.gleon/runs/` outside `latest/`.
+///
+/// Confined to the run output of gleon by construction: `.gleon/.gitignore` ignores it, no scanner
+/// reads it, `gleon diff` leaves it alone and `gleon clean` removes it. Names are ASCII letters,
+/// digits, `.`, `_` and `-`, separated by `/`, without `.` or `..`. To keep the images on a RAM
+/// disk, link `.gleon/runs` (or a directory under it) there.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ArtifactsDir(String);
+
+/// A path that is not a valid [`ArtifactsDir`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "'{0}' must be `.gleon/runs/latest/artifacts` or a directory under `.gleon/runs/` outside \
+     `latest/`: `/`-separated names of ASCII letters, digits, `.`, `_` and `-`, without `.` or `..`"
+)]
+pub struct InvalidArtifactsDir(pub String);
+
+/// The directory every [`ArtifactsDir`] lies in.
+const RUNS_DIR: &str = ".gleon/runs/";
+
+impl ArtifactsDir {
+    /// Validates `path`.
+    ///
+    /// # Errors
+    /// Returns [`InvalidArtifactsDir`] unless `path` is [`DEFAULT_ARTIFACTS_DIR`] or a directory
+    /// under `.gleon/runs/` outside `latest/` whose names are ASCII letters, digits, `.`, `_` and
+    /// `-`, other than `.` and `..`.
+    pub fn new(path: impl Into<String>) -> Result<Self, InvalidArtifactsDir> {
+        let path = path.into();
+        let is_valid = path == DEFAULT_ARTIFACTS_DIR
+            || path.strip_prefix(RUNS_DIR).is_some_and(|inside| {
+                // `latest/` is the output of one run (case-insensitive file systems included).
+                crate::naming::is_portable_relative_path(inside)
+                    && !inside
+                        .split('/')
+                        .next()
+                        .is_some_and(|first| first.eq_ignore_ascii_case("latest"))
+            });
+        if is_valid {
+            Ok(Self(path))
+        } else {
+            Err(InvalidArtifactsDir(path))
+        }
+    }
+
+    /// The directory of [`ARTIFACTS_ENV`] (`env_value` is its raw value, `None` when unset): `None`
+    /// when unset or empty, surrounding whitespace ignored.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidArtifactsEnv`] for an invalid directory.
+    pub fn from_env(env_value: Option<&str>) -> Result<Option<Self>, ConfigError> {
+        env_value
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| Self::new(path).map_err(ConfigError::InvalidArtifactsEnv))
+            .transpose()
+    }
+
+    /// The path, `/`-separated.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The directory inside the workspace at `root`.
+    #[must_use]
+    pub fn to_path(&self, root: &Path) -> PathBuf {
+        self.0
+            .split('/')
+            .fold(root.to_path_buf(), |dir, name| dir.join(name))
+    }
+}
+
+impl Default for ArtifactsDir {
+    fn default() -> Self {
+        Self(DEFAULT_ARTIFACTS_DIR.to_owned())
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactsDir {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl schemars::JsonSchema for ArtifactsDir {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ArtifactsDir".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "`.gleon/runs/latest/artifacts` or a directory under `.gleon/runs/` outside `latest/`: `/`-separated names of ASCII letters, digits, `.`, `_` and `-`, without `.` or `..`.",
+            "type": "string",
+            "pattern": "^\\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*)$"
+        })
+    }
 }
 
 /// The `metrics:` section: opt-in per-golden comparison metrics.
@@ -408,6 +524,21 @@ impl GleonConfig {
         Ok(())
     }
 
+    /// The artifacts directory: `flag` (a command-line option) beats `env` (the value of
+    /// [`ARTIFACTS_ENV`], see [`ArtifactsDir::from_env`]), which beats [`Self::artifacts`], which
+    /// beats [`DEFAULT_ARTIFACTS_DIR`].
+    #[must_use]
+    pub fn artifacts_dir(
+        &self,
+        env: Option<&ArtifactsDir>,
+        flag: Option<&ArtifactsDir>,
+    ) -> ArtifactsDir {
+        flag.or(env)
+            .or(self.artifacts.as_ref())
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Validates semantic invariants that serde attributes cannot express.
     fn validate(&self) -> Result<(), ConfigError> {
         // Opaque keys are validated when parsed; structured fields only when turned into a key,
@@ -499,6 +630,7 @@ impl Default for GleonConfig {
             platform: None,
             fallback_platform: None,
             metrics: MetricsConfig::default(),
+            artifacts: None,
             screenshots: vec![ScreenshotRule {
                 #[expect(
                     clippy::expect_used,
@@ -943,6 +1075,113 @@ metrics:
                 .unwrap()
                 .contains("metrics")
         );
+    }
+
+    #[test]
+    fn test_artifacts_section() {
+        let yaml = "
+required_version: \">=0.1.0\"
+screenshots:
+  - include: \"test.png\"
+artifacts: .gleon/runs/ram
+";
+        let config = GleonConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(
+            config.artifacts,
+            Some(ArtifactsDir::new(".gleon/runs/ram").unwrap())
+        );
+        let absolute = yaml.replace(".gleon/runs/ram", "/tmp/ram");
+        let err = GleonConfig::from_yaml_str(&absolute).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::YamlParse(_))
+                && err
+                    .to_string()
+                    .contains("'/tmp/ram' must be `.gleon/runs/latest/artifacts`"),
+            "{err}"
+        );
+        // Absent by default, so the `gleon init` snapshot is unchanged.
+        assert!(
+            !serde_yaml::to_string(&GleonConfig::default())
+                .unwrap()
+                .contains("artifacts")
+        );
+    }
+
+    #[test]
+    fn test_artifacts_dirs_stay_inside_the_run_output() {
+        for good in [
+            DEFAULT_ARTIFACTS_DIR,
+            ".gleon/runs/ram",
+            ".gleon/runs/a/b.c/d-e_f",
+            ".gleon/runs/latest.old",
+        ] {
+            assert_eq!(ArtifactsDir::new(good).unwrap().as_str(), good);
+        }
+        for bad in [
+            "",
+            "build",
+            ".gleon",
+            ".gleon/manifests",
+            ".gleon/runs",
+            ".gleon/runs/",
+            ".gleon/runs/latest",
+            ".gleon/runs/latest/cases",
+            ".gleon/runs/latest/other",
+            ".gleon/runs/Latest",
+            ".gleon/runs/LATEST/artifacts",
+            ".gleon/runs//a",
+            ".gleon/runs/a/",
+            ".gleon/runs/./a",
+            ".gleon/runs/..",
+            ".gleon/runs/../../x",
+            ".gleon/runs/a\\b",
+            ".gleon/runs/C:",
+            ".gleon/runs/a b",
+            ".gleon/runs/a/../b",
+            ".gleon/runs/a/.",
+            "/.gleon/runs/a",
+            "./.gleon/runs/a",
+            ".GLEON/runs/a",
+        ] {
+            assert_eq!(
+                ArtifactsDir::new(bad),
+                Err(InvalidArtifactsDir(bad.to_owned())),
+                "{bad}"
+            );
+        }
+        let root = Path::new("root");
+        assert_eq!(
+            ArtifactsDir::new(".gleon/runs/a").unwrap().to_path(root),
+            root.join(".gleon").join("runs").join("a")
+        );
+        assert_eq!(ArtifactsDir::default().as_str(), DEFAULT_ARTIFACTS_DIR);
+    }
+
+    #[test]
+    fn test_artifacts_dir_precedence() {
+        let dir = |name: &str| ArtifactsDir::new(format!(".gleon/runs/{name}")).unwrap();
+        let mut config = GleonConfig::default();
+        assert_eq!(config.artifacts_dir(None, None), ArtifactsDir::default());
+        config.artifacts = Some(dir("config"));
+        assert_eq!(config.artifacts_dir(None, None), dir("config"));
+        assert_eq!(config.artifacts_dir(Some(&dir("env")), None), dir("env"));
+        assert_eq!(
+            config.artifacts_dir(Some(&dir("env")), Some(&dir("flag"))),
+            dir("flag")
+        );
+
+        assert_eq!(ArtifactsDir::from_env(None).unwrap(), None);
+        assert_eq!(ArtifactsDir::from_env(Some(" ")).unwrap(), None);
+        assert_eq!(
+            ArtifactsDir::from_env(Some(" .gleon/runs/ram ")).unwrap(),
+            Some(dir("ram"))
+        );
+        let err = ArtifactsDir::from_env(Some("/tmp/ram")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidArtifactsEnv(_)));
+        assert!(err.to_string().starts_with(
+            "GLEON_ARTIFACTS_DIR: '/tmp/ram' must be `.gleon/runs/latest/artifacts` or a directory"
+        ));
+        assert!(std::error::Error::source(&err).is_some());
     }
 
     #[test]

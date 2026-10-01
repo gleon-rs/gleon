@@ -15,7 +15,8 @@ use std::{
 
 use gleon_engine::config::Zone;
 use gleon_model::{
-    config::{GITIGNORE_LINES, GleonConfig, MetricsConfig},
+    case::{RUN_ID_ENV, RunId},
+    config::{ArtifactsDir, GITIGNORE_LINES, GleonConfig, MetricsConfig},
     rules::{RuleMatch, RuleSet},
     tolerance::Tolerance,
 };
@@ -30,6 +31,10 @@ pub struct SessionOptions {
     pub finds_workspaces: bool,
     /// Raw `GLEON_METRICS` value, `None` when unset.
     pub metrics_env: Option<String>,
+    /// Raw `GLEON_ARTIFACTS_DIR` value, `None` when unset.
+    pub artifacts_env: Option<String>,
+    /// Raw `GLEON_RUN_ID` value, `None` when unset.
+    pub run_id_env: Option<String>,
     /// Who calls.
     pub integration: Integration,
 }
@@ -114,6 +119,8 @@ pub struct Workspace {
 struct Compiled {
     metrics: MetricsConfig,
     rules: RuleSet,
+    /// The artifacts directory, `GLEON_ARTIFACTS_DIR` applied.
+    artifacts: Arc<ArtifactsDir>,
 }
 
 /// The config compiled from one version of the file (or why it is invalid).
@@ -137,9 +144,13 @@ impl Workspace {
         self.root.join(".gleon")
     }
 
-    /// `.gleon/gleon.yaml` as shown in messages: the root, then `/.gleon/gleon.yaml`, like the CLI.
+    /// `.gleon/gleon.yaml` as shown in messages, with the separators of the platform.
     pub fn config_display(&self) -> String {
-        format!("{}/.gleon/gleon.yaml", self.root.display())
+        self.root
+            .join(".gleon")
+            .join("gleon.yaml")
+            .display()
+            .to_string()
     }
 
     /// Creates `.gleon/.gitignore` (the lines of `gleon init`, which ignore `runs/`) unless it
@@ -160,8 +171,9 @@ impl Workspace {
 
     /// The config, compiled again only when the file's content changed (long-lived processes such
     /// as watch modes see every edit). Reading the small file per golden costs microseconds next
-    /// to the golden itself; compiling happens outside the lock.
-    fn compiled(&self) -> Result<Arc<Compiled>, String> {
+    /// to the golden itself; compiling happens outside the lock. `artifacts_env` is the session's
+    /// `GLEON_ARTIFACTS_DIR`, the same for every call.
+    fn compiled(&self, artifacts_env: Option<&ArtifactsDir>) -> Result<Arc<Compiled>, String> {
         let path = self.gleon_dir().join("gleon.yaml");
         let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read it: {e}"))?;
         let cached = self
@@ -172,7 +184,7 @@ impl Workspace {
         if let Some(compiled) = cached {
             return compiled;
         }
-        let compiled = compile(&text);
+        let compiled = compile(&text, artifacts_env);
         *self.cache() = Some(Cached {
             text,
             compiled: compiled.clone(),
@@ -208,11 +220,12 @@ impl Workspace {
     }
 }
 
-fn compile(text: &str) -> Result<Arc<Compiled>, String> {
+fn compile(text: &str, artifacts_env: Option<&ArtifactsDir>) -> Result<Arc<Compiled>, String> {
     let config = GleonConfig::from_yaml_str(text).map_err(|e| e.to_string())?;
     let rules = RuleSet::new(&config).map_err(|e| format!("invalid glob set: {e}"))?;
     Ok(Arc::new(Compiled {
         metrics: config.metrics,
+        artifacts: Arc::new(config.artifacts_dir(artifacts_env, None)),
         rules,
     }))
 }
@@ -243,12 +256,13 @@ fn canonical(path: &Path) -> io::Result<PathBuf> {
 fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = std::fs::canonicalize(path)?;
     let text = resolved.to_string_lossy();
-    Ok(match text.strip_prefix(r"\\?\UNC\") {
-        Some(share) => PathBuf::from(format!(r"\\{share}")),
-        None => text
-            .strip_prefix(r"\\?\")
-            .map_or_else(|| resolved.clone(), PathBuf::from),
-    })
+    Ok(text.strip_prefix(r"\\?\UNC\").map_or_else(
+        || {
+            text.strip_prefix(r"\\?\")
+                .map_or_else(|| resolved.clone(), PathBuf::from)
+        },
+        |share| PathBuf::from(format!(r"\\{share}")),
+    ))
 }
 
 /// [`canonical`] of a file that may not exist yet: its nearest existing ancestor resolved, the
@@ -309,6 +323,10 @@ pub struct Session {
     workspaces: Mutex<Workspaces>,
     /// `GLEON_METRICS`: `None` when unset, else whether it turns metrics on.
     metrics_override: Option<bool>,
+    /// `GLEON_ARTIFACTS_DIR`, when set.
+    artifacts_override: Option<ArtifactsDir>,
+    /// `GLEON_RUN_ID`, when set.
+    pub run_id: Option<RunId>,
     /// Who calls.
     pub integration: Integration,
     warned: AtomicBool,
@@ -324,19 +342,37 @@ pub struct Plan {
     /// Whether the golden belongs to a workspace (failure messages point at `.gleon/gleon.yaml`
     /// otherwise).
     pub has_workspace: bool,
-    /// Where and how to record, when metrics are enabled and a rule matches.
-    pub record: Option<Record>,
+    /// The golden inside its workspace, when a rule of the workspace matches it.
+    pub in_workspace: Option<InWorkspace>,
 }
 
-/// A case report to record.
+impl Plan {
+    /// The golden and how to record its case report, when metrics are on.
+    pub fn recorded(&self) -> Option<(&InWorkspace, Record)> {
+        self.in_workspace
+            .as_ref()
+            .and_then(|golden| golden.record.map(|record| (golden, record)))
+    }
+}
+
+/// A golden matched by a rule of its workspace: where its images and case report go.
 #[derive(Debug)]
-pub struct Record {
-    /// The workspace to record into.
+pub struct InWorkspace {
+    /// The workspace.
     pub workspace: Arc<Workspace>,
-    /// Canonical test name (also the case file name).
+    /// Canonical test name (the name of its case report and artifacts folder).
     pub name: String,
     /// Golden path relative to the root, `/`-separated.
     pub golden_path: String,
+    /// The artifacts directory, relative to the root.
+    pub artifacts: Arc<ArtifactsDir>,
+    /// How to record the case report, when metrics are on.
+    pub record: Option<Record>,
+}
+
+/// How to record a case report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Record {
     /// Whether to print the console line.
     pub console: bool,
 }
@@ -345,20 +381,33 @@ pub struct Record {
 struct Rule {
     tolerance: Tolerance,
     masks: Vec<Zone>,
-    record: Option<Record>,
+    golden: InWorkspace,
 }
 
 impl Session {
-    /// Creates a session.
+    /// Creates a session; an invalid environment override fails every call.
     #[must_use]
     pub fn new(options: SessionOptions) -> Self {
+        let config_error = |message: String| Failure::config(format!("gleon: {message}"));
         let metrics_override = MetricsConfig::env_override(options.metrics_env.as_deref())
-            .map_err(|e| Failure::config(format!("gleon: {e}")));
+            .map_err(|e| config_error(e.to_string()));
+        let artifacts_override = ArtifactsDir::from_env(options.artifacts_env.as_deref())
+            .map_err(|e| config_error(e.to_string()));
+        let run_id = RunId::from_env(options.run_id_env.as_deref())
+            .map_err(|e| config_error(format!("{RUN_ID_ENV}: {e}")));
+        let failure = metrics_override
+            .as_ref()
+            .err()
+            .or_else(|| artifacts_override.as_ref().err())
+            .or_else(|| run_id.as_ref().err())
+            .cloned();
         Self {
-            failure: metrics_override.as_ref().err().cloned(),
+            failure,
             finds_workspaces: options.finds_workspaces,
             workspaces: Mutex::default(),
             metrics_override: metrics_override.unwrap_or_default(),
+            artifacts_override: artifacts_override.unwrap_or_default(),
+            run_id: run_id.unwrap_or_default(),
             integration: options.integration,
             warned: AtomicBool::new(false),
         }
@@ -439,14 +488,14 @@ impl Session {
             Some(workspace) => self.rule(workspace, golden)?,
             None => None,
         };
-        let (rule_tolerance, record) = match rule {
+        let (rule_tolerance, in_workspace) = match rule {
             Some(Rule {
                 tolerance,
                 masks: rule_masks,
-                record,
+                golden,
             }) => {
                 masks.extend(rule_masks);
-                (Some(tolerance), record)
+                (Some(tolerance), Some(golden))
             }
             None => (None, None),
         };
@@ -454,7 +503,7 @@ impl Session {
             tolerance: tolerance.or(rule_tolerance).unwrap_or(Tolerance::Exact {}),
             masks,
             has_workspace,
-            record,
+            in_workspace,
         })
     }
 
@@ -466,7 +515,9 @@ impl Session {
         let config_error = |message: String| {
             Failure::config(text::config_error(&workspace.config_display(), &message))
         };
-        let compiled = workspace.compiled().map_err(config_error)?;
+        let compiled = workspace
+            .compiled(self.artifacts_override.as_ref())
+            .map_err(config_error)?;
         let RuleMatch::Matched {
             name,
             tolerance,
@@ -483,12 +534,15 @@ impl Session {
         Ok(Some(Rule {
             tolerance,
             masks,
-            record: is_recorded.then(|| Record {
+            golden: InWorkspace {
                 workspace,
                 name,
                 golden_path,
-                console: compiled.metrics.console,
-            }),
+                artifacts: Arc::clone(&compiled.artifacts),
+                record: is_recorded.then_some(Record {
+                    console: compiled.metrics.console,
+                }),
+            },
         }))
     }
 }
@@ -571,11 +625,12 @@ metrics:
         assert_eq!(plan.masks.len(), 2, "the call's masks, then the rule's");
         assert_eq!(plan.masks[0], pixel_mask(5));
         assert!(plan.has_workspace);
-        let record = plan.record.unwrap();
-        assert_eq!(record.name, "test/goldens/clock");
-        assert_eq!(record.golden_path, "test/goldens/Clock.png");
-        assert!(!record.console);
-        assert_eq!(record.workspace.root, root);
+        let golden_in = plan.in_workspace.as_ref().unwrap();
+        assert_eq!(golden_in.name, "test/goldens/clock");
+        assert_eq!(golden_in.golden_path, "test/goldens/Clock.png");
+        assert_eq!(golden_in.record, Some(Record { console: false }));
+        assert_eq!(golden_in.workspace.root, root);
+        assert_eq!(golden_in.artifacts.as_str(), ".gleon/runs/latest/artifacts");
 
         let call = Tolerance::Exact {};
         assert_eq!(
@@ -592,11 +647,17 @@ metrics:
         let plan = session
             .plan(&root.join("test/goldens/new.png"), None, vec![])
             .unwrap();
-        assert_eq!(plan.record.unwrap().golden_path, "test/goldens/new.png");
+        assert_eq!(
+            plan.in_workspace.unwrap().golden_path,
+            "test/goldens/new.png"
+        );
         let plan = session
             .plan(&root.join("test/gone/new.png"), None, vec![])
             .unwrap();
-        assert!(plan.record.is_none(), "a missing directory is outside");
+        assert!(
+            plan.in_workspace.is_none(),
+            "a missing directory is outside"
+        );
     }
 
     #[test]
@@ -614,12 +675,11 @@ metrics:
     fn test_metrics_env_overrides_the_config() {
         let (_dir, root) = workspace(YAML, "a.png");
         let golden = root.join("test/goldens/a.png");
+        let plan = session(Some("0")).plan(&golden, None, vec![]).unwrap();
+        assert!(plan.recorded().is_none());
         assert!(
-            session(Some("0"))
-                .plan(&golden, None, vec![])
-                .unwrap()
-                .record
-                .is_none()
+            plan.in_workspace.is_some(),
+            "images are kept without metrics"
         );
         let (_off, off_root) = workspace(
             "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"**/*.png\" }]",
@@ -629,7 +689,7 @@ metrics:
         let plan = session
             .plan(&off_root.join("test/goldens/a.png"), None, vec![])
             .unwrap();
-        assert!(plan.record.unwrap().console, "console defaults to on");
+        assert!(plan.recorded().unwrap().1.console, "console defaults to on");
     }
 
     #[test]
@@ -649,6 +709,67 @@ metrics:
     }
 
     #[test]
+    fn test_invalid_environment_overrides_fail_every_call() {
+        for (options, message) in [
+            (
+                SessionOptions {
+                    artifacts_env: Some("build/out".to_owned()),
+                    ..SessionOptions::default()
+                },
+                "gleon: GLEON_ARTIFACTS_DIR: 'build/out' must be `.gleon/runs/latest/artifacts`",
+            ),
+            (
+                SessionOptions {
+                    run_id_env: Some("a/b".to_owned()),
+                    ..SessionOptions::default()
+                },
+                "gleon: GLEON_RUN_ID: a run id must be",
+            ),
+            (
+                SessionOptions {
+                    metrics_env: Some("x".to_owned()),
+                    run_id_env: Some("a/b".to_owned()),
+                    ..SessionOptions::default()
+                },
+                "gleon: GLEON_METRICS must be",
+            ),
+        ] {
+            let failure = Session::new(options).failure().cloned().unwrap();
+            assert_eq!(failure.kind, ErrorKind::Config);
+            assert!(failure.message.starts_with(message), "{failure:?}");
+        }
+        let session = Session::new(SessionOptions {
+            artifacts_env: Some(" ".to_owned()),
+            run_id_env: Some(" 42 ".to_owned()),
+            ..SessionOptions::default()
+        });
+        assert!(session.failure().is_none());
+        assert_eq!(session.run_id.unwrap().as_str(), "42");
+    }
+
+    #[test]
+    fn test_plans_carry_the_artifacts_dir_of_the_rule() {
+        let (_dir, root) = workspace(&format!("{YAML}artifacts: .gleon/runs/shots\n"), "a.png");
+        let golden = root.join("test/goldens/a.png");
+        let plan = session(Some("0")).plan(&golden, None, vec![]).unwrap();
+        let golden_in = plan.in_workspace.unwrap();
+        assert_eq!(
+            (golden_in.artifacts.as_str(), golden_in.name.as_str()),
+            (".gleon/runs/shots", "test/goldens/a")
+        );
+        let overridden = Session::new(SessionOptions {
+            finds_workspaces: true,
+            artifacts_env: Some(".gleon/runs/ram".to_owned()),
+            ..SessionOptions::default()
+        });
+        let plan = overridden.plan(&golden, None, vec![]).unwrap();
+        assert_eq!(
+            plan.in_workspace.unwrap().artifacts.as_str(),
+            ".gleon/runs/ram"
+        );
+    }
+
+    #[test]
     fn test_unmatched_and_outside_goldens_compare_exact_without_records() {
         let (_dir, root) = workspace(YAML, "a.png");
         fs::write(root.join("lib.png"), b"").unwrap();
@@ -661,7 +782,7 @@ metrics:
             let plan = session.plan(&golden, None, vec![]).unwrap();
             assert_eq!(plan.tolerance, Tolerance::Exact {});
             assert_eq!(plan.has_workspace, has_workspace);
-            assert!(plan.record.is_none());
+            assert!(plan.in_workspace.is_none());
         }
     }
 
@@ -688,7 +809,13 @@ metrics:
         let (_two, second) = workspace(YAML, "b.png");
         fs::create_dir_all(first.join("test/goldens/deep")).unwrap();
         let session = session(None);
-        let record = |golden: PathBuf| session.plan(&golden, None, vec![]).unwrap().record.unwrap();
+        let record = |golden: PathBuf| {
+            session
+                .plan(&golden, None, vec![])
+                .unwrap()
+                .in_workspace
+                .unwrap()
+        };
         let a = record(first.join("test/goldens/a.png"));
         let deep = record(first.join("test/goldens/deep/c.png"));
         let b = record(second.join("test/goldens/b.png"));
@@ -712,11 +839,10 @@ metrics:
             .plan(&root.join("test/goldens/a.png"), None, vec![])
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Config);
-        assert!(
-            error
-                .message
-                .starts_with(&format!("gleon: {}/.gleon/gleon.yaml: ", root.display()))
-        );
+        assert!(error.message.starts_with(&format!(
+            "gleon: {}: ",
+            Workspace::new(root.clone()).config_display()
+        )));
         assert!(error.message.contains("at least one rule"), "{error:?}");
 
         let (_dir, root) = workspace(YAML, "with space.png");
@@ -745,8 +871,9 @@ metrics:
             session
                 .plan(&golden, None, vec![])
                 .unwrap()
-                .record
+                .recorded()
                 .unwrap()
+                .1
                 .console
         };
         assert!(!console(&session));

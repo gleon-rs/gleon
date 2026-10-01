@@ -251,19 +251,22 @@ pub(crate) fn process_diff_case(
     }
 }
 
-/// Removes the previous `gleon diff` output from `runs_latest`, keeping the case reports of
-/// integrations (`cases/`): they are written by other tools (test runs) and consumed separately.
+/// Removes the previous `gleon diff` output from `runs_latest`, keeping the case reports and
+/// failure images of integrations (`cases/`, `artifacts/`): they are written by other tools (test
+/// runs) and consumed separately.
 fn clear_previous_run(runs_latest: &Path) -> std::io::Result<()> {
     let entries = match std::fs::read_dir(runs_latest) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         entries => entries?,
     };
-    let cases = Path::new(gleon_model::case::CASES_DIR)
-        .file_name()
-        .unwrap_or_default();
+    let kept = [
+        gleon_model::case::CASES_DIR,
+        gleon_model::config::DEFAULT_ARTIFACTS_DIR,
+    ]
+    .map(|dir| Path::new(dir).file_name().unwrap_or_default());
     for entry in entries {
         let entry = entry?;
-        if entry.file_name() == cases {
+        if kept.contains(&entry.file_name().as_os_str()) {
             continue;
         }
         if entry.file_type()?.is_dir() {
@@ -370,6 +373,7 @@ mod tests {
         let latest = temp.path().join("runs/latest");
         std::fs::create_dir_all(latest.join("cases/test")).unwrap();
         std::fs::write(latest.join("cases/test/a.json"), "{}").unwrap();
+        std::fs::create_dir_all(latest.join("artifacts/test/a")).unwrap();
         std::fs::create_dir_all(latest.join("diffs/x")).unwrap();
         std::fs::write(latest.join("gleon-report.json"), "{}").unwrap();
 
@@ -379,7 +383,7 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         left.sort();
-        assert_eq!(left, ["cases"]);
+        assert_eq!(left, ["artifacts", "cases"]);
         assert!(latest.join("cases/test/a.json").is_file());
         clear_previous_run(&temp.path().join("missing")).unwrap();
     }

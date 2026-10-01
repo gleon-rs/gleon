@@ -4,6 +4,17 @@
   "description": "The root configuration structure for gleon.",
   "type": "object",
   "properties": {
+    "artifacts": {
+      "description": "Directory of the images of failed cases (golden, candidate, diff) relative to the workspace\nroot: `.gleon/runs/latest/artifacts` (the default) or a directory under `.gleon/runs/`\noutside `latest/`; `GLEON_ARTIFACTS_DIR` overrides it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactsDir"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "exclude": {
       "description": "Globs of paths to exclude from testing.",
       "$ref": "#/$defs/OneOrMany",
@@ -53,6 +64,11 @@
     "screenshots"
   ],
   "$defs": {
+    "ArtifactsDir": {
+      "description": "`.gleon/runs/latest/artifacts` or a directory under `.gleon/runs/` outside `latest/`: `/`-separated names of ASCII letters, digits, `.`, `_` and `-`, without `.` or `..`.",
+      "type": "string",
+      "pattern": "^\\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*)$"
+    },
     "DiffConfig": {
       "description": "Configuration parameters for the diff engine.",
       "type": "object",
