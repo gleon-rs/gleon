@@ -685,6 +685,38 @@ mod tests {
         );
     }
 
+    /// Bytes equal to the baseline's by hash are still checked as an image: a manifest of a file
+    /// that is no valid PNG gives an `image` error, not a pass.
+    #[test]
+    fn test_diff_checks_identical_bytes_as_an_image() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        let dir = crate::paths::GleonPaths::new(root).manifests_dir(&platform_key(&ctx).unwrap());
+        let mut index = WorkspaceIndex::load(&dir).unwrap();
+        let staged = index.get("shots/a").unwrap().clone();
+        let corrupt = b"\x89PNG\r\n\x1a\nnot an image".to_vec();
+        std::fs::write(root.join("shots/a.png"), &corrupt).unwrap();
+        let hash =
+            crate::manifest::ImageHash::new("sha256", hex::encode(sha2::Sha256::digest(&corrupt)))
+                .unwrap();
+        let manifest =
+            SingleTestManifest::new(hash, staged.phash, staged.width, staged.height).unwrap();
+        index.save_test(&dir, "shots/a", &manifest).unwrap();
+
+        assert_eq!(
+            run_diff(&ctx, &DiffOptions::default())
+                .unwrap()
+                .failed_tests,
+            1
+        );
+        let report = case_report(root, "shots/a");
+        assert_eq!(report.error_kind, Some(CaseErrorKind::Image));
+        assert!(
+            report.message.unwrap().starts_with("invalid screenshot"),
+            "decided without the blob"
+        );
+    }
+
     /// A workspace that cannot be scanned keeps the previous run: its reports and the candidates
     /// `gleon approve` needs.
     #[test]

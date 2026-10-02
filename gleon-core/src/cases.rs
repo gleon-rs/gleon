@@ -953,6 +953,35 @@ mod tests {
         }
     }
 
+    /// A report that exists but cannot be read fails the run instead of vanishing from it, and
+    /// so does a report that cannot be removed.
+    #[cfg(unix)]
+    #[test]
+    fn test_unreadable_and_unremovable_reports_are_errors() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_temp, runs_latest) = workspace();
+        let mut cli = report("a", CaseOutcome::Match);
+        cli.source.tool = "gleon_cli".to_owned();
+        write(&runs_latest, cli, Some("r"), 0);
+        let file = runs_latest.join("cases/a.json");
+        let cases = runs_latest.join("cases");
+        let mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(&file, 0o000);
+        let is_root = std::fs::read(&file).is_ok();
+        let loaded = Cases::load(&runs_latest, None);
+        mode(&file, 0o644);
+        mode(&cases, 0o555);
+        let removed = remove_reports_of(&runs_latest, "gleon_cli");
+        mode(&cases, 0o755);
+        if !is_root {
+            assert!(matches!(loaded, Err(CasesError::Io { ref path, .. }) if *path == file));
+            assert!(matches!(removed, Err(CasesError::Io { ref path, .. }) if *path == file));
+        }
+    }
+
     /// The platform of a case gives the key of the manifests its run reads, opaque or not.
     #[test]
     fn test_platform_of_gives_the_manifest_key() {

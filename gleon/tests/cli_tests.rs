@@ -1355,6 +1355,28 @@ fn copy_fixture(name: &str, path: &std::path::Path) {
     std::fs::copy(fixture(name), path).unwrap();
 }
 
+/// Invalid run settings and a missing workspace fail `gleon diff` before it compares anything.
+#[test]
+fn test_diff_rejects_invalid_settings() {
+    let dir = init_temp_dir();
+    for (var, value) in [("GLEON_ARTIFACTS_DIR", "/tmp"), ("GLEON_RUN_ID", "a:b")] {
+        gleon()
+            .current_dir(dir.path())
+            .env(var, value)
+            .arg("diff")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Error running visual diff"));
+    }
+    let outside = tempfile::tempdir().unwrap();
+    gleon()
+        .current_dir(outside.path())
+        .arg("diff")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Error running visual diff"));
+}
+
 /// `--auto-pull` is advertised by the CLI, so it must actually run a pull before diffing
 /// rather than being silently ignored.
 #[test]

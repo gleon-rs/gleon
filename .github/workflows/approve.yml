@@ -142,8 +142,9 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p .gleon-downloads
-          RUNS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=100" \
-            --jq '.workflow_runs | group_by(.workflow_id)[] | max_by(.run_number) | "\(.id) \(.run_started_at)"')
+          # Every page (`--slurp` does not take `--jq`, so jq flattens them).
+          RUNS=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=100" \
+            | jq -r '[.[].workflow_runs[]] | group_by(.workflow_id)[] | max_by(.run_number) | "\(.id) \(.run_started_at)"')
           while read -r run_id started_at; do
             [ -n "$run_id" ] || continue
             NAMES=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
@@ -220,9 +221,9 @@ jobs:
           set -eo pipefail
           # PNG goldens of integrations that approve wrote: every one, even one equal to the base
           # branch's (the checkout) that the PR had changed.
-          mapfile -t GOLDENS < <(find "$WORKING_DIRECTORY" -type f -iname '*.png' \
+          mapfile -d '' -t GOLDENS < <(find "$WORKING_DIRECTORY" -type f -iname '*.png' \
             -newer "$RUNNER_TEMP/gleon-approve.stamp" \
-            -not -path '*/.git/*' -not -path '*/.gleon/*' -not -path '*/.gleon-downloads/*')
+            -not -path '*/.git/*' -not -path '*/.gleon/*' -not -path '*/.gleon-downloads/*' -print0)
           export GIT_INDEX_FILE=.git/tmp_index
           rm -f "$GIT_INDEX_FILE"
 
