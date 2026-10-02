@@ -5,7 +5,7 @@ use std::path::Path;
 use cli::{Cli, Commands};
 use exit_code::ExitCode;
 use gleon_core::env::EnvProvider;
-use tracing::{error, info};
+use tracing::info;
 
 mod cli;
 mod exit_code;
@@ -120,9 +120,13 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         Commands::Stage { paths } => {
             commands::stage::run_stage(&resolve_context(cli, current_dir, env)?, paths)
         }
-        Commands::Diff { auto_pull } => {
+        Commands::Diff {
+            auto_pull,
+            artifacts,
+        } => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            commands::diff::run_diff(&ctx, *auto_pull, get_storage_config(env)).await
+            let storage = get_storage_config(env);
+            commands::diff::run_diff(&ctx, env, *auto_pull, storage, artifacts.clone()).await
         }
         Commands::LintManifests => {
             let ctx = resolve_context(cli, current_dir, env)?;
@@ -162,20 +166,28 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         }
         Commands::Report {
             format,
-            report,
+            from,
             pr_number,
             out,
         } => {
+            let source = if let Some(dir) = from {
+                commands::RunSource::Copy(dir.clone())
+            } else {
+                let ctx = resolve_context(cli, current_dir, env)?;
+                commands::RunSource::Own(
+                    gleon_core::paths::GleonPaths::new(&ctx.base_dir).runs_latest(),
+                )
+            };
             let storage = get_storage_config(env);
-            commands::report::run_report(env, storage, format, report, *pr_number, out.as_deref())
+            commands::report::run_report(env, storage, *format, &source, *pr_number, out.as_deref())
                 .await
         }
         Commands::Approve { paths, from } => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            commands::approve::run_approve(&ctx, paths, from.as_ref())
+            commands::approve::run_approve(&ctx, paths, from)
         }
         Commands::Dashboard {
-            report,
+            from,
             out,
             truncate_history,
             push,
@@ -184,9 +196,9 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
                 cli,
                 current_dir,
                 env,
-                report.as_deref(),
+                from.as_deref(),
                 out.as_deref(),
-                Some(*truncate_history),
+                *truncate_history,
                 *push,
             )
             .await?
@@ -199,13 +211,10 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
             let ctx = resolve_context(cli, current_dir, env)?;
             commands::clean::run_clean(&ctx, *dry_run, *skip_gitignore, *keep_runs)
         }
-        // Reporting success for a subcommand that did nothing would turn a CI visual-regression
-        // gate green without ever running it.
-        Commands::Test => {
-            error!(
-                "Subcommand 'test' is not implemented yet; run your test command, then 'gleon diff'."
-            );
-            ExitCode::Failure
+        // The exit code is the test command's, not a gleon outcome.
+        Commands::Test { command } => {
+            let ctx = resolve_context(cli, current_dir, env)?;
+            return Ok(commands::test::run_test(&ctx, env, command));
         }
         Commands::Gc {
             dry_run,
@@ -232,15 +241,12 @@ async fn handle_dashboard_command(
     cli: &Cli,
     current_dir: &Path,
     env: &dyn EnvProvider,
-    report: Option<&Path>,
+    from: Option<&Path>,
     out: Option<&Path>,
-    truncate_history: Option<std::num::NonZeroUsize>,
+    truncate_history: std::num::NonZeroUsize,
     push: bool,
 ) -> anyhow::Result<ExitCode> {
     let ctx = resolve_context(cli, current_dir, env)?;
     let storage = get_storage_config(env);
-    Ok(
-        commands::dashboard::run_dashboard(&ctx, storage, report, out, truncate_history, push)
-            .await,
-    )
+    Ok(commands::dashboard::run_dashboard(&ctx, storage, from, out, truncate_history, push).await)
 }

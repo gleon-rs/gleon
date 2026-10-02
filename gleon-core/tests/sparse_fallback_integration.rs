@@ -29,8 +29,12 @@ use gleon_core::{
     config::GleonConfig,
     context::ResolvedContext,
     ops::{
-        approve::approve_workspace, diff::run_diff, pull::pull_blobs, push::push_blobs,
-        stage::stage_workspace, status::check_status,
+        approve::approve_workspace,
+        diff::{DiffOptions, run_diff},
+        pull::pull_blobs,
+        push::push_blobs,
+        stage::stage_workspace,
+        status::check_status,
     },
     platform::PlatformInfo,
     storage::StorageConfig,
@@ -138,16 +142,15 @@ screenshots:
     std::fs::write(goldens_dir.join("t1.png"), &png_t1_linux).unwrap();
 
     // Run diff on Linux: t2 and t3 should succeed via macOS fallback, t1 should mismatch
-    let diff_1 = run_diff(&linux_ctx).unwrap();
+    let diff_1 = run_diff(&linux_ctx, &DiffOptions::default()).unwrap();
     assert_eq!(diff_1.total_tests, 3);
     assert_eq!(diff_1.failed_tests, 1);
-    assert!(!diff_1.passed);
 
     // -------------------------------------------------------------------------
     // Step 3: Approve t1 on Linux
     // -------------------------------------------------------------------------
-    let approve_res = approve_workspace(&linux_ctx, &[], None).unwrap();
-    assert_eq!(approve_res.total_approved, 1);
+    let approve_res = approve_workspace(&linux_ctx, &[], &[], None).unwrap();
+    assert_eq!(approve_res.approved_test_cases.len(), 1);
     assert_eq!(
         approve_res.approved_test_cases,
         vec!["test/goldens/t1".to_string()]
@@ -171,10 +174,9 @@ screenshots:
     let status_res = check_status(&linux_ctx).unwrap();
     assert!(status_res.is_clean());
 
-    let diff_2 = run_diff(&linux_ctx).unwrap();
+    let diff_2 = run_diff(&linux_ctx, &DiffOptions::default()).unwrap();
     assert_eq!(diff_2.total_tests, 3);
     assert_eq!(diff_2.failed_tests, 0);
-    assert!(diff_2.passed);
 
     // -------------------------------------------------------------------------
     // Step 5: Simulate clean CI runner on Linux
@@ -207,10 +209,9 @@ screenshots:
     assert_eq!(pull_res.downloaded_blobs, 3);
 
     // Diff on runner must pass completely
-    let diff_runner = run_diff(&runner_ctx).unwrap();
+    let diff_runner = run_diff(&runner_ctx, &DiffOptions::default()).unwrap();
     assert_eq!(diff_runner.total_tests, 3);
     assert_eq!(diff_runner.failed_tests, 0);
-    assert!(diff_runner.passed);
 
     // -------------------------------------------------------------------------
     // Step 6: Fix t1 on Linux so it matches macOS again -> Approve prunes override
@@ -218,12 +219,12 @@ screenshots:
     std::fs::write(goldens_dir.join("t1.png"), &png_t1_macos).unwrap();
 
     // Diff fails against Linux override (because override was orange, now red)
-    let diff_3 = run_diff(&linux_ctx).unwrap();
+    let diff_3 = run_diff(&linux_ctx, &DiffOptions::default()).unwrap();
     assert_eq!(diff_3.failed_tests, 1);
 
     // Approve on Linux: since new image matches macOS fallback baseline, override is pruned
-    let approve_2 = approve_workspace(&linux_ctx, &[], None).unwrap();
-    assert_eq!(approve_2.total_approved, 1);
+    let approve_2 = approve_workspace(&linux_ctx, &[], &[], None).unwrap();
+    assert_eq!(approve_2.approved_test_cases.len(), 1);
 
     // Linux override manifest must now be deleted from disk
     assert!(!linux_manifests_dir.join("test/goldens/t1.json").exists());
@@ -233,10 +234,9 @@ screenshots:
     assert!(status_clean.is_clean());
 
     // Diff on Linux passes
-    let diff_4 = run_diff(&linux_ctx).unwrap();
+    let diff_4 = run_diff(&linux_ctx, &DiffOptions::default()).unwrap();
     assert_eq!(diff_4.total_tests, 3);
     assert_eq!(diff_4.failed_tests, 0);
-    assert!(diff_4.passed);
 
     // -------------------------------------------------------------------------
     // Step 7: Delete t2.png on Linux -> Status reports Deleted via fallback.

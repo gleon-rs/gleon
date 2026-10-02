@@ -1,27 +1,17 @@
-//! Path-formatting helpers shared by the HTML and `JUnit` XML report generators.
+//! Path and outcome formatting helpers shared by the report generators.
 
-use serde::{Serialize, Serializer};
+use std::path::{Component, Path};
 
-/// Computes a relative path from `base` to `target`.
-///
-/// Precondition: `target` and `base` must share the same coordinate frame (both absolute or both relative).
-/// If one path is absolute and the other is relative, returns `target` unchanged.
-/// For example, if `target` is `.gleon/diffs/image.png` and `base` is `.gleon/reports`,
-/// the result is `../diffs/image.png`.
+use gleon_model::case::{CaseOutcome, CaseReport, text};
+
 /// Lexically normalizes a path's components: collapses `foo/../` pairs and drops `.` segments,
 /// without touching the filesystem.
-fn normalize_components(path: &std::path::Path) -> Vec<std::path::Component<'_>> {
-    use std::path::Component;
-
+fn normalize_components(path: &Path) -> Vec<Component<'_>> {
     let mut normalized = Vec::new();
     for comp in path.components() {
         match comp {
-            Component::ParentDir => {
-                if let Some(Component::Normal(_)) = normalized.last() {
-                    normalized.pop();
-                } else {
-                    normalized.push(comp);
-                }
+            Component::ParentDir if matches!(normalized.last(), Some(Component::Normal(_))) => {
+                normalized.pop();
             }
             Component::CurDir => {}
             _ => normalized.push(comp),
@@ -30,170 +20,83 @@ fn normalize_components(path: &std::path::Path) -> Vec<std::path::Component<'_>>
     normalized
 }
 
-/// Resolves `path` against the current working directory, if it is relative.
-///
-/// Meant to be called **once**, up front, on a `report_dir` before it is threaded through many
-/// [`FormattedPath`]s — making it absolute here means every one of those can hit the
-/// same-coordinate-frame fast path in [`make_relative_path`] instead of each independently
-/// falling back to `current_dir()`. Falls back to returning `path` unchanged if the working
-/// directory can't be read.
-pub(super) fn to_absolute(path: &std::path::Path) -> std::path::PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-    }
-}
-
-pub(super) fn make_relative_path(
-    target: &std::path::Path,
-    base: &std::path::Path,
-) -> std::path::PathBuf {
-    #[cfg(windows)]
-    use std::path::Component;
-    use std::path::PathBuf;
-
-    // Bring both paths into one coordinate frame first. `gleon report html --out report.html`
-    // hands us a relative (often empty) report dir while the recorded image paths are absolute;
-    // bailing out with the target unchanged would embed `file:///...` links in the artifact.
-    let (absolute_target, absolute_base);
-    let (target, base) = if target.is_absolute() == base.is_absolute() {
-        (target, base)
-    } else if let Ok(cwd) = std::env::current_dir() {
-        absolute_target = if target.is_absolute() {
-            target.to_path_buf()
+/// The link from a page in `report_dir` to the image `path` (both resolved against the working
+/// directory): relative and `/`-separated, or a `file:///` URL for an image on another drive (a
+/// bare `C:/...` would read as the URL scheme `c:`).
+pub(super) fn image_link(path: &Path, report_dir: &Path) -> String {
+    let absolute = |path: &Path| {
+        let path = if path.as_os_str().is_empty() {
+            Path::new(".")
         } else {
-            cwd.join(target)
+            path
         };
-        absolute_base = if base.is_absolute() {
-            base.to_path_buf()
-        } else {
-            cwd.join(base)
-        };
-        (absolute_target.as_path(), absolute_base.as_path())
-    } else {
-        // No usable working directory to anchor against: leave the target untouched rather
-        // than inventing a relationship between the two paths.
-        return target.to_path_buf();
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
     };
-
-    let mut target_comps = normalize_components(target).into_iter();
-    let mut base_comps = normalize_components(base).into_iter();
-
-    #[cfg(windows)]
-    if let (Some(Component::Prefix(p1)), Some(Component::Prefix(p2))) =
-        (target_comps.clone().next(), base_comps.clone().next())
-    {
-        if p1 != p2 {
-            return target.to_path_buf();
-        }
+    let (path, report_dir) = (absolute(path), absolute(report_dir));
+    let (target, base) = (
+        normalize_components(&path),
+        normalize_components(&report_dir),
+    );
+    let name = |comp: &Component<'_>| comp.as_os_str().to_string_lossy().into_owned();
+    if target.first() != base.first() {
+        let parts: Vec<_> = target
+            .iter()
+            .filter(|comp| !matches!(comp, Component::RootDir))
+            .map(name)
+            .collect();
+        return format!("file:///{}", parts.join("/"));
     }
-
-    let mut target_comp = target_comps.next();
-    let mut base_comp = base_comps.next();
-
-    while let (Some(t), Some(b)) = (target_comp, base_comp) {
-        if t == b {
-            target_comp = target_comps.next();
-            base_comp = base_comps.next();
-        } else {
-            break;
-        }
-    }
-
-    let mut rel = PathBuf::new();
-
-    if base_comp.is_some() {
-        rel.push("..");
-        for _ in base_comps {
-            rel.push("..");
-        }
-    }
-
-    if let Some(t) = target_comp {
-        rel.push(t);
-        for comp in target_comps {
-            rel.push(comp);
-        }
-    }
-
-    if rel.as_os_str().is_empty() {
-        PathBuf::from(".")
+    let common = target
+        .iter()
+        .zip(&base)
+        .take_while(|(target, base)| target == base)
+        .count();
+    let parts: Vec<_> = std::iter::repeat_n("..".to_owned(), base.len() - common)
+        .chain(target[common..].iter().map(name))
+        .collect();
+    if parts.is_empty() {
+        ".".to_owned()
     } else {
-        rel
+        parts.join("/")
     }
 }
 
-/// Zero-copy serialization wrapper formatting a path relative to `report_dir` (or absolute/as-is
-/// if `report_dir` is `None`), always using forward slashes so links work cross-platform.
-pub(super) struct FormattedPath<'a> {
-    pub(super) path: &'a std::path::Path,
-    pub(super) report_dir: Option<&'a std::path::Path>,
+/// The status of a case as the reports name it.
+pub(super) const fn status(outcome: CaseOutcome) -> &'static str {
+    match outcome {
+        CaseOutcome::Identical | CaseOutcome::Match | CaseOutcome::Updated => "Pass",
+        CaseOutcome::Mismatch => "Mismatch",
+        CaseOutcome::DimensionMismatch => "Dimension Mismatch",
+        CaseOutcome::Missing => "Missing Baseline",
+        CaseOutcome::Error => "Error",
+    }
 }
 
-impl std::fmt::Display for FormattedPath<'_> {
+/// A case in one line, `<status>: <why>`: the message of the case (the texts every writer shares,
+/// `gleon_model::case::text`), else what its metrics or sizes say, e.g.
+/// `Mismatch: 0.0167% (1 of 6000px) differ` or `Error (image): candidate image: …`.
+pub(super) struct CaseSummary<'a>(pub(super) &'a CaseReport);
+
+impl std::fmt::Display for CaseSummary<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use std::path::Component;
-        let path_to_format = self
-            .report_dir
-            .map_or(std::borrow::Cow::Borrowed(self.path), |base| {
-                std::borrow::Cow::Owned(make_relative_path(self.path, base))
-            });
-
-        let mut first = true;
-        let mut last_was_slash = false;
-        let mut has_output = false;
-
-        for comp in path_to_format.components() {
-            if !first
-                && !last_was_slash
-                && !matches!(comp, Component::RootDir | Component::Prefix(_))
-            {
-                write!(f, "/")?;
-            }
-            first = false;
-            match comp {
-                Component::Normal(os_str) => {
-                    write!(f, "{}", os_str.to_string_lossy())?;
-                    last_was_slash = false;
-                    has_output = true;
-                }
-                Component::ParentDir => {
-                    write!(f, "..")?;
-                    last_was_slash = false;
-                    has_output = true;
-                }
-                Component::CurDir => {
-                    write!(f, ".")?;
-                    last_was_slash = false;
-                    has_output = true;
-                }
-                Component::RootDir => {
-                    write!(f, "/")?;
-                    last_was_slash = true;
-                    has_output = true;
-                }
-                Component::Prefix(prefix) => {
-                    write!(f, "{}", prefix.as_os_str().to_string_lossy())?;
-                    last_was_slash = false;
-                    first = true;
-                    has_output = true;
-                }
-            }
+        let report = self.0;
+        let size = |width: Option<u32>, height: Option<u32>| Some((width?, height?));
+        let detail = report.message.clone().or_else(|| match report.outcome {
+            CaseOutcome::DimensionMismatch => Some(text::dimension_summary(
+                size(report.golden.width, report.golden.height)?,
+                size(report.candidate.width, report.candidate.height)?,
+            )),
+            _ => report.metrics.as_ref().map(text::metrics_summary),
+        });
+        f.write_str(status(report.outcome))?;
+        if let Some(kind) = report.error_kind {
+            write!(f, " ({})", kind.as_str())?;
         }
-        if !has_output {
-            write!(f, ".")?;
-        }
-        Ok(())
-    }
-}
-
-impl Serialize for FormattedPath<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_str(self)
+        let fallback = match report.outcome {
+            CaseOutcome::Missing => "the golden does not exist yet",
+            outcome => outcome.as_str(),
+        };
+        write!(f, ": {}", detail.as_deref().unwrap_or(fallback))
     }
 }
 
@@ -209,129 +112,88 @@ impl Serialize for FormattedPath<'_> {
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     #[test]
-    fn test_make_relative_path() {
-        let target = PathBuf::from(".gleon/diffs/billing/form.png");
-        let base = PathBuf::from(".gleon/reports");
-        let rel = make_relative_path(&target, &base);
-        assert_eq!(rel, PathBuf::from("../diffs/billing/form.png"));
-    }
-
-    #[test]
-    fn test_make_relative_path_edge_cases() {
-        // Mixed frames are anchored to the working directory rather than bailing out with the
-        // absolute target (which used to leak `file:///...` links into `--out` HTML reports).
+    fn test_image_link_is_relative_to_the_report() {
         let cwd = std::env::current_dir().unwrap();
-        let target = cwd.join("reports").join("img.png");
-        let relative_base = PathBuf::from("reports");
+        let link = |path: &str, dir: &str| image_link(Path::new(path), Path::new(dir));
         assert_eq!(
-            make_relative_path(&target, &relative_base),
-            PathBuf::from("img.png"),
-            "relative base resolves against the cwd the report is written from"
+            link(
+                ".gleon/runs/latest/artifacts/a/diff.png",
+                ".gleon/runs/latest"
+            ),
+            "artifacts/a/diff.png"
         );
-
-        // Nothing sensible to relate them by once anchoring is impossible is covered by the
-        // same-frame path below.
-        let outside = PathBuf::from("/definitely/not/under/cwd/img.png");
-        let rel = make_relative_path(&outside, &relative_base);
-        assert!(
-            rel.is_relative(),
-            "still produces a relative link, got {rel:?}"
-        );
-
-        #[cfg(windows)]
-        {
-            // Prefix mismatches on Windows
-            let mut p1 = PathBuf::new();
-            p1.push("C:\\a\\b");
-            let mut p2 = PathBuf::new();
-            p2.push("D:\\a\\b");
-            assert_eq!(super::make_relative_path(&p1, &p2), p1);
-        }
-    }
-
-    #[test]
-    fn test_make_relative_path_curdir_normalization() {
-        let target = PathBuf::from("./a/./b/../c");
-        let base = PathBuf::from("./a/./d/../e");
-        let rel = make_relative_path(&target, &base);
-        assert!(!rel.to_string_lossy().is_empty());
-    }
-
-    #[test]
-    fn test_make_relative_path_lexical_normalization() {
-        // Test that `..` is correctly normalized lexically without touching FS.
-        let base = PathBuf::from("runs/latest");
-        let target = PathBuf::from("runs/latest/../baseline/auth_login.png");
-        let expected = PathBuf::from("../baseline/auth_login.png");
-        assert_eq!(make_relative_path(&target, &base), expected);
-
-        let target2 = PathBuf::from("baseline/auth_login.png");
-        let base2 = PathBuf::from("runs/latest");
-        let expected2 = PathBuf::from("../../baseline/auth_login.png");
-        assert_eq!(make_relative_path(&target2, &base2), expected2);
-
-        let target3 = PathBuf::from("../outside/image.png");
-        let base3 = PathBuf::from("reports");
-        let expected3 = PathBuf::from("../../outside/image.png");
-        assert_eq!(make_relative_path(&target3, &base3), expected3);
-    }
-
-    #[test]
-    fn test_formatted_path_display() {
-        let path1 = std::path::Path::new("foo/bar/baz.png");
         assert_eq!(
-            FormattedPath {
-                path: path1,
-                report_dir: None
-            }
-            .to_string(),
-            "foo/bar/baz.png"
+            link("runs/latest/../baseline/a.png", "runs/latest"),
+            "../baseline/a.png"
         );
+        assert_eq!(
+            link("baseline/a.png", "./runs/./latest"),
+            "../../baseline/a.png"
+        );
+        assert_eq!(link("a/b", "a/b"), ".");
+        // Mixed frames meet at the working directory (`--out report.html` gives an empty dir).
+        let absolute = cwd.join("reports/img.png");
+        assert_eq!(image_link(&absolute, Path::new("")), "reports/img.png");
+        assert_eq!(image_link(&absolute, &cwd.join("reports")), "img.png");
+    }
 
-        #[cfg(windows)]
-        {
-            let path2 = std::path::Path::new("C:\\foo\\bar.png");
-            let formatted2 = FormattedPath {
-                path: path2,
-                report_dir: None,
-            }
-            .to_string();
-            assert_eq!(formatted2, "C:/foo/bar.png");
-        }
+    #[cfg(windows)]
+    #[test]
+    fn test_image_link_to_another_drive_is_a_file_url() {
+        assert_eq!(
+            image_link(Path::new("D:\\runs\\a.png"), Path::new("C:\\reports")),
+            "file:///D:/runs/a.png"
+        );
     }
 
     #[test]
-    fn test_formatted_path_all_components() {
-        let root_path = std::path::Path::new("/a/.././b");
-        let formatted = FormattedPath {
-            path: root_path,
-            report_dir: None,
-        }
-        .to_string();
-        assert!(formatted.contains('a'));
+    fn test_case_summary_of_every_outcome() {
+        use gleon_model::case::Metrics;
 
-        let empty_path = std::path::Path::new("");
-        let formatted_empty = FormattedPath {
-            path: empty_path,
-            report_dir: None,
-        }
-        .to_string();
-        assert_eq!(formatted_empty, ".");
+        use crate::cases::fixtures::{every_outcome, report};
 
-        let cur_dir = std::path::Path::new("./foo.png");
-        let formatted_cur = FormattedPath {
-            path: cur_dir,
-            report_dir: None,
-        }
-        .to_string();
-        assert_eq!(formatted_cur, "./foo.png");
+        let summaries: Vec<_> = every_outcome()
+            .iter()
+            .map(|report| CaseSummary(report).to_string())
+            .collect();
+        assert_eq!(
+            summaries,
+            [
+                "Pass: identical",
+                "Pass: 0.00% (0 of 100px) differ",
+                "Mismatch: 5.00% (5 of 100px) differ",
+                "Dimension Mismatch: golden is 10x10px, test image is 20x10px",
+                "Error (image): candidate image: corrupt",
+                "Pass: updated",
+                "Missing Baseline: no golden yet",
+            ]
+        );
 
-        let same = make_relative_path(std::path::Path::new("/a/b"), std::path::Path::new("/a/b"));
-        assert_eq!(same, PathBuf::from("."));
+        let mut dimensions = report("a", CaseOutcome::DimensionMismatch);
+        dimensions.message = None;
+        assert_eq!(
+            CaseSummary(&dimensions).to_string(),
+            "Dimension Mismatch: golden is 10x10px, test image is 20x10px"
+        );
+        dimensions.golden.width = None;
+        assert_eq!(
+            CaseSummary(&dimensions).to_string(),
+            "Dimension Mismatch: dimension_mismatch"
+        );
+        let mut tiny = report("a", CaseOutcome::Mismatch);
+        tiny.metrics = Some(Metrics::Pixel {
+            total_pixels: 4_000_000,
+            diff_pixels: 1,
+            diff_ratio: 1.0 / 4_000_000.0,
+            headroom: -1.0,
+        });
+        assert_eq!(
+            CaseSummary(&tiny).to_string(),
+            "Mismatch: <0.0001% (1 of 4000000px) differ"
+        );
+        assert_eq!(status(CaseOutcome::Identical), "Pass");
     }
 }

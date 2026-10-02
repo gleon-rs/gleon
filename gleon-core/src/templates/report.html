@@ -247,7 +247,7 @@
                 <div class="test-error">{{ failure.error }}</div>
             </div>
             
-            {% if failure.type == "Mismatch" %}
+            {% if failure.outcome == "mismatch" and failure.baseline_path and failure.actual_path %}
             <div class="comparison-grid">
                 <div class="image-container" id="slider-container-{{ loop.index }}">
                     <div class="image-title">Actual vs Baseline Slider</div>
@@ -262,23 +262,32 @@
                         <input type="range" min="0" max="100" value="50" class="slider-input" data-index="{{ loop.index }}" aria-label="Actual vs baseline comparison slider for {{ failure.name }} / {{ failure.image }}">
                     </div>
                 </div>
+                {% if failure.diff_path %}
                 <div class="image-container">
                     <div class="image-title">Diff Image{% if failure.diff_count is not none %} ({{ failure.diff_count }} diffs){% endif %}</div>
                     <img class="img-static" src="{{ failure.diff_path | escape }}" alt="Diff" loading="lazy">
                 </div>
+                {% endif %}
             </div>
-            {% elif failure.type == "DimensionMismatch" %}
+            {% elif failure.outcome == "dimension_mismatch" and failure.baseline_path and failure.actual_path %}
             <div class="comparison-grid">
                 <div class="image-container" id="dim-actual-container-{{ loop.index }}">
-                    <div class="image-title">Actual ({{ failure.actual_size }})</div>
+                    <div class="image-title">Actual{% if failure.actual_size %} ({{ failure.actual_size }}){% endif %}</div>
                     <img class="img-static" src="{{ failure.actual_path | escape }}" alt="Actual" loading="lazy">
                 </div>
                 <div class="image-container" id="dim-baseline-container-{{ loop.index }}">
-                    <div class="image-title">Baseline ({{ failure.baseline_size }})</div>
+                    <div class="image-title">Baseline{% if failure.baseline_size %} ({{ failure.baseline_size }}){% endif %}</div>
                     <img class="img-static" src="{{ failure.baseline_path | escape }}" alt="Baseline" loading="lazy">
                 </div>
             </div>
-            {% elif failure.type == "DecodeError" %}
+            {% elif failure.outcome == "missing" and failure.actual_path %}
+            <div class="comparison-grid">
+                <div class="image-container" id="missing-actual-container-{{ loop.index }}">
+                    <div class="image-title">New screenshot{% if failure.actual_size %} ({{ failure.actual_size }}){% endif %}</div>
+                    <img class="img-static" src="{{ failure.actual_path | escape }}" alt="Actual" loading="lazy">
+                </div>
+            </div>
+            {% elif failure.error_kind == "image" %}
             <div class="decode-error-box">
                 Failed to decode image file.
             </div>

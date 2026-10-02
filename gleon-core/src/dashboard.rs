@@ -11,19 +11,24 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use gleon_model::{
+    case::{CaseErrorKind, CaseOutcome, CaseReport, Metrics},
+    platform::PlatformConfig,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use tracing::instrument;
 
 use crate::{
+    cases::{Cases, CasesError},
     context::ResolvedContext,
     paths::GleonPaths,
-    results::{TestCaseResult, TestImageResult},
     storage::{ObjectStoreAdapter, StorageConfig, StorageError},
 };
 
-/// Current supported schema version for `history.json`.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+/// The schema version of `history.json` this gleon reads and writes; other versions are rejected
+/// (start a new history by moving the old file away).
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 /// Errors that can occur during history tracking or dashboard compilation.
 #[derive(Debug, thiserror::Error)]
@@ -44,41 +49,26 @@ pub enum DashboardError {
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
 
-    /// Platform key resolution error.
-    #[error("Platform error: {0}")]
-    Platform(#[from] crate::platform::PlatformError),
-
     /// Remote storage was not configured when push was requested.
     #[error("Storage not configured: GLEON_STORAGE_URL is required when --push is enabled")]
     StorageNotConfigured,
 
-    /// Error reading the input report JSON file.
-    #[error("Failed to read report JSON from '{path}': {source}")]
-    ReportLoad {
-        /// Path to the unreadable report file.
-        path: PathBuf,
-        /// Underlying I/O error.
-        #[source]
-        source: std::io::Error,
-    },
+    /// The case reports of the run cannot be read.
+    #[error(transparent)]
+    Cases(#[from] CasesError),
 
-    /// Error parsing the input report JSON file.
-    #[error("Failed to parse report JSON from '{path}': {source}")]
-    ReportParse {
-        /// Path to the unparseable report file.
-        path: PathBuf,
-        /// Underlying JSON parsing error.
-        #[source]
-        source: serde_json::Error,
-    },
-
-    /// The history schema version is newer than supported by this version of Gleon.
-    #[error("Unsupported history schema version {found}, maximum supported is {supported}")]
+    /// The history has another schema version than this version of gleon.
+    #[error(
+        "Unsupported schema version {found} of the history {location} (this gleon reads \
+         {supported}): move it away to start a new history"
+    )]
     UnsupportedSchemaVersion {
         /// The version encountered in `history.json`.
         found: u32,
         /// Maximum version supported by this binary.
         supported: u32,
+        /// Which history: the local file or the remote object.
+        location: String,
     },
 }
 
@@ -91,143 +81,86 @@ impl From<crate::io::IoError> for DashboardError {
     }
 }
 
-/// Aggregated summary counters for a test run.
+/// Aggregated summary counters for a test run (the rest of `total` passed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RunSummary {
     /// Total test cases in this run.
     pub total: usize,
-    /// Number of test cases that passed.
-    pub passed: usize,
     /// Number of test cases that failed.
     pub failed: usize,
 }
 
-/// Typed status of an individual test case in historical logs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum TestHistoryStatus {
-    /// Comparison matched baseline within tolerance.
-    Success,
-    /// Visual difference exceeded tolerance.
-    Mismatch,
-    /// Dimensions differed between actual and baseline.
-    DimensionMismatch,
-    /// Failed to decode image.
-    DecodeError,
-    /// Baseline image was missing.
-    MissingBaseline,
-    /// File I/O error occurred.
-    IoError,
-    /// Failed to encode image.
-    EncodeError,
+/// Most failures a run keeps in the history (the most telling, [`Cases::failures_by_severity`]);
+/// [`RunSummary::failed`] counts them all. A run where a renderer update fails every case stays
+/// small.
+pub const MAX_FAILURES_PER_RUN: usize = 100;
+
+/// A failed test case of a historical run (passing ones are only counted, and at most
+/// [`MAX_FAILURES_PER_RUN`] are kept, so the history stays small for large suites).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestHistoryEntry {
+    /// Canonical test name.
+    pub name: String,
+    /// Outcome of the case.
+    pub outcome: CaseOutcome,
+    /// Class of an `error` outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<CaseErrorKind>,
+    /// Metrics of a `match` or `mismatch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Metrics>,
+    /// Why the case failed, when the report says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
-impl std::fmt::Display for TestHistoryStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+impl From<&CaseReport> for TestHistoryEntry {
+    fn from(report: &CaseReport) -> Self {
+        Self {
+            name: report.name.clone(),
+            outcome: report.outcome,
+            error_kind: report.error_kind,
+            metrics: report.metrics,
+            message: report.message.clone(),
+        }
     }
 }
 
-/// Recorded outcome of an individual test case within a historical run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TestHistoryEntry {
-    /// Name / path of the test case.
-    pub name: String,
-    /// Status description.
-    pub status: TestHistoryStatus,
-    /// Optional error details or failure reason.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Number of mismatched pixels if applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub diff_count: Option<u64>,
-}
-
 /// A historical record representing a single visual regression test run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunHistoryEntry {
-    /// Unique identifier for this run.
+    /// Unique identifier for this run (on this platform).
     pub id: String,
-    /// Timestamp when the run occurred.
+    /// When the run recorded its newest case.
     pub timestamp: DateTime<Utc>,
     /// Git branch context.
     pub branch: String,
-    /// Resolved platform key (e.g. `macos-aarch64`).
+    /// The platform of the run, e.g. `macos-aarch64`.
     pub platform: String,
     /// Optional Git commit SHA.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
     /// Aggregated test summary.
     pub summary: RunSummary,
-    /// Outcomes of individual test cases evaluated in this run.
-    pub tests: Vec<TestHistoryEntry>,
+    /// The failed test cases of this run.
+    pub failures: Vec<TestHistoryEntry>,
 }
 
 impl RunHistoryEntry {
-    /// Constructs a `RunHistoryEntry` from a list of [`TestCaseResult`]s and run metadata.
+    /// Constructs a `RunHistoryEntry` from the case reports of a run and run metadata.
     #[must_use]
-    pub fn from_test_results(
+    pub fn from_cases(
         id: impl Into<String>,
         timestamp: DateTime<Utc>,
         branch: impl Into<String>,
         platform: impl Into<String>,
         commit_sha: Option<String>,
-        test_cases: &[TestCaseResult],
+        cases: &Cases,
     ) -> Self {
-        let total = test_cases.len();
-        let passed = test_cases.iter().filter(|tc| tc.passed()).count();
-        let failed = total.saturating_sub(passed);
-
-        let tests = test_cases
-            .iter()
-            .map(|tc| {
-                let (status, error, diff_count) = match &tc.result {
-                    TestImageResult::Success { .. } => (TestHistoryStatus::Success, None, None),
-                    TestImageResult::Mismatch { detail, .. } => match detail {
-                        gleon_engine::Measurement::Pixel { diff_count } => {
-                            (TestHistoryStatus::Mismatch, None, Some(*diff_count))
-                        }
-                        detail @ gleon_engine::Measurement::Ssim { .. } => {
-                            (TestHistoryStatus::Mismatch, Some(detail.to_string()), None)
-                        }
-                    },
-                    TestImageResult::DimensionMismatch {
-                        baseline_size,
-                        actual_size,
-                        ..
-                    } => (
-                        TestHistoryStatus::DimensionMismatch,
-                        Some(format!(
-                            "Expected {}x{}, got {}x{}",
-                            baseline_size.0, baseline_size.1, actual_size.0, actual_size.1
-                        )),
-                        None,
-                    ),
-                    TestImageResult::DecodeError { error, .. } => {
-                        (TestHistoryStatus::DecodeError, Some(error.clone()), None)
-                    }
-                    TestImageResult::MissingBaseline { reason, .. } => (
-                        TestHistoryStatus::MissingBaseline,
-                        Some(reason.clone()),
-                        None,
-                    ),
-                    TestImageResult::IoError { error, .. } => {
-                        (TestHistoryStatus::IoError, Some(error.clone()), None)
-                    }
-                    TestImageResult::EncodeError { error, .. } => {
-                        (TestHistoryStatus::EncodeError, Some(error.clone()), None)
-                    }
-                };
-
-                TestHistoryEntry {
-                    name: tc.name.clone(),
-                    status,
-                    error,
-                    diff_count,
-                }
-            })
-            .collect();
-
+        let failures = cases.failures_by_severity();
         Self {
             id: id.into(),
             timestamp,
@@ -235,17 +168,47 @@ impl RunHistoryEntry {
             platform: platform.into(),
             commit_sha,
             summary: RunSummary {
-                total,
-                passed,
-                failed,
+                total: cases.reports().len(),
+                failed: failures.len(),
             },
-            tests,
+            failures: failures
+                .into_iter()
+                .take(MAX_FAILURES_PER_RUN)
+                .map(TestHistoryEntry::from)
+                .collect(),
         }
     }
 }
 
+/// `platform` as people name it: an opaque key as is, structured fields joined with `-`
+/// (`macos-aarch64`, `linux-x86_64-chrome-126-theme=dark`).
+#[must_use]
+pub fn platform_label(platform: &PlatformConfig) -> String {
+    let fields = match platform {
+        PlatformConfig::Opaque(key) => return key.clone(),
+        PlatformConfig::Structured(fields) => fields,
+    };
+    let mut label = String::new();
+    let mut push = |parts: &[&str]| {
+        if !label.is_empty() {
+            label.push('-');
+        }
+        for part in parts {
+            label.push_str(part);
+        }
+    };
+    for part in fields.os.iter().chain(&fields.arch).chain(&fields.renderer) {
+        push(&[part]);
+    }
+    for (key, value) in fields.labels.iter().flatten() {
+        push(&[key, "=", value]);
+    }
+    label
+}
+
 /// The root schema of `history.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DashboardHistory {
     /// Schema format version.
     pub schema_version: u32,
@@ -269,61 +232,47 @@ impl DashboardHistory {
         Self::default()
     }
 
-    /// Validates that the schema version does not exceed [`SUPPORTED_SCHEMA_VERSION`].
-    ///
-    /// # Errors
-    /// Returns [`DashboardError::UnsupportedSchemaVersion`] if `schema_version` is too new.
-    pub const fn validate_schema(&self) -> Result<(), DashboardError> {
-        if self.schema_version > SUPPORTED_SCHEMA_VERSION {
-            return Err(DashboardError::UnsupportedSchemaVersion {
-                found: self.schema_version,
-                supported: SUPPORTED_SCHEMA_VERSION,
-            });
-        }
-        Ok(())
-    }
-
-    /// Parses `history.json` content from a string, or initializes an empty history if empty.
+    /// Parses `history.json` content from a string, or initializes an empty history if empty;
+    /// `location` names the history in errors.
     ///
     /// # Errors
     /// Returns [`DashboardError::Json`] or [`DashboardError::UnsupportedSchemaVersion`].
-    pub fn parse_or_empty(raw: &str) -> Result<Self, DashboardError> {
+    pub fn parse_or_empty(raw: &str, location: &str) -> Result<Self, DashboardError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Ok(Self::new());
         }
-        let history: Self = serde_json::from_str(trimmed)?;
-        history.validate_schema()?;
-        Ok(history)
+        parse_history(trimmed.as_bytes(), location)
     }
 
-    /// Appends a new run entry to the history log.
+    /// Adds a run to the history log (see [`Self::merge`] for runs it already has).
     ///
     /// If `truncate_limit` is `Some(limit)` and the number of runs exceeds `limit`,
     /// the oldest runs are dropped from the beginning.
     pub fn append_run(&mut self, entry: RunHistoryEntry, truncate_limit: Option<NonZeroUsize>) {
-        self.runs.push(entry);
-
-        if let Some(limit) = truncate_limit
-            && self.runs.len() > limit.get()
-        {
-            let excess = self.runs.len() - limit.get();
-            let _ = self.runs.drain(0..excess);
-        }
+        self.merge(
+            Self {
+                runs: vec![entry],
+                ..Self::new()
+            },
+            truncate_limit,
+        );
     }
 
-    /// Merges another [`DashboardHistory`] into this one, deduplicating runs by `id`
-    /// and sorting all runs chronologically by `timestamp`.
+    /// Merges another [`DashboardHistory`] into this one and sorts all runs chronologically by
+    /// `timestamp`. A run recorded twice (the same `id`) keeps its newest entry, and on equal
+    /// timestamps the entry of `other`: compiling a run again replaces what the history had.
     ///
     /// If `truncate_limit` is `Some(limit)` and the merged collection exceeds `limit`,
     /// the oldest runs are dropped from the beginning.
     pub fn merge(&mut self, mut other: Self, truncate_limit: Option<NonZeroUsize>) {
-        self.runs.append(&mut other.runs);
+        // `other` first: the stable sort keeps it ahead of an entry of `self` it ties with.
+        other.runs.append(&mut self.runs);
+        self.runs = other.runs;
 
-        // Sort by id first so all runs with the same id are guaranteed to be contiguous
-        self.runs.sort_by(|a, b| a.id.cmp(&b.id));
-
-        // Deduplicate runs by id (guaranteed contiguous)
+        // The entries of one id become contiguous, newest first; `dedup_by` keeps the first.
+        self.runs
+            .sort_by(|a, b| a.id.cmp(&b.id).then(b.timestamp.cmp(&a.timestamp)));
         self.runs.dedup_by(|a, b| a.id == b.id);
 
         // Finally sort chronologically by timestamp (zero allocation via Copy DateTime)
@@ -394,7 +343,11 @@ impl DashboardCompiler {
         };
 
         let total_tests: usize = history.runs.iter().map(|r| r.summary.total).sum();
-        let passed_tests: usize = history.runs.iter().map(|r| r.summary.passed).sum();
+        let passed_tests: usize = history
+            .runs
+            .iter()
+            .map(|r| r.summary.total.saturating_sub(r.summary.failed))
+            .sum();
         #[expect(
             clippy::cast_precision_loss,
             reason = "counts are far below 2^52, so the f64 conversion is exact for any realistic input"
@@ -447,25 +400,28 @@ impl DashboardCompiler {
     /// # Errors
     /// Returns [`DashboardError`] if report reading, history synchronization, file writes,
     /// or remote storage operations fail.
-    #[instrument(skip(context, storage_cfg), level = "debug")]
+    #[instrument(skip(context, cases, storage_cfg), level = "debug")]
     pub async fn execute(
         paths: &GleonPaths,
         context: &ResolvedContext,
-        report_path: &Path,
+        cases: &Cases,
         options: &DashboardOptions<'_>,
         storage_cfg: Option<&StorageConfig>,
     ) -> Result<DashboardExecutionResult, DashboardError> {
-        let test_cases = load_report_test_cases(report_path)?;
-
         let adapter = match storage_cfg {
             Some(cfg) => Some(ObjectStoreAdapter::from_config(cfg)?),
             None if options.push_to_storage => return Err(DashboardError::StorageNotConfigured),
             None => None,
         };
 
-        let now = Utc::now();
-        let platform_key = context.platform.to_key()?;
-        let run_id = generate_run_id(now, &context.branch, &platform_key);
+        let recorded_at = cases.recorded_at().unwrap_or_else(Utc::now);
+        let platform = run_platform(cases, context);
+        // One run id covers every platform of a CI run, so the platform completes the id. Without
+        // one, the newest report names the run: compiling the same results twice adds one run.
+        let run_id = cases.run_id().map_or_else(
+            || generate_run_id(recorded_at, &context.branch, &platform),
+            |run_id| format!("{}/{platform}", run_id.as_str()),
+        );
         let history_path = paths.history_file();
         let target_html_path = options
             .out_html
@@ -473,13 +429,13 @@ impl DashboardCompiler {
 
         // Load local history ONCE and append the current run.
         let mut base_history = load_local_history_or_default(paths)?;
-        let run_entry = RunHistoryEntry::from_test_results(
+        let run_entry = RunHistoryEntry::from_cases(
             &run_id,
-            now,
+            recorded_at,
             &context.branch,
-            &platform_key,
+            platform,
             context.commit_sha.clone(),
-            &test_cases,
+            cases,
         );
         base_history.append_run(run_entry, options.truncate_limit);
 
@@ -500,6 +456,38 @@ impl DashboardCompiler {
             pushed,
         })
     }
+}
+
+/// The platform of the run of `cases` as its reports name it (several joined with `+`, e.g. when
+/// the artifacts of several hosts were merged), or the context's when there are none.
+fn run_platform(cases: &Cases, context: &ResolvedContext) -> String {
+    let platforms: BTreeSet<_> = cases
+        .reports()
+        .iter()
+        .map(|report| platform_label(&report.platform))
+        .collect();
+    if platforms.is_empty() {
+        platform_label(&crate::cases::platform_of(&context.platform))
+    } else {
+        platforms.into_iter().collect::<Vec<_>>().join("+")
+    }
+}
+
+/// Parses `history.json` content of the supported schema version; `location` names it in errors.
+fn parse_history(bytes: &[u8], location: &str) -> Result<DashboardHistory, DashboardError> {
+    #[derive(Deserialize)]
+    struct Version {
+        schema_version: u32,
+    }
+    let Version { schema_version } = serde_json::from_slice(bytes)?;
+    if schema_version != SUPPORTED_SCHEMA_VERSION {
+        return Err(DashboardError::UnsupportedSchemaVersion {
+            found: schema_version,
+            supported: SUPPORTED_SCHEMA_VERSION,
+            location: location.to_owned(),
+        });
+    }
+    Ok(serde_json::from_slice(bytes)?)
 }
 
 async fn push_or_save_history(
@@ -559,8 +547,11 @@ where
                         format!("invalid UTF-8 in remote history.json: {e}"),
                     )
                 })?;
-                let remote_history = DashboardHistory::parse_or_empty(text)?;
-                history.merge(remote_history, options.truncate_limit);
+                // The remote history is older than this run: merged into it, not over it.
+                let mut remote_history =
+                    DashboardHistory::parse_or_empty(text, "history.json of the remote storage")?;
+                remote_history.merge(history, options.truncate_limit);
+                history = remote_history;
             } else {
                 history_create_only = true;
             }
@@ -615,17 +606,6 @@ where
             Err(e) => return Err(DashboardError::Storage(e)),
         }
     }
-}
-
-fn load_report_test_cases(report_path: &Path) -> Result<Vec<TestCaseResult>, DashboardError> {
-    let report_bytes = std::fs::read(report_path).map_err(|source| DashboardError::ReportLoad {
-        path: report_path.to_path_buf(),
-        source,
-    })?;
-    serde_json::from_slice(&report_bytes).map_err(|source| DashboardError::ReportParse {
-        path: report_path.to_path_buf(),
-        source,
-    })
 }
 
 #[expect(
@@ -683,15 +663,10 @@ pub struct DashboardExecutionResult {
 }
 
 fn load_local_history_or_default(paths: &GleonPaths) -> Result<DashboardHistory, DashboardError> {
-    let local_file = paths.history_file();
-    match crate::io::load_json::<DashboardHistory, _>(&local_file) {
-        Ok(h) => {
-            h.validate_schema()?;
-            Ok(h)
-        }
-        Err(crate::io::IoError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(DashboardHistory::new())
-        }
+    let path = paths.history_file();
+    match std::fs::read(&path) {
+        Ok(bytes) => parse_history(&bytes, &format!("'{}'", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DashboardHistory::new()),
         Err(e) => Err(e.into()),
     }
 }
@@ -726,36 +701,64 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use super::*;
+    use crate::cases::fixtures::{every_outcome, report};
+
+    /// A history entry; `diff_pixels` gives it pixel metrics.
+    fn test_entry(
+        name: &str,
+        outcome: CaseOutcome,
+        diff_pixels: Option<u64>,
+        message: Option<String>,
+    ) -> TestHistoryEntry {
+        TestHistoryEntry {
+            name: name.to_owned(),
+            outcome,
+            error_kind: None,
+            metrics: diff_pixels.map(|diff_pixels| Metrics::Pixel {
+                total_pixels: 1000,
+                diff_pixels,
+                diff_ratio: diff_pixels as f64 / 1000.0,
+                headroom: 0.0,
+            }),
+            message,
+        }
+    }
+
+    /// One passing case as the run `run_id`.
+    fn passing_run(run_id: &str) -> Cases {
+        Cases::new("runs/latest", vec![report("home", CaseOutcome::Match)])
+            .with_run_id(gleon_model::case::RunId::new(run_id).unwrap())
+    }
 
     #[test]
     fn test_history_parse_empty_and_valid() {
         // 1. Empty string yields empty DashboardHistory
-        let empty = DashboardHistory::parse_or_empty("   ").unwrap();
-        assert_eq!(empty.schema_version, 1);
+        let empty = DashboardHistory::parse_or_empty("   ", "test").unwrap();
+        assert_eq!(empty.schema_version, 2);
         assert!(empty.runs.is_empty());
 
         // 2. Valid JSON parses correctly
         let json = r#"{
-            "schema_version": 1,
+            "schema_version": 2,
             "runs": [
                 {
                     "id": "run-1",
                     "timestamp": "2026-09-13T10:00:00Z",
                     "branch": "main",
                     "platform": "linux-x86_64",
-                    "summary": { "total": 2, "passed": 2, "failed": 0 },
-                    "tests": []
+                    "summary": { "total": 2, "failed": 0 },
+                    "failures": []
                 }
             ]
         }"#;
-        let parsed = DashboardHistory::parse_or_empty(json).unwrap();
+        let parsed = DashboardHistory::parse_or_empty(json, "test").unwrap();
         assert_eq!(parsed.runs.len(), 1);
         assert_eq!(parsed.runs[0].id, "run-1");
         assert_eq!(parsed.runs[0].branch, "main");
-        assert_eq!(parsed.runs[0].summary.passed, 2);
+        assert_eq!(parsed.runs[0].summary.total, 2);
 
         // 3. Corrupt JSON returns error
-        assert!(DashboardHistory::parse_or_empty("not json").is_err());
+        assert!(DashboardHistory::parse_or_empty("not json", "test").is_err());
     }
 
     #[test]
@@ -764,13 +767,23 @@ mod tests {
             "schema_version": 99,
             "runs": []
         }"#;
-        let res = DashboardHistory::parse_or_empty(bad_json);
+        let err = DashboardHistory::parse_or_empty(bad_json, "'.gleon/history.json'").unwrap_err();
         assert!(matches!(
-            res,
-            Err(DashboardError::UnsupportedSchemaVersion {
+            err,
+            DashboardError::UnsupportedSchemaVersion {
                 found: 99,
-                supported: 1
-            })
+                supported: 2,
+                ..
+            }
+        ));
+        assert!(
+            err.to_string().contains("history '.gleon/history.json'"),
+            "the error names the history: {err}"
+        );
+        // History of the first format is not read either.
+        assert!(matches!(
+            DashboardHistory::parse_or_empty(r#"{"schema_version": 1, "runs": []}"#, "test"),
+            Err(DashboardError::UnsupportedSchemaVersion { found: 1, .. })
         ));
     }
 
@@ -788,10 +801,9 @@ mod tests {
                 commit_sha: None,
                 summary: RunSummary {
                     total: 1,
-                    passed: 1,
                     failed: 0,
                 },
-                tests: vec![],
+                failures: vec![],
             };
             history.append_run(entry, None);
         }
@@ -814,10 +826,9 @@ mod tests {
                 commit_sha: None,
                 summary: RunSummary {
                     total: 1,
-                    passed: 1,
                     failed: 0,
                 },
-                tests: vec![],
+                failures: vec![],
             };
             history.append_run(entry, NonZeroUsize::new(3));
         }
@@ -863,10 +874,9 @@ mod tests {
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
-                passed: 1,
                 failed: 0,
             },
-            tests: vec![],
+            failures: vec![],
         };
         let run_2_local = RunHistoryEntry {
             id: "run-2".to_string(),
@@ -876,10 +886,9 @@ mod tests {
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
-                passed: 1,
                 failed: 0,
             },
-            tests: vec![],
+            failures: vec![],
         };
         let run_3_remote = RunHistoryEntry {
             id: "run-3".to_string(),
@@ -889,10 +898,9 @@ mod tests {
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
-                passed: 1,
                 failed: 0,
             },
-            tests: vec![],
+            failures: vec![],
         };
 
         // local has run-1 and run-2
@@ -934,7 +942,7 @@ mod tests {
             platform: "linux-x86_64".to_string(),
             commit_sha: None,
             summary: RunSummary::default(),
-            tests: vec![],
+            failures: vec![],
         };
         let run_middle = RunHistoryEntry {
             id: "run-middle".to_string(),
@@ -943,7 +951,7 @@ mod tests {
             platform: "linux-x86_64".to_string(),
             commit_sha: None,
             summary: RunSummary::default(),
-            tests: vec![],
+            failures: vec![],
         };
         let run_dup_2 = RunHistoryEntry {
             id: "run-dup".to_string(),
@@ -952,19 +960,41 @@ mod tests {
             platform: "linux-x86_64".to_string(),
             commit_sha: None,
             summary: RunSummary::default(),
-            tests: vec![],
+            failures: vec![],
         };
 
-        local.append_run(run_dup_1, None);
-        local.append_run(run_middle, None);
-        remote.append_run(run_dup_2, None);
+        local.append_run(run_dup_1.clone(), None);
+        local.append_run(run_middle.clone(), None);
+        remote.append_run(run_dup_2.clone(), None);
+        let mut newer_local = remote.clone();
+        newer_local.append_run(run_middle, None);
+        let older_remote = DashboardHistory {
+            runs: vec![run_dup_1],
+            ..DashboardHistory::new()
+        };
 
         local.merge(remote, None);
 
-        // Must strictly deduplicate runs with the same id regardless of timestamps
+        // One entry per id, the newest one: a run compiled again replaces what the history had.
         assert_eq!(local.runs.len(), 2, "Duplicate run ID must be removed");
-        assert_eq!(local.runs[0].id, "run-dup");
-        assert_eq!(local.runs[1].id, "run-middle");
+        assert_eq!(local.runs[0].id, "run-middle");
+        assert_eq!(local.runs[1], run_dup_2);
+
+        // Whichever side has it.
+        newer_local.merge(older_remote, None);
+        assert_eq!(newer_local.runs, local.runs);
+
+        // Compiled again with the same timestamp (a report removed, not added): the new entry
+        // wins over the one the history had.
+        let recompiled = RunHistoryEntry {
+            summary: RunSummary {
+                total: 1,
+                failed: 1,
+            },
+            ..run_dup_2
+        };
+        local.append_run(recompiled.clone(), None);
+        assert_eq!(local.runs[1], recompiled);
     }
 
     #[test]
@@ -984,7 +1014,7 @@ mod tests {
                 platform: "linux-x86_64".to_string(),
                 commit_sha: None,
                 summary: RunSummary::default(),
-                tests: vec![],
+                failures: vec![],
             };
             local.append_run(entry, None);
         }
@@ -997,7 +1027,7 @@ mod tests {
                 platform: "macos-aarch64".to_string(),
                 commit_sha: None,
                 summary: RunSummary::default(),
-                tests: vec![],
+                failures: vec![],
             };
             remote.append_run(entry, None);
         }
@@ -1029,15 +1059,9 @@ mod tests {
             commit_sha: Some("abcdef123456".to_string()),
             summary: RunSummary {
                 total: 2,
-                passed: 2,
                 failed: 0,
             },
-            tests: vec![TestHistoryEntry {
-                name: "auth/login".to_string(),
-                status: TestHistoryStatus::Success,
-                error: None,
-                diff_count: None,
-            }],
+            failures: vec![test_entry("auth/login", CaseOutcome::Identical, None, None)],
         };
         let entry2 = RunHistoryEntry {
             id: "run-2".to_string(),
@@ -1047,22 +1071,11 @@ mod tests {
             commit_sha: None,
             summary: RunSummary {
                 total: 2,
-                passed: 1,
                 failed: 1,
             },
-            tests: vec![
-                TestHistoryEntry {
-                    name: "cart/checkout".to_string(),
-                    status: TestHistoryStatus::Mismatch,
-                    error: None,
-                    diff_count: Some(42),
-                },
-                TestHistoryEntry {
-                    name: "cart/item".to_string(),
-                    status: TestHistoryStatus::Success,
-                    error: None,
-                    diff_count: None,
-                },
+            failures: vec![
+                test_entry("cart/checkout", CaseOutcome::Mismatch, Some(42), None),
+                test_entry("cart/item", CaseOutcome::Identical, None, None),
             ],
         };
 
@@ -1094,15 +1107,14 @@ mod tests {
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
-                passed: 0,
                 failed: 1,
             },
-            tests: vec![TestHistoryEntry {
-                name: "<img src=x onerror=alert('xss')>".to_string(),
-                status: TestHistoryStatus::Mismatch,
-                error: Some("<b>bold error</b>".to_string()),
-                diff_count: Some(1),
-            }],
+            failures: vec![test_entry(
+                "<img src=x onerror=alert('xss')>",
+                CaseOutcome::Mismatch,
+                Some(1),
+                Some("<b>bold error</b>".to_string()),
+            )],
         };
         history.append_run(entry, None);
 
@@ -1136,15 +1148,14 @@ mod tests {
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
-                passed: 0,
                 failed: 1,
             },
-            tests: vec![TestHistoryEntry {
-                name: "profile/header".to_string(),
-                status: TestHistoryStatus::Mismatch,
-                error: Some("Image dimension mismatch, falling back to pixel diff".to_string()),
-                diff_count: Some(99),
-            }],
+            failures: vec![test_entry(
+                "profile/header",
+                CaseOutcome::Mismatch,
+                Some(99),
+                Some("Image dimension mismatch, falling back to pixel diff".to_string()),
+            )],
         };
         history.append_run(entry, None);
 
@@ -1169,10 +1180,9 @@ mod tests {
                 commit_sha: None,
                 summary: RunSummary {
                     total: 1,
-                    passed: 1,
                     failed: 0,
                 },
-                tests: vec![],
+                failures: vec![],
             };
             history.append_run(entry, None);
         }
@@ -1184,21 +1194,52 @@ mod tests {
         assert!(!html.contains("Last 45 runs"));
     }
 
+    #[test]
+    fn test_platform_label_of_every_form() {
+        use gleon_model::platform::PlatformFields;
+
+        assert_eq!(
+            platform_label(&PlatformConfig::Opaque("ci-box".to_owned())),
+            "ci-box"
+        );
+        let labeled = PlatformConfig::Structured(PlatformFields {
+            os: Some("linux".to_owned()),
+            arch: Some("x86_64".to_owned()),
+            renderer: Some("chrome-126".to_owned()),
+            labels: Some([("theme".to_owned(), "dark".to_owned())].into()),
+        });
+        assert_eq!(
+            platform_label(&labeled),
+            "linux-x86_64-chrome-126-theme=dark"
+        );
+    }
+
+    /// A run without a run id or reports is named after the branch, the platform of the context
+    /// and its time.
+    #[tokio::test]
+    async fn test_dashboard_names_a_run_without_an_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = GleonPaths::new(temp.path());
+        let ctx = ResolvedContext {
+            base_dir: temp.path().to_path_buf(),
+            ..ResolvedContext::default()
+        };
+        let cases = Cases::new("runs/latest", Vec::new());
+        DashboardCompiler::execute(&paths, &ctx, &cases, &DashboardOptions::default(), None)
+            .await
+            .unwrap();
+        let history = load_local_history_or_default(&paths).unwrap();
+        let run = &history.runs[0];
+        assert!(run.id.starts_with("run-"), "{}", run.id);
+        assert_eq!(run.platform, "unknown");
+    }
+
     #[tokio::test]
     #[cfg(not(miri))]
     async fn test_dashboard_compiler_execute_local_and_remote() {
         let temp = tempfile::tempdir().unwrap();
         let base_dir = temp.path();
         let paths = GleonPaths::new(base_dir);
-
-        let report_path = base_dir.join("report.json");
-        let test_cases = vec![TestCaseResult {
-            name: "home".to_string(),
-            result: TestImageResult::Success {
-                relative_path: PathBuf::from("home.png"),
-            },
-        }];
-        crate::io::save_json_atomically(&report_path, &test_cases).unwrap();
 
         let ctx = ResolvedContext {
             base_dir: base_dir.to_path_buf(),
@@ -1208,9 +1249,10 @@ mod tests {
 
         // 1. First execution in local mode without storage
         let opts_local = DashboardOptions::default();
-        let res_local = DashboardCompiler::execute(&paths, &ctx, &report_path, &opts_local, None)
-            .await
-            .unwrap();
+        let res_local =
+            DashboardCompiler::execute(&paths, &ctx, &passing_run("r1"), &opts_local, None)
+                .await
+                .unwrap();
 
         assert_eq!(res_local.total_runs, 1);
         assert!(!res_local.pushed);
@@ -1222,9 +1264,14 @@ mod tests {
             push_to_storage: true,
             ..Default::default()
         };
-        let err_no_storage =
-            DashboardCompiler::execute(&paths, &ctx, &report_path, &opts_push_no_storage, None)
-                .await;
+        let err_no_storage = DashboardCompiler::execute(
+            &paths,
+            &ctx,
+            &passing_run("r1"),
+            &opts_push_no_storage,
+            None,
+        )
+        .await;
         assert!(matches!(
             err_no_storage,
             Err(DashboardError::StorageNotConfigured)
@@ -1242,7 +1289,7 @@ mod tests {
         let res_remote = DashboardCompiler::execute(
             &paths,
             &ctx,
-            &report_path,
+            &passing_run("r2"),
             &opts_remote,
             Some(&storage_cfg),
         )
@@ -1273,10 +1320,9 @@ mod tests {
                 commit_sha: None,
                 summary: RunSummary {
                     total: 1,
-                    passed: 1,
                     failed: 0,
                 },
-                tests: vec![],
+                failures: vec![],
             },
             None,
         );
@@ -1295,39 +1341,26 @@ mod tests {
             push_to_storage: true,
             ..Default::default()
         };
-        let res_merged =
-            DashboardCompiler::execute(&paths, &ctx, &report_path, &opts_merge, Some(&storage_cfg))
-                .await
-                .unwrap();
+        let res_merged = DashboardCompiler::execute(
+            &paths,
+            &ctx,
+            &passing_run("r3"),
+            &opts_merge,
+            Some(&storage_cfg),
+        )
+        .await
+        .unwrap();
         assert_eq!(res_merged.total_runs, 4); // 2 local + 1 remote external + 1 new run
-
-        // 5. Error case: Missing report path returns ReportLoad error
-        let non_existent = base_dir.join("non_existent_report.json");
-        let err_missing = DashboardCompiler::execute(
+        let again = DashboardCompiler::execute(
             &paths,
             &ctx,
-            &non_existent,
-            &DashboardOptions::default(),
-            None,
+            &passing_run("r3"),
+            &opts_merge,
+            Some(&storage_cfg),
         )
-        .await;
-        assert!(matches!(
-            err_missing,
-            Err(DashboardError::ReportLoad { .. })
-        ));
-
-        // 6. Error case: Corrupt report JSON returns ReportParse error
-        let corrupt_report = base_dir.join("corrupt_report.json");
-        std::fs::write(&corrupt_report, b"invalid json").unwrap();
-        let err_parse = DashboardCompiler::execute(
-            &paths,
-            &ctx,
-            &corrupt_report,
-            &DashboardOptions::default(),
-            None,
-        )
-        .await;
-        assert!(matches!(err_parse, Err(DashboardError::ReportParse { .. })));
+        .await
+        .unwrap();
+        assert_eq!(again.total_runs, 4, "a run is recorded once");
 
         // 7. Verify DashboardExecutionResult derived traits
         assert_eq!(res_merged, res_merged.clone());
@@ -1338,9 +1371,14 @@ mod tests {
             .put_object("history.json", bytes::Bytes::from_static(b"\xFF\xFF"), None)
             .await
             .unwrap();
-        let err_utf8 =
-            DashboardCompiler::execute(&paths, &ctx, &report_path, &opts_merge, Some(&storage_cfg))
-                .await;
+        let err_utf8 = DashboardCompiler::execute(
+            &paths,
+            &ctx,
+            &passing_run("r4"),
+            &opts_merge,
+            Some(&storage_cfg),
+        )
+        .await;
         assert!(matches!(err_utf8, Err(DashboardError::Io(_))));
 
         // 9. Local history with corrupt JSON returns error
@@ -1348,7 +1386,7 @@ mod tests {
         let err_local = DashboardCompiler::execute(
             &paths,
             &ctx,
-            &report_path,
+            &passing_run("r4"),
             &DashboardOptions::default(),
             None,
         )
@@ -1365,7 +1403,7 @@ mod tests {
         let err_upload = DashboardCompiler::execute(
             &paths,
             &ctx,
-            &report_path,
+            &passing_run("r4"),
             &DashboardOptions {
                 push_to_storage: true,
                 ..Default::default()
@@ -1377,101 +1415,77 @@ mod tests {
     }
 
     #[test]
-    fn test_from_test_results_all_variants_and_error_display() {
-        let test_cases = vec![
-            TestCaseResult {
-                name: "test_success".to_string(),
-                result: TestImageResult::Success {
-                    relative_path: PathBuf::from("success.png"),
-                },
-            },
-            TestCaseResult {
-                name: "test_ssim".to_string(),
-                result: TestImageResult::Mismatch {
-                    relative_path: PathBuf::from("ssim.png"),
-                    detail: gleon_engine::Measurement::Ssim {
-                        mean_ssim: 0.8542,
-                        min_ssim: 0.8542,
-                        max_excess: 0.0,
-                        peak_excess: 0.0,
-                        changed_pixels: 1,
-                        changed_region: None,
-                        failing_pixels: 1,
-                        failing_region: None,
-                    },
-                    diff_path: PathBuf::from("diff.png"),
-                    baseline_path: PathBuf::from("base.png"),
-                    actual_path: PathBuf::from("act.png"),
-                },
-            },
-            TestCaseResult {
-                name: "test_decode_error".to_string(),
-                result: TestImageResult::DecodeError {
-                    relative_path: PathBuf::from("decode.png"),
-                    error: "corrupt png".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "test_missing_baseline".to_string(),
-                result: TestImageResult::MissingBaseline {
-                    relative_path: PathBuf::from("missing.png"),
-                    reason: "no baseline staged".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "test_io_error".to_string(),
-                result: TestImageResult::IoError {
-                    relative_path: PathBuf::from("io.png"),
-                    error: "disk failure".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "test_encode_error".to_string(),
-                result: TestImageResult::EncodeError {
-                    relative_path: PathBuf::from("encode.png"),
-                    actual_path: PathBuf::from("act.png"),
-                    error: "encoder out of memory".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "test_dimension_mismatch".to_string(),
-                result: TestImageResult::DimensionMismatch {
-                    relative_path: PathBuf::from("dim.png"),
-                    baseline_size: (100, 100),
-                    actual_size: (200, 200),
-                    baseline_path: PathBuf::from("base.png"),
-                    actual_path: PathBuf::from("act.png"),
-                },
-            },
-        ];
-
-        let entry = RunHistoryEntry::from_test_results(
+    fn test_from_cases_every_outcome_and_error_display() {
+        let cases = Cases::new("runs/latest", every_outcome());
+        let entry = RunHistoryEntry::from_cases(
             "run-variants",
             Utc::now(),
             "main",
             "macos-aarch64",
             Some("abcdef123456".to_string()),
-            &test_cases,
+            &cases,
         );
 
         assert_eq!(entry.summary.total, 7);
-        assert_eq!(entry.summary.passed, 1);
-        assert_eq!(entry.summary.failed, 6);
-        assert_eq!(entry.tests.len(), 7);
+        assert_eq!(entry.summary.failed, 4);
+        assert_eq!(entry.failures.len(), 4, "passing tests are only counted");
+        assert_eq!(
+            entry.failures[0].outcome,
+            CaseOutcome::Mismatch,
+            "most telling first"
+        );
 
-        // Verify status Display implementation
-        let statuses = [
-            TestHistoryStatus::Success,
-            TestHistoryStatus::Mismatch,
-            TestHistoryStatus::DimensionMismatch,
-            TestHistoryStatus::DecodeError,
-            TestHistoryStatus::MissingBaseline,
-            TestHistoryStatus::IoError,
-            TestHistoryStatus::EncodeError,
-        ];
-        for s in statuses {
-            assert!(!format!("{s}").is_empty());
-        }
+        // A run that fails everything keeps the most telling failures only.
+        let many: Vec<_> = (0..MAX_FAILURES_PER_RUN + 5)
+            .map(|i| report(&format!("m/{i:03}"), CaseOutcome::Missing))
+            .chain([report("z/mismatch", CaseOutcome::Mismatch)])
+            .collect();
+        let capped = RunHistoryEntry::from_cases(
+            "run-many",
+            Utc::now(),
+            "main",
+            "macos-aarch64",
+            None,
+            &Cases::new("runs/latest", many),
+        );
+        assert_eq!(capped.summary.failed, MAX_FAILURES_PER_RUN + 6);
+        assert_eq!(capped.failures.len(), MAX_FAILURES_PER_RUN);
+        assert_eq!(capped.failures[0].name, "z/mismatch");
+        let html = DashboardCompiler::compile_dashboard(&DashboardHistory {
+            runs: vec![capped],
+            ..DashboardHistory::new()
+        })
+        .unwrap();
+        assert!(html.contains("6 more failures not kept in the history"));
+        let error = entry
+            .failures
+            .iter()
+            .find(|t| t.outcome == CaseOutcome::Error)
+            .unwrap();
+        assert_eq!(error.error_kind, Some(CaseErrorKind::Image));
+        assert_eq!(error.message.as_deref(), Some("candidate image: corrupt"));
+        let mismatch = entry
+            .failures
+            .iter()
+            .find(|t| t.outcome == CaseOutcome::Mismatch)
+            .unwrap();
+        assert!(matches!(
+            mismatch.metrics,
+            Some(Metrics::Pixel { diff_pixels: 5, .. })
+        ));
+
+        // Typed entries survive a round trip through history.json.
+        let mut history = DashboardHistory::new();
+        history.append_run(entry, None);
+        let json = serde_json::to_string(&history).unwrap();
+        assert_eq!(
+            DashboardHistory::parse_or_empty(&json, "test").unwrap(),
+            history
+        );
+        let html = DashboardCompiler::compile_dashboard(&history).unwrap();
+        assert!(html.contains("dimension_mismatch"));
+        assert!(html.contains("error (image)"));
+        assert!(html.contains("Diff pixels: 5"));
 
         // Test error displays and From implementations
         let io_err = crate::io::IoError::Io(std::io::Error::other("io err"));
@@ -1485,9 +1499,13 @@ mod tests {
 
         let unsupported_err = DashboardError::UnsupportedSchemaVersion {
             found: 10,
-            supported: 1,
+            supported: 2,
+            location: "'h.json'".to_owned(),
         };
-        assert!(format!("{unsupported_err}").contains("Unsupported history schema version 10"));
+        assert!(
+            format!("{unsupported_err}")
+                .starts_with("Unsupported schema version 10 of the history 'h.json'")
+        );
 
         let not_cfg = DashboardError::StorageNotConfigured;
         assert!(format!("{not_cfg}").contains("GLEON_STORAGE_URL"));
@@ -1517,7 +1535,7 @@ mod tests {
                 platform: "macos-aarch64".to_string(),
                 commit_sha: None,
                 summary: RunSummary::default(),
-                tests: vec![],
+                failures: vec![],
             },
             None,
         );

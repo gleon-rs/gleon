@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="gleon Tests" tests="{{ total_tests }}" failures="{{ failed_tests }}">
+<testsuites name="gleon Tests" tests="{{ total_tests }}" failures="{{ failed_tests }}" errors="{{ error_tests }}">
+  <testsuite name="gleon" tests="{{ total_tests }}" failures="{{ failed_tests }}" errors="{{ error_tests }}">
 {% for tc in test_cases %}
-  <testsuite name="{{ tc.name | escape }}" tests="{{ tc.results | length }}" failures="{{ tc.failures }}">
-    {% for res in tc.results %}
-    <testcase name="{{ res.name | escape }}" classname="{{ tc.name | escape }}">
-      {% if res.status != "Success" %}
-      <failure message="{{ res.failure_message | escape }}">{{ res.failure_message | escape }}</failure>
+    <testcase name="{{ tc.name | escape }}" classname="gleon" file="{{ tc.image | escape }}">
+      {% if tc.status == "failure" %}
+      <failure message="{{ tc.message | escape }}">{{ tc.message | escape }}</failure>
+      {% elif tc.status == "error" %}
+      <error message="{{ tc.message | escape }}">{{ tc.message | escape }}</error>
       {% endif %}
     </testcase>
-    {% endfor %}
-  </testsuite>
 {% endfor %}
+  </testsuite>
 </testsuites>

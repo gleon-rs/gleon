@@ -351,7 +351,7 @@ fn test_status_with_corrupt_image() {
     fs::create_dir_all(&screenshot_dir).unwrap();
     let screenshot_file = screenshot_dir.join("form.png");
 
-    // 1. Write a real image first so we can stage/approve it
+    // 1. Write a real image first so we can stage it
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures");
@@ -373,8 +373,8 @@ screenshots:
     fs::create_dir_all(base_path.join(".gleon")).unwrap();
     fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
 
-    let ctx_approve = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    gleon_core::ops::approve_workspace(&ctx_approve, &[], Some(base_path)).unwrap();
+    let ctx_stage = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
+    stage_workspace(&ctx_stage, None).unwrap();
 
     // 2. Corrupt the image (write text instead of PNG)
     fs::write(&screenshot_file, "this is not a valid png file").unwrap();

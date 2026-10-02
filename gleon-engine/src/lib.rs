@@ -20,10 +20,9 @@ use crate::config::{DiffConfig, Mode};
 /// What a comparison measured, reported for matches and mismatches alike, so callers can see how
 /// much headroom a passing comparison had.
 ///
-/// The derived serde form (externally tagged, `"Pixel"`/`"Ssim"`) is the dialect of the CLI
-/// `gleon-report.json`; integrations report `gleon_model::case::Metrics` instead. See
-/// `TODO(json-dialects)` on `gleon_core::results::TestImageResult`.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Results are recorded as `gleon_model::case::Metrics` in case reports (the CLI and the
+/// integrations alike).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Measurement {
     /// Pixel (and exact) mode: the differing pixel count.
     Pixel {

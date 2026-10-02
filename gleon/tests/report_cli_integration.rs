@@ -11,94 +11,73 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+//! `gleon report` on the case reports of a real Flutter run (a downloaded CI artifact), outside
+//! any workspace and without `gleon diff`.
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
 
+/// The `metrics-linux-x64` CI artifact of the Flutter example (a copy of `.gleon/runs/latest`).
+fn flutter_run() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../gleon-core/tests/fixtures/cases/flutter-linux-x64")
+}
+
 #[test]
 fn test_cli_report_supports_all_formats() {
     let temp = tempdir().unwrap();
-    let report_path = temp.path().join("report.json");
+    let run = flutter_run();
+    let report = |format: &str| {
+        let mut cmd = Command::cargo_bin("gleon").unwrap();
+        cmd.current_dir(temp.path())
+            .env_remove("GLEON_RUN_ID")
+            .env_remove("GLEON_STORAGE_URL")
+            .args(["report", format, "--from"])
+            .arg(&run);
+        cmd
+    };
 
-    let test_results = vec![gleon_core::results::TestCaseResult {
-        name: "auth/login".to_string(),
-        result: gleon_core::results::TestImageResult::MissingBaseline {
-            relative_path: std::path::PathBuf::from("auth/login.png"),
-            reason: "No baseline found".to_string(),
-        },
-    }];
-    gleon_core::io::save_json_atomically(&report_path, &test_results).unwrap();
-
-    // Test markdown format
-    let mut cmd_md = Command::cargo_bin("gleon").unwrap();
-    cmd_md
-        .arg("report")
-        .arg("markdown")
-        .arg("--report")
-        .arg(&report_path)
+    report("markdown")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Gleon Visual Regression Failure"))
-        .stdout(predicate::str::contains("auth/login"));
+        .stdout(predicate::str::contains("All tests passed!"));
 
-    // Test html format with output file
     let html_out = temp.path().join("report.html");
-    let mut cmd_html = Command::cargo_bin("gleon").unwrap();
-    cmd_html
-        .arg("report")
-        .arg("html")
-        .arg("--report")
-        .arg(&report_path)
-        .arg("-o")
-        .arg(&html_out)
-        .assert()
-        .success();
-    assert!(html_out.exists());
+    report("html").arg("-o").arg(&html_out).assert().success();
+    assert!(
+        std::fs::read_to_string(&html_out)
+            .unwrap()
+            .contains("All tests passed!")
+    );
 
-    // Test junit format
-    let mut cmd_junit = Command::cargo_bin("gleon").unwrap();
-    cmd_junit
-        .arg("report")
-        .arg("junit")
-        .arg("--report")
-        .arg(&report_path)
+    for format in ["junit", "junit.xml", "xml"] {
+        report(format)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                r#"tests="2" failures="0" errors="0""#,
+            ))
+            .stdout(predicate::str::contains(
+                "test&#x2f;goldens&#x2f;counter_three_taps",
+            ));
+    }
+
+    let json = report("json")
         .assert()
         .success()
-        .stdout(predicate::str::contains("<testsuite"))
-        .stdout(predicate::str::contains("auth&#x2f;login"));
+        .get_output()
+        .stdout
+        .clone();
+    let reports: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(reports.as_array().unwrap().len(), 2);
+    assert_eq!(reports[1]["outcome"], "match");
+    assert_eq!(reports[1]["run_id"], "36918116203-1");
 
-    // Test junit.xml alias format
-    let mut cmd_junit_xml = Command::cargo_bin("gleon").unwrap();
-    cmd_junit_xml
-        .arg("report")
-        .arg("junit.xml")
-        .arg("--report")
-        .arg(&report_path)
+    // The caller's run id names the caller's run, not a downloaded one.
+    report("markdown")
+        .env("GLEON_RUN_ID", "another-run")
         .assert()
         .success()
-        .stdout(predicate::str::contains("<testsuite"))
-        .stdout(predicate::str::contains("auth&#x2f;login"));
-
-    // Test xml alias format
-    let mut cmd_xml = Command::cargo_bin("gleon").unwrap();
-    cmd_xml
-        .arg("report")
-        .arg("xml")
-        .arg("--report")
-        .arg(&report_path)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("<testsuite"))
-        .stdout(predicate::str::contains("auth&#x2f;login"));
-
-    // Test json format
-    let mut cmd_json = Command::cargo_bin("gleon").unwrap();
-    cmd_json
-        .arg("report")
-        .arg("json")
-        .arg("--report")
-        .arg(&report_path)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("auth/login"));
+        .stdout(predicate::str::contains("All tests passed!"));
 }

@@ -1,18 +1,10 @@
 ### ❌ Gleon Visual Regression Failure ({{ total_failed }} diffs)
 
-{% if has_image_urls -%}
-| Test Name | Expected | Actual | Diff | Delta |
-| :--- | :---: | :---: | :---: | :---: |
+| Test Name |{% if has_baselines %} Baseline |{% endif %} Result |
+| :--- |{% if has_baselines %} :---: |{% endif %} :--- |
 {% for row in rows -%}
-| `{{ row.name }}` | {{ row.expected }} | {{ row.actual }} | {{ row.diff }} | `{{ row.delta }}` |
-{% endfor -%}
-{%- else -%}
-| Test Name | Status | Error |
-| :--- | :--- | :--- |
-{% for row in rows -%}
-| `{{ row.name }}` | {{ row.status }} | {{ row.error }} |
-{% endfor -%}
-{%- endif %}
+| `{{ row.name }}` |{% if has_baselines %} {{ row.baseline or "N/A" }} |{% endif %} {{ row.result }} |
+{% endfor %}
 {% if remaining > 0 %}
 > ⚠️ **Truncated {{ remaining }} additional diffs.** {% if html_artifact_url -%}
 Download the full [Gleon HTML Report]({{ html_artifact_url }}) to inspect.

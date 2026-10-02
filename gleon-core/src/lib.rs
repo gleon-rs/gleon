@@ -4,9 +4,10 @@
 // the library reports through return values and `tracing`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-// The config and naming modules moved to the permissive `gleon-model` crate (shared with the
-// Flutter package); re-exported so `gleon_core::config` / `crate::naming` paths stay valid.
-pub use gleon_model::{config, naming};
+// The case report, config and naming modules live in the permissive `gleon-model` crate (shared
+// with the Flutter package); re-exported for the CLI.
+pub use gleon_model::{case, config, naming};
+pub mod cases;
 /// Resolves the effective run context (platform, branch, renderer) from CLI flags, config, and environment.
 pub mod context;
 /// Historical test results logging and static dashboard compiler.
@@ -25,8 +26,6 @@ pub mod paths;
 pub mod platform;
 /// Rendering of run results into HTML, `JUnit` XML, markdown, and PR comment formats.
 pub mod report;
-/// Results of comparing a captured screenshot against its staged baseline.
-pub mod results;
 pub mod scanner;
 /// Remote storage integration and baseline blob synchronization.
 pub mod storage;

@@ -14,9 +14,16 @@
 use std::{fs, path::Path};
 
 use gleon_core::{
+    case::{CaseErrorKind, CaseOutcome, CaseReport},
     context::{ContextOptions, ResolvedContext},
-    ops::{DiffOpError, init_workspace, run_diff, stage_workspace},
+    ops::{DiffOpError, diff::DiffOptions, init_workspace, run_diff, stage_workspace},
 };
+
+/// The case report `gleon diff` wrote for `name` in the workspace at `root`.
+fn case_report(root: &Path, name: &str) -> CaseReport {
+    let bytes = fs::read(CaseReport::path(&root.join(".gleon"), name)).unwrap();
+    CaseReport::parse(&bytes).unwrap()
+}
 
 #[test]
 fn test_diff_uninitialized_fails() {
@@ -30,7 +37,7 @@ fn test_diff_uninitialized_fails() {
     };
 
     let ctx = ResolvedContext::from_options(&options, base_path).unwrap();
-    let result = run_diff(&ctx);
+    let result = run_diff(&ctx, &DiffOptions::default());
 
     assert!(result.is_err());
     assert!(matches!(
@@ -81,10 +88,9 @@ screenshots:
     stage_workspace(&ctx, None).expect("stage_workspace should succeed");
 
     // 4. Run diff against identical baseline -> should pass
-    let report_match = run_diff(&ctx).expect("run_diff should succeed");
-    assert!(report_match.passed);
-    assert_eq!(report_match.total_tests, 1);
+    let report_match = run_diff(&ctx, &DiffOptions::default()).expect("run_diff should succeed");
     assert_eq!(report_match.failed_tests, 0);
+    assert_eq!(report_match.total_tests, 1);
 
     // 5. Replace form.png with a modified PNG fixture (diff_16px_corners_100x100.png)
     let modified_png_bytes = fs::read(fixtures_dir.join("diff_16px_corners_100x100.png"))
@@ -92,8 +98,8 @@ screenshots:
     fs::write(&screenshot_file, &modified_png_bytes).unwrap();
 
     // 6. Run diff against modified image -> should report failure
-    let report_mismatch = run_diff(&ctx).expect("run_diff should succeed");
-    assert!(!report_mismatch.passed);
+    let report_mismatch = run_diff(&ctx, &DiffOptions::default()).expect("run_diff should succeed");
+    assert_ne!(report_mismatch.failed_tests, 0);
     assert_eq!(report_mismatch.failed_tests, 1);
 
     // 7. Verify generated report artifacts on disk
@@ -116,8 +122,9 @@ fn test_diff_from_nested_subdirectory() {
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &nested_dir).unwrap();
     assert_eq!(ctx.base_dir, root_dir);
 
-    let report = run_diff(&ctx).expect("run_diff should succeed when using ctx.base_dir");
-    assert!(report.passed);
+    let report = run_diff(&ctx, &DiffOptions::default())
+        .expect("run_diff should succeed when using ctx.base_dir");
+    assert_eq!(report.failed_tests, 0);
 }
 
 #[test]
@@ -157,10 +164,10 @@ screenshots:
     assert_eq!(normalized, "billing/form.png");
 
     // Run diff -> should handle backslash manifest keys cross-platform!
-    let report = run_diff(&ctx).expect("run_diff should handle backslash manifest keys");
-    assert!(report.passed);
-    assert_eq!(report.total_tests, 1);
+    let report = run_diff(&ctx, &DiffOptions::default())
+        .expect("run_diff should handle backslash manifest keys");
     assert_eq!(report.failed_tests, 0);
+    assert_eq!(report.total_tests, 1);
 }
 
 #[test]
@@ -191,28 +198,26 @@ screenshots:
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
     // Do NOT stage unstaged.png
-    let report = run_diff(&ctx).expect("run_diff should run");
-    assert!(!report.passed);
+    let report = run_diff(&ctx, &DiffOptions::default()).expect("run_diff should run");
+    assert_ne!(report.failed_tests, 0);
     assert_eq!(report.total_tests, 1);
     assert_eq!(report.failed_tests, 1);
 
     let md = fs::read_to_string(report.runs_dir.join("report.md")).unwrap();
     assert!(md.contains("Missing Baseline"));
 
-    // Ensure the actual image was saved in runs/latest/actual for the missing baseline
-    let actual_img = report.runs_dir.join("actual/billing/unstaged.png");
-    assert!(
-        actual_img.exists(),
-        "actual screenshot should be saved for missing baseline"
-    );
+    // The candidate is kept for `gleon approve`.
+    let candidate = report
+        .runs_dir
+        .join("artifacts/billing/unstaged/candidate.png");
+    assert_eq!(fs::read(&candidate).unwrap(), baseline_png_bytes);
 
-    // Run approve_workspace using the actual images generated from diff
-    let actual_dir = report.runs_dir.join("actual");
     let ctx_approve = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    let approve_res = gleon_core::ops::approve_workspace(&ctx_approve, &[], Some(&actual_dir))
+    let approve_res = gleon_core::ops::approve_workspace(&ctx_approve, &[], &[], None)
         .expect("approve_workspace should succeed");
     assert_eq!(
-        approve_res.total_approved, 1,
+        approve_res.approved_test_cases.len(),
+        1,
         "Should approve 1 missing baseline image"
     );
 
@@ -275,10 +280,11 @@ screenshots:
     )
     .unwrap();
 
-    let report_missing_blob = run_diff(&ctx).unwrap();
-    assert!(!report_missing_blob.passed);
-    let md_missing = fs::read_to_string(report_missing_blob.runs_dir.join("report.md")).unwrap();
-    assert!(md_missing.contains("Missing Baseline"));
+    let report_missing_blob = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_ne!(report_missing_blob.failed_tests, 0);
+    let missing_blob = case_report(base_path, "billing/form");
+    assert_eq!(missing_blob.error_kind, Some(CaseErrorKind::Io));
+    assert!(missing_blob.message.unwrap().contains("gleon pull"));
 
     // 2. Write corrupt baseline blob file back
     let mut blob_digest = String::new();
@@ -298,22 +304,37 @@ screenshots:
         }
     }
 
-    let report_corrupt_blob = run_diff(&ctx).unwrap();
-    assert!(!report_corrupt_blob.passed);
-    let md_corrupt_blob =
-        fs::read_to_string(report_corrupt_blob.runs_dir.join("report.md")).unwrap();
-    assert!(md_corrupt_blob.to_lowercase().contains("decode"));
+    let report_corrupt_blob = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_ne!(report_corrupt_blob.failed_tests, 0);
+    let corrupt_blob = case_report(base_path, "billing/form");
+    assert_eq!(corrupt_blob.error_kind, Some(CaseErrorKind::Image));
+    assert!(
+        corrupt_blob
+            .message
+            .unwrap()
+            .starts_with("invalid baseline")
+    );
 
     // Restore valid baseline blob so run_diff decodes the baseline and tests corrupt actual screenshot
     fs::write(blobs_dir.join(&blob_digest), &baseline_png_bytes).unwrap();
 
     // 3. Write corrupt actual screenshot file
     fs::write(&screenshot_file, b"not a png").unwrap();
-    let report_corrupt_actual = run_diff(&ctx).unwrap();
-    assert!(!report_corrupt_actual.passed);
-    let md_corrupt_actual =
-        fs::read_to_string(report_corrupt_actual.runs_dir.join("report.md")).unwrap();
-    assert!(md_corrupt_actual.to_lowercase().contains("decode"));
+    let report_corrupt_actual = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_ne!(report_corrupt_actual.failed_tests, 0);
+    let corrupt_actual = case_report(base_path, "billing/form");
+    assert_eq!(corrupt_actual.outcome, CaseOutcome::Error);
+    assert!(
+        corrupt_actual
+            .message
+            .unwrap()
+            .starts_with("invalid screenshot")
+    );
+    let md = fs::read_to_string(report_corrupt_actual.runs_dir.join("report.md")).unwrap();
+    assert!(
+        md.contains("| billing/form | billing/form.png | ❌ Error |"),
+        "{md}"
+    );
 }
 
 #[test]
@@ -362,10 +383,9 @@ screenshots:
 
     // 3. Run diff -> Mask on actual screenshot masks out the modified pixel (50, 50),
     // baseline is already masked. Comparison must PASS!
-    let report = run_diff(&ctx).expect("run_diff should succeed");
-    assert!(report.passed);
-    assert_eq!(report.total_tests, 1);
+    let report = run_diff(&ctx, &DiffOptions::default()).expect("run_diff should succeed");
     assert_eq!(report.failed_tests, 0);
+    assert_eq!(report.total_tests, 1);
 }
 
 #[test]
@@ -435,10 +455,9 @@ screenshots:
 
     // 5. Run diff -> baseline blob on disk was unmasked, but run_diff applies the new mask
     // to BOTH baseline_rgba and actual_rgba on the fly. Comparison MUST PASS!
-    let report = run_diff(&ctx_masked).expect("run_diff should succeed");
-    assert!(report.passed);
-    assert_eq!(report.total_tests, 1);
+    let report = run_diff(&ctx_masked, &DiffOptions::default()).expect("run_diff should succeed");
     assert_eq!(report.failed_tests, 0);
+    assert_eq!(report.total_tests, 1);
 }
 
 #[test]
@@ -497,10 +516,9 @@ fn test_diff_fallback_platform_integration() {
         Some("7:windows-6:x86_64")
     );
 
-    let diff_res = run_diff(&ctx_macos).unwrap();
-    assert!(diff_res.passed);
-    assert_eq!(diff_res.total_tests, 1);
+    let diff_res = run_diff(&ctx_macos, &DiffOptions::default()).unwrap();
     assert_eq!(diff_res.failed_tests, 0);
+    assert_eq!(diff_res.total_tests, 1);
 }
 
 #[test]
@@ -537,16 +555,12 @@ screenshots:
     // Replace with diff image
     fs::write(&screenshot_file, &diff_bytes).unwrap();
 
-    // Run diff -> must create auth/login directory inside runs/latest/diffs/
-    let report = run_diff(&ctx).unwrap();
-    assert!(!report.passed);
+    // Run diff -> keeps the images under the nested test name
+    let report = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_ne!(report.failed_tests, 0);
     assert_eq!(report.failed_tests, 1);
 
-    let expected_diff_file = report
-        .runs_dir
-        .join("diffs")
-        .join("auth/login/form")
-        .join("diff_form.png");
+    let expected_diff_file = report.runs_dir.join("artifacts/auth/login/form/diff.png");
     assert!(
         expected_diff_file.is_file(),
         "Diff image must be created at {expected_diff_file:?}"
@@ -591,21 +605,23 @@ screenshots:
 
     let ctx = ResolvedContext::from_options(&options, base_path).unwrap();
 
-    // 3. Run diff -> should fail with MissingBaseline, BUT should save the actual image
-    let report = run_diff(&ctx).expect("run_diff should succeed");
-    assert!(!report.passed);
+    // 3. Run diff -> should fail as missing, BUT should keep the candidate
+    let report = run_diff(&ctx, &DiffOptions::default()).expect("run_diff should succeed");
+    assert_ne!(report.failed_tests, 0);
     assert_eq!(report.total_tests, 1);
     assert_eq!(report.failed_tests, 1);
 
-    // Verify the actual screenshot was saved in .gleon/runs/latest/actual/
-    let expected_actual_file = report
-        .runs_dir
-        .join("actual")
-        .join("billing")
-        .join("form.png");
+    // Verify the candidate was kept in the artifacts directory
+    let expected_actual_file = report.runs_dir.join("artifacts/billing/form/candidate.png");
     assert!(
         expected_actual_file.is_file(),
-        "Actual image must be saved for MissingBaseline at {expected_actual_file:?}"
+        "The candidate must be kept for a missing baseline at {expected_actual_file:?}"
+    );
+    let case = case_report(base_path, "billing/form");
+    assert_eq!(case.outcome, CaseOutcome::Missing);
+    assert_eq!(
+        case.artifacts.unwrap().candidate.as_deref(),
+        Some(".gleon/runs/latest/artifacts/billing/form/candidate.png")
     );
 
     // Verify the content is exactly the same as the original PNG

@@ -30,7 +30,7 @@ inputs:
     required: false
     default: "."
   args:
-    description: "Additional flags for the selected gleon command (e.g. '--from=.gleon/diffs' for approve)"
+    description: "Additional arguments for the selected gleon command: whitespace-separated, or a JSON array of strings (e.g. '[\"--from\", \"dl/linux/latest\"]' for approve)"
     required: false
     default: ""
   github-token:
@@ -201,9 +201,10 @@ runs:
             const rest = (command[1] || '').trim();
             if (rest) {
               const tokens = rest.split(/\s+/).filter(Boolean);
+              // Test names or golden paths only: a comment never passes flags (`--from`, ...).
               for (const token of tokens) {
-                if (!/^[A-Za-z0-9._/:=-]+$/.test(token)) {
-                  console.error('::error::Invalid argument token: ' + token);
+                if (token.startsWith('-') || !/^[A-Za-z0-9._/:=-]+$/.test(token)) {
+                  console.error('::error::Invalid argument token (test names or golden paths only): ' + token);
                   process.exit(1);
                 }
               }
@@ -239,6 +240,8 @@ runs:
         GLEON_STRICT: ${{ inputs.strict }}
         GLEON_TARGET_BRANCH: ${{ inputs.target-branch }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        # Stamps the case reports of this run; the report step reads exactly this run.
+        GLEON_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
       run: |
         cd "$GLEON_WORKING_DIRECTORY"
         gleon diff
@@ -251,12 +254,13 @@ runs:
         GLEON_HTML_ARTIFACT_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         PR_NUMBER: ${{ inputs.pr-number }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        GLEON_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
       run: |
         cd "$GLEON_WORKING_DIRECTORY"
-        if ! gleon report --report .gleon/runs/latest/gleon-report.json --pr-number "$PR_NUMBER" markdown > gleon-report.md; then
-          echo "::warning::Failed to generate markdown report from JSON. Outputting minimal fallback."
+        if ! gleon report --pr-number "$PR_NUMBER" markdown > gleon-report.md; then
+          echo "::warning::Failed to generate markdown report from the case reports. Outputting minimal fallback."
           echo "### ⚠️ Gleon Visual Regression Failed" > gleon-report.md
-          echo "The report generator crashed or could not parse the report JSON. Please check the Action logs." >> gleon-report.md
+          echo "The report generator could not read the case reports of this run. Please check the Action logs." >> gleon-report.md
         fi
         gh pr comment "$PR_NUMBER" --body-file gleon-report.md || echo "Failed to post PR comment. Does the token have pull-requests: write permission?"
 
@@ -265,5 +269,6 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ inputs.artifact-name }}
-        path: ${{ inputs.working-directory }}/.gleon/runs/latest/
+        # The whole run output: `latest/` (case reports, images) and a custom `artifacts:` dir.
+        path: ${{ inputs.working-directory }}/.gleon/runs/
         retention-days: 7

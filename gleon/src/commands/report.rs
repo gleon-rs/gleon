@@ -1,28 +1,28 @@
 //! Implementation of the `gleon report` subcommand.
 
 use anyhow::{Context, Result, anyhow};
-use gleon_core::{
-    io::load_json,
-    report::{MarkdownReportOptions, ReportGenerator},
-    results::TestCaseResult,
+use gleon_core::report::{MarkdownReportOptions, ReportGenerator};
+
+use crate::{
+    cli::ReportFormat,
+    commands::{RunSource, load_cases, report_failure},
+    exit_code::ExitCode,
 };
 
-use crate::{commands::report_failure, exit_code::ExitCode};
-
-/// Runs the `gleon report` subcommand.
+/// Runs the `gleon report` subcommand on the case reports of the run of `source`.
 ///
 /// Returns [`ExitCode::Success`] once the report has been generated (and written or printed), or
-/// [`ExitCode::Failure`] for any error along the way (bad arguments, malformed input report,
-/// template rendering, or I/O) — every subcommand reports failures the same way.
+/// [`ExitCode::Failure`] for any error along the way (bad arguments, no case reports, template
+/// rendering, or I/O) — every subcommand reports failures the same way.
 pub async fn run_report(
     env: &dyn gleon_core::env::EnvProvider,
     storage_cfg: Option<gleon_core::storage::StorageConfig>,
-    format: &str,
-    report_path: &std::path::Path,
+    format: ReportFormat,
+    source: &RunSource,
     pr_number: Option<u64>,
     out: Option<&std::path::Path>,
 ) -> ExitCode {
-    match run_report_inner(env, storage_cfg, format, report_path, pr_number, out).await {
+    match run_report_inner(env, storage_cfg, format, source, pr_number, out).await {
         Ok(()) => ExitCode::Success,
         Err(e) => report_failure("Error generating report", &*e),
     }
@@ -31,8 +31,8 @@ pub async fn run_report(
 async fn run_report_inner(
     env: &dyn gleon_core::env::EnvProvider,
     storage_cfg: Option<gleon_core::storage::StorageConfig>,
-    format: &str,
-    report_path: &std::path::Path,
+    format: ReportFormat,
+    source: &RunSource,
     pr_number: Option<u64>,
     out: Option<&std::path::Path>,
 ) -> Result<()> {
@@ -43,27 +43,25 @@ async fn run_report_inner(
         tracing::info!("Report target PR: #{}", pr);
     }
 
-    tracing::debug!("Generating report in '{}' format", format);
+    tracing::debug!("Generating report in '{format:?}' format");
 
-    let report_data: Vec<TestCaseResult> = load_json(report_path).with_context(|| {
-        format!(
-            "Failed to parse report JSON from '{}'",
-            report_path.display()
-        )
-    })?;
+    let cases = load_cases(source)?;
 
     let mut base_image_url = None;
     let mut signed_urls = std::collections::HashMap::new();
 
-    if let Some(cfg) = &storage_cfg {
+    // Only the PR comment links baselines.
+    if let Some(cfg) = storage_cfg
+        .as_ref()
+        .filter(|_| format == ReportFormat::Markdown)
+    {
         if cfg.url.starts_with("https://") || cfg.url.starts_with("http://") {
             base_image_url = Some(cfg.url.as_str());
         }
 
         if let Ok(adapter) = gleon_core::storage::ObjectStoreAdapter::from_config(cfg) {
             let expires_in = std::time::Duration::from_hours(168);
-            signed_urls =
-                ReportGenerator::sign_image_urls(&adapter, &report_data, expires_in).await;
+            signed_urls = ReportGenerator::sign_image_urls(&adapter, &cases, expires_in).await;
         }
     }
 
@@ -78,7 +76,7 @@ async fn run_report_inner(
     };
 
     let has_signed_urls = !signed_urls.is_empty();
-    let resolver = |p: &std::path::Path| signed_urls.get(p).cloned();
+    let resolver = |hash: &gleon_core::manifest::ImageHash| signed_urls.get(hash).cloned();
     let options = MarkdownReportOptions {
         context,
         base_image_url,
@@ -90,30 +88,25 @@ async fn run_report_inner(
         },
     };
 
-    let report_content =
-        if format.eq_ignore_ascii_case("markdown") || format.eq_ignore_ascii_case("comment") {
-            ReportGenerator::render_pr_comment(&report_data, &options)
-        } else if format.eq_ignore_ascii_case("html") {
-            let report_dir = out.and_then(|p| p.parent());
-            ReportGenerator::generate_html(&report_data, report_dir)
+    let report_content = match format {
+        ReportFormat::Markdown => ReportGenerator::render_pr_comment(&cases, &options),
+        ReportFormat::Html => {
+            // Image links are relative to where the page goes (the working directory for stdout).
+            let report_dir = out
+                .and_then(std::path::Path::parent)
+                .unwrap_or_else(|| std::path::Path::new(""));
+            ReportGenerator::generate_html(&cases, report_dir)
                 .with_context(|| "Failed to generate HTML report")?
                 .unwrap_or_else(|| "<html><body>All tests passed!</body></html>".to_string())
-        } else if format.eq_ignore_ascii_case("junit")
-            || format.eq_ignore_ascii_case("junit.xml")
-            || format.eq_ignore_ascii_case("xml")
-        {
-            // JUnit XML strictly conforms to the standard CI runner schema (Jenkins, GitLab CI,
-            // GitHub Actions test-reporters), omitting non-standard visual image links.
-            ReportGenerator::generate_junit_xml(&report_data)
-                .with_context(|| "Failed to generate JUnit XML report")?
-        } else if format.eq_ignore_ascii_case("json") {
-            // JSON format emits the full machine-readable TestCaseResult domain hierarchy without
-            // MarkdownReportOptions, intended for automated scripting and CI tooling consumption.
-            serde_json::to_string_pretty(&report_data)
-                .with_context(|| "Failed to serialize report to JSON")?
-        } else {
-            return Err(anyhow!("Unsupported report format: '{format}'"));
-        };
+        }
+        // JUnit XML strictly conforms to the standard CI runner schema (Jenkins, GitLab CI,
+        // GitHub Actions test-reporters), omitting non-standard visual image links.
+        ReportFormat::Junit => ReportGenerator::generate_junit_xml(&cases)
+            .with_context(|| "Failed to generate JUnit XML report")?,
+        // The case reports of the run (`case.v2.json` each), for scripts and CI tooling.
+        ReportFormat::Json => serde_json::to_string_pretty(cases.reports())
+            .with_context(|| "Failed to serialize report to JSON")?,
+    };
 
     if let Some(out_path) = out {
         let parent = out_path
@@ -127,7 +120,7 @@ async fn run_report_inner(
         })?;
         gleon_core::io::save_file_atomically(out_path, report_content.as_bytes())
             .with_context(|| format!("Failed to write output to '{}'", out_path.display()))?;
-        tracing::info!("Generated {} report at {}", format, out_path.display());
+        tracing::info!("Generated the report at {}", out_path.display());
     } else {
         println!("{report_content}");
     }
@@ -149,186 +142,102 @@ async fn run_report_inner(
 mod tests {
     use super::*;
 
+    struct DummyEnv;
+    impl gleon_core::env::EnvProvider for DummyEnv {
+        fn get_var(&self, _key: &str) -> Option<String> {
+            None
+        }
+    }
+
+    /// A copy of `runs/latest` with one mismatch report (its candidate image listed as an
+    /// artifact) in a temporary directory.
+    fn copy_of_run(temp: &tempfile::TempDir) -> RunSource {
+        let cases = temp.path().join("runs/latest/cases");
+        let report = serde_json::json!({
+            "schema_version": 2,
+            "name": "test/enc",
+            "golden": {"path": "test/enc.png", "sha256": "1".repeat(64)},
+            "candidate": {"sha256": "0".repeat(64)},
+            "source": {"tool": "gleon_flutter", "tool_version": "0.1.0"},
+            "platform": {"os": "macos", "arch": "aarch64"},
+            "comparison": {"tolerance": {"kind": "exact"}, "masks": [], "policy_version": 2},
+            "outcome": "mismatch",
+            "metrics": {"kind": "pixel", "total_pixels": 4, "diff_pixels": 1, "diff_ratio": 0.25, "headroom": -0.25},
+            "regions": [],
+            "artifacts": {"candidate": ".gleon/runs/latest/artifacts/test/enc/candidate.png"},
+            "timings_ms": {"total": 1.0},
+            "recorded_at": "2026-10-01T12:00:00Z"
+        });
+        std::fs::create_dir_all(cases.join("test")).unwrap();
+        std::fs::write(cases.join("test/enc.json"), report.to_string()).unwrap();
+        RunSource::Copy(temp.path().join("runs/latest"))
+    }
+
     #[tokio::test]
     async fn test_run_report_creates_nested_parent_dir() {
         let temp = tempfile::tempdir().unwrap();
-        let report_json_path = temp.path().join("report.json");
-        std::fs::write(&report_json_path, "[]").unwrap();
-
+        let cases = copy_of_run(&temp);
         let nested_out = temp.path().join("nested").join("sub").join("output.md");
-
-        struct DummyEnv;
-        impl gleon_core::env::EnvProvider for DummyEnv {
-            fn get_var(&self, _key: &str) -> Option<String> {
-                None
-            }
-        }
 
         let res = run_report(
             &DummyEnv,
             None,
-            "markdown",
-            &report_json_path,
+            ReportFormat::Markdown,
+            &cases,
             None,
             Some(&nested_out),
         )
         .await;
 
         assert_eq!(res, ExitCode::Success);
-        assert!(nested_out.is_file());
-    }
-
-    #[tokio::test]
-    async fn test_run_report_with_encode_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let report_json_path = temp.path().join("report.json");
-        let tc = TestCaseResult {
-            name: "test_enc".to_string(),
-            result: gleon_core::results::TestImageResult::EncodeError {
-                relative_path: std::path::PathBuf::from("enc.png"),
-                actual_path: std::path::PathBuf::from("actual_enc.png"),
-                error: "Encode failure".to_string(),
-            },
-        };
-        gleon_core::io::save_json_atomically(&report_json_path, &vec![tc]).unwrap();
-
-        let out_path = temp.path().join("output.md");
-
-        struct DummyEnv;
-        impl gleon_core::env::EnvProvider for DummyEnv {
-            fn get_var(&self, _key: &str) -> Option<String> {
-                None
-            }
-        }
-
-        let storage_cfg = gleon_core::storage::StorageConfig::new("https://signed.com");
-        let res = run_report(
-            &DummyEnv,
-            Some(storage_cfg),
-            "markdown",
-            &report_json_path,
-            None,
-            Some(&out_path),
-        )
-        .await;
-
-        assert_eq!(res, ExitCode::Success);
-        let md = std::fs::read_to_string(&out_path).unwrap();
-        assert!(md.contains("Encode Error"));
-        assert!(md.contains("actual_enc.png"));
+        let md = std::fs::read_to_string(nested_out).unwrap();
+        assert!(md.contains("test/enc"), "{md}");
     }
 
     #[tokio::test]
     async fn test_run_report_formats() {
         let temp = tempfile::tempdir().unwrap();
-        let report_json_path = temp.path().join("report.json");
-        let tc = TestCaseResult {
-            name: "test_fmt".to_string(),
-            result: gleon_core::results::TestImageResult::EncodeError {
-                relative_path: std::path::PathBuf::from("enc.png"),
-                actual_path: std::path::PathBuf::from("actual_enc.png"),
-                error: "Encode failure".to_string(),
-            },
-        };
-        gleon_core::io::save_json_atomically(&report_json_path, &vec![tc]).unwrap();
-
-        struct DummyEnv;
-        impl gleon_core::env::EnvProvider for DummyEnv {
-            fn get_var(&self, _key: &str) -> Option<String> {
-                None
-            }
+        let cases = copy_of_run(&temp);
+        for (format, expected) in [
+            (
+                ReportFormat::Junit,
+                "<failure message=\"Mismatch: 25.00% (1 of 4px) differ\"",
+            ),
+            (ReportFormat::Html, "test&#x2f;enc"),
+            (ReportFormat::Json, "\"schema_version\": 2"),
+        ] {
+            let out = temp.path().join(format!("out.{format:?}"));
+            let res = run_report(&DummyEnv, None, format, &cases, Some(7), Some(&out)).await;
+            assert_eq!(res, ExitCode::Success, "{format:?}");
+            let content = std::fs::read_to_string(&out).unwrap();
+            assert!(content.contains(expected), "{format:?}: {content}");
         }
 
-        // Test JUnit format
-        let junit_out = temp.path().join("output.xml");
-        let res_junit = run_report(
+        // To stdout, the HTML links its images from the working directory.
+        let res = run_report(&DummyEnv, None, ReportFormat::Html, &cases, None, None).await;
+        assert_eq!(res, ExitCode::Success);
+        let res = run_report(
             &DummyEnv,
             None,
-            "junit",
-            &report_json_path,
-            None,
-            Some(&junit_out),
-        )
-        .await;
-        assert_eq!(res_junit, ExitCode::Success);
-        let xml = std::fs::read_to_string(&junit_out).unwrap();
-        assert!(xml.contains("<testsuites") || xml.contains("<testsuite"));
-
-        // Test HTML format
-        let html_out = temp.path().join("output.html");
-        let res_html = run_report(
-            &DummyEnv,
-            None,
-            "html",
-            &report_json_path,
-            None,
-            Some(&html_out),
-        )
-        .await;
-        assert_eq!(res_html, ExitCode::Success);
-        let html = std::fs::read_to_string(&html_out).unwrap();
-        assert!(html.contains("<!DOCTYPE html>") || html.contains("<html"));
-
-        // Test unsupported format
-        let res_unsupported = run_report(
-            &DummyEnv,
-            None,
-            "invalid_fmt",
-            &report_json_path,
-            None,
+            ReportFormat::Markdown,
+            &cases,
+            Some(0),
             None,
         )
         .await;
-        assert_eq!(res_unsupported, ExitCode::Failure);
+        assert_eq!(res, ExitCode::Failure, "PR #0 is rejected");
     }
 
     #[tokio::test]
-    async fn test_run_report_invalid_json_and_html_custom_dir() {
+    async fn test_run_report_fails_without_case_reports() {
         let temp = tempfile::tempdir().unwrap();
-        let corrupt_report_path = temp.path().join("corrupt.json");
-        std::fs::write(&corrupt_report_path, "not json data").unwrap();
+        let empty = RunSource::Own(temp.path().join("runs/latest"));
+        let res = run_report(&DummyEnv, None, ReportFormat::Markdown, &empty, None, None).await;
+        assert_eq!(res, ExitCode::Failure, "nothing recorded is no pass");
 
-        struct DummyEnv;
-        impl gleon_core::env::EnvProvider for DummyEnv {
-            fn get_var(&self, _key: &str) -> Option<String> {
-                None
-            }
-        }
-
-        // Corrupt report JSON returns error
-        let res_err = run_report(
-            &DummyEnv,
-            None,
-            "markdown",
-            &corrupt_report_path,
-            None,
-            None,
-        )
-        .await;
-        assert_eq!(res_err, ExitCode::Failure);
-
-        // Test HTML format written to custom nested directory
-        let valid_report = temp.path().join("valid.json");
-        let tc = TestCaseResult {
-            name: "test_html_dir".to_string(),
-            result: gleon_core::results::TestImageResult::MissingBaseline {
-                relative_path: std::path::PathBuf::from("sub/missing.png"),
-                reason: "no baseline".to_string(),
-            },
-        };
-        gleon_core::io::save_json_atomically(&valid_report, &vec![tc]).unwrap();
-
-        let nested_html_out = temp.path().join("nested").join("dir").join("report.html");
-        let res_html = run_report(
-            &DummyEnv,
-            None,
-            "html",
-            &valid_report,
-            None,
-            Some(&nested_html_out),
-        )
-        .await;
-        assert_eq!(res_html, ExitCode::Success);
-        assert!(nested_html_out.exists());
+        std::fs::create_dir_all(temp.path().join("runs/latest/cases")).unwrap();
+        std::fs::write(temp.path().join("runs/latest/cases/broken.json"), "{").unwrap();
+        let res = run_report(&DummyEnv, None, ReportFormat::Markdown, &empty, None, None).await;
+        assert_eq!(res, ExitCode::Failure, "only broken reports are no reports");
     }
 }

@@ -78,11 +78,20 @@ When you or your team make changes and re-run your visual tests:
 # Check test status (Clean, Added, Modified, Deleted)
 gleon status
 
-# Run pixel/SSIM comparison against committed baselines
+# Run pixel/SSIM comparison against committed baselines (one case report per screenshot)
 gleon diff
 
 # View visual diff report in browser
 gleon report html --out report.html
+```
+
+Integrations such as the gleon Flutter package compare in their own test runner and write the same
+case reports; run the tests through `gleon test` so they form one run, then use the same commands:
+
+```bash
+gleon test -- flutter test
+gleon report markdown
+gleon dashboard
 ```
 
 ---
@@ -94,10 +103,12 @@ gleon report html --out report.html
 | `gleon init`               | Scaffolds the `.gleon/` directory tree and default `.gleon/gleon.yaml`.                     | `gleon init`                                                                    |
 | `gleon stage [PATHS...]`   | Records matching screenshots as official baseline manifests for the current platform.       | `gleon stage`<br>`gleon stage test/goldens/login.png`                           |
 | `gleon status`             | Reports the status (`Clean`, `Added`, `Modified`, `Deleted`) of all discovered screenshots. | `gleon status`<br>`gleon status --json`                                         |
-| `gleon diff`               | Runs visual comparison between actual screenshots and committed baselines.                  | `gleon diff`<br>`gleon diff --target-branch main`                               |
-| `gleon report <FORMAT>`    | Generates a report (`html`, `markdown`, `junit`, `json`) from the last `gleon diff` run.    | `gleon report html --out report.html`<br>`gleon report markdown --pr-number 42` |
-| `gleon approve [NAMES...]` | Accepts detected visual differences as the new baseline manifests.                          | `gleon approve`<br>`gleon approve auth/login`                                   |
-| `gleon pull`               | Downloads missing baseline blobs from remote object storage to local storage.               | `gleon pull`<br>`gleon pull --all-platforms`                                    |
+| `gleon diff`               | Runs visual comparison between actual screenshots and committed baselines.                  | `gleon diff`<br>`gleon diff --artifacts .gleon/runs/ci`                         |
+| `gleon test -- <COMMAND>`  | Runs a test command (e.g. `flutter test`) as one run with metrics on.                       | `gleon test -- flutter test`<br>`gleon test -- npm test`                        |
+| `gleon report <FORMAT>`    | Renders the case reports of the latest run (`html`, `markdown`, `junit`, `json`).           | `gleon report html --out report.html`<br>`gleon report markdown --pr-number 42` |
+| `gleon dashboard`          | Adds the latest run to `history.json` and compiles the static history dashboard.            | `gleon dashboard`<br>`gleon dashboard --push`                                   |
+| `gleon approve [NAMES...]` | Accepts the candidates of failed cases as new baselines.                                    | `gleon approve`<br>`gleon approve auth/login`                                   |
+| `gleon pull`               | Downloads missing baseline blobs from remote object storage to local storage.               | `gleon pull`<br>`gleon pull --all`                                              |
 | `gleon push`               | Uploads locally staged baseline blobs to remote object storage.                             | `gleon push`                                                                    |
 | `gleon clean`              | Removes ephemeral diff artifacts and orphaned files.                                        | `gleon clean`<br>`gleon clean --dry-run`                                        |
 | `gleon lint`               | Verifies integrity and schema compliance of all manifests and configs.                      | `gleon lint`                                                                    |
@@ -163,13 +174,40 @@ fallback_platform:
 metrics:
   enabled: false # default: false
   console: true # also print one line per golden (default: true)
+
+# Optional: where the images of failed cases go (golden, candidate, diff), relative to the
+# workspace root: this default or a directory under `.gleon/runs/` outside `latest/`.
+# GLEON_ARTIFACTS_DIR and `gleon diff --artifacts` override it.
+artifacts: .gleon/runs/latest/artifacts
 ```
 
 Remote blob storage (AWS S3, Cloudflare R2, Google Cloud Storage) is configured through environment variables, not in `gleon.yaml`, so credentials never end up in Git: copy `.gleon/.env.template` to `.gleon/.env.local` and set `GLEON_STORAGE_URL` (e.g. `s3://my-visual-baselines-bucket/blobs`) plus the provider credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, ...).
 
 ### Case reports (`metrics`)
 
-With metrics enabled, every comparison writes a case report (schema: [`gleon-model/schema/case.v1.json`](../gleon-model/schema/case.v1.json)) with the golden and candidate SHA-256, the effective tolerance and masks, the outcome and, for pixel comparisons, the metrics including their headroom to the thresholds (for example `min_ssim - min_similarity` and `color_tolerance - peak_excess` in SSIM mode). Passing goldens report their margin too, so thresholds can be tuned from measurements instead of guesses.
+Case reports are the one result format of gleon (schema: [`gleon-model/schema/case.v2.json`](../gleon-model/schema/case.v2.json)): `gleon diff` writes one per screenshot, integrations one per golden with metrics enabled. A report holds the golden and candidate SHA-256 and size, the effective tolerance and masks, the outcome (`identical`, `match`, `mismatch`, `dimension_mismatch`, `error` with its kind, `updated`, `missing`), the metrics including their headroom to the thresholds (for example `min_ssim - min_similarity` and `color_tolerance - peak_excess` in SSIM mode) and the paths of the images a failure keeps in the artifacts directory. Passing goldens report their margin too, so thresholds can be tuned from measurements instead of guesses.
+
+`gleon report`, `gleon dashboard` and `gleon approve` read the reports of one run: the run of `GLEON_RUN_ID` (set it in CI, e.g. `${{ github.run_id }}-${{ github.run_attempt }}`), else the run `gleon test` recorded in `.gleon/runs/latest/run.json`, else the run of the newest report (`gleon diff` names its own run when `GLEON_RUN_ID` is not set). Reports without a run id (tests run without `gleon test`) are read together, without those whose golden no longer exists, and with a warning that they may mix runs; without metrics integrations record only failures, so such a run counts no passes: run the tests through `gleon test` for complete totals. Only the process environment sets `GLEON_RUN_ID`, never `.gleon/.env`. Invalid reports are skipped with a warning. `--from <dir>` reads a downloaded copy of `.gleon/runs/latest` (relative to the working directory, with its `cases/`) as it is, ignoring `GLEON_RUN_ID`; `gleon approve` takes several (`--from linux/latest --from macos/latest`). `golden.path` is the golden file of an integration, and for `gleon diff` the screenshot whose baseline lives in the manifests. Approving turns cases of `gleon diff` into manifests and blobs of the platform the case ran on, and overwrites the golden PNG of an integration (only `.png` files inside the workspace, outside hidden directories and not through symlinks); every candidate is checked before anything is written, and two different candidates for one golden are refused. `.gleon/history.json` keeps the failures of each run and counts the passes.
+
+#### Integrations in CI (e.g. Flutter)
+
+Tests of an integration write their case reports themselves, so there is no `gleon diff` step: give the job a run id, run the tests through `gleon test`, then report that run and upload `.gleon/runs/` for `/gleon approve` (the artifact name must start with `gleon-artifacts-<PR number>-`):
+
+```yaml
+env:
+  GLEON_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+steps:
+  - run: gleon test -- flutter test
+  - if: failure() && github.event_name == 'pull_request'
+    run: gleon report markdown --pr-number ${{ github.event.pull_request.number }} > gleon-report.md
+  - if: failure() && github.event_name == 'pull_request'
+    uses: actions/upload-artifact@v7
+    with:
+      name: gleon-artifacts-${{ github.event.pull_request.number }}-${{ runner.os }}
+      path: .gleon/runs/
+```
+
+On Windows `gleon test -- flutter test` finds `flutter.bat` like a shell does.
 
 ---
 
