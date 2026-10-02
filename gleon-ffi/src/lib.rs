@@ -500,8 +500,12 @@ pub unsafe fn gleon_golden(
                 .ok_or("`text_regions` is too long")?;
             // SAFETY: as above.
             let text_regions = unsafe { borrow(text_regions, text_len, "text_regions") }?;
-            let candidate =
-                call_candidate(candidate_format, candidate_width, candidate_height, candidate)?;
+            let candidate = call_candidate(
+                candidate_format,
+                candidate_width,
+                candidate_height,
+                candidate,
+            )?;
             if mode == Mode::Update && !matches!(candidate, Candidate::Png(_)) {
                 return Err("update mode takes the candidate as PNG".to_owned());
             }
@@ -721,6 +725,52 @@ mod tests {
     #[test]
     fn test_abi_version() {
         assert_eq!(gleon_ffi_abi_version(), ABI_VERSION);
+    }
+
+    /// Raw candidates must have the length of their size; text tolerances are both given or
+    /// both NaN.
+    #[test]
+    fn test_raw_candidates_and_text_tolerances_are_checked() {
+        let session = new_session(SESSION_ENV, UNSET);
+        let session = Some(&*session);
+        let pixels = [0u8; 4 * 4 * 3];
+        for (call, needle) in [
+            (
+                Call {
+                    candidate: &pixels,
+                    format: (1, 4, 4),
+                    ..Call::default()
+                },
+                "`candidate` has 48 bytes, 4x4 RGBA needs 64",
+            ),
+            (
+                Call {
+                    format: (2, 0, 0),
+                    ..Call::default()
+                },
+                "unknown candidate format 2",
+            ),
+            (
+                Call {
+                    candidate: &pixels,
+                    format: (1, 4, 3),
+                    mode: 1,
+                    ..Call::default()
+                },
+                "update mode takes the candidate as PNG",
+            ),
+            (
+                Call {
+                    text: (8.0, f64::NAN),
+                    ..Call::default()
+                },
+                "invalid text tolerance",
+            ),
+        ] {
+            let answer = golden(session, call);
+            assert_eq!(answer.error_kind, INVALID_INPUT, "{needle}");
+            assert!(answer.message.contains(needle), "{}", answer.message);
+        }
     }
 
     #[test]

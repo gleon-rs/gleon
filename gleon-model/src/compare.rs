@@ -336,6 +336,7 @@ mod tests {
     use image::{ImageBuffer, Rgba};
 
     use super::*;
+    use crate::tolerance::TextTolerance;
 
     fn png(width: u32, height: u32, paint: impl Fn(u32, u32) -> Rgba<u8>) -> Vec<u8> {
         encode_png(&ImageBuffer::from_fn(width, height, paint)).unwrap()
@@ -478,6 +479,101 @@ mod tests {
                 clamped_masks: 0,
             }
         );
+    }
+
+    /// Raw pixels compare like the PNG they encode to; pixels of the wrong length are the
+    /// integration's bug.
+    #[test]
+    fn test_raw_candidates_compare_like_their_png() {
+        let a = png(10, 10, |_, _| RED);
+        let b = ImageBuffer::from_fn(10, 10, one_blue_pixel);
+        let raw = Candidate::Rgba {
+            width: 10,
+            height: 10,
+            pixels: b.as_raw(),
+        };
+        let from_png = compare(
+            &a,
+            Candidate::Png(&encode_png(&b).unwrap()),
+            &EXACT,
+            &[],
+            None,
+        );
+        assert_eq!(
+            compare(&a, raw, &EXACT, &[], None).unwrap(),
+            from_png.unwrap()
+        );
+        assert_eq!(raw.to_png().unwrap().as_ref(), encode_png(&b).unwrap());
+
+        let short = Candidate::Rgba {
+            width: 10,
+            height: 10,
+            pixels: &b.as_raw()[..12],
+        };
+        let err = compare(&a, short, &EXACT, &[], None).unwrap_err();
+        assert_eq!(err.kind(), CaseErrorKind::InvalidInput);
+        assert_eq!(err.to_string(), "candidate pixels: 12 bytes for 10x10 RGBA");
+        assert!(short.to_png().is_none());
+    }
+
+    /// Text regions (clipped to the image) are compared under their tolerance, the rest
+    /// strictly; the worst tile becomes a `text` region of the report.
+    #[test]
+    fn test_text_regions_and_their_metrics() {
+        let a = png(32, 16, |_, _| RED);
+        let mut b = ImageBuffer::from_pixel(32, 16, RED);
+        b.put_pixel(3, 3, BLUE);
+        let text = Text {
+            regions: &[Region {
+                x: 0,
+                y: 0,
+                width: 16,
+                height: 40,
+            }],
+            tolerance: TextTolerance {
+                color_tolerance: 8.0,
+                max_diff_ratio: 0.1,
+            },
+        };
+        let raw = Candidate::Rgba {
+            width: 32,
+            height: 16,
+            pixels: b.as_raw(),
+        };
+        let Compared::Match { metrics, regions } =
+            compare(&a, raw, &EXACT, &[], Some(text)).unwrap().compared
+        else {
+            panic!("text noise within its tolerance matches");
+        };
+        assert!(matches!(
+            metrics,
+            Metrics::Pixel {
+                total_pixels: 256,
+                diff_pixels: 0,
+                text: Some(crate::case::TextMetrics {
+                    pixels: 256,
+                    diff_pixels: 1,
+                    ..
+                }),
+                ..
+            }
+        ));
+        assert_eq!(regions[1].kind, crate::case::RegionKind::Text);
+        assert_eq!(
+            regions[1].rect,
+            Some(Region {
+                x: 0,
+                y: 0,
+                width: 16,
+                height: 16
+            })
+        );
+
+        // Without text the same dot fails exact.
+        assert!(matches!(
+            compare(&a, raw, &EXACT, &[], None).unwrap().compared,
+            Compared::Mismatch { .. }
+        ));
     }
 
     #[test]

@@ -147,6 +147,13 @@ screenshots:
       anti_alias: true # Reserved, currently has no effect; use mode 'ssim' to tolerate anti-aliasing
       min_similarity: 0.8 # 'ssim': minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
       color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
+    # Optional, 'pixel' only: integrations that report the text of a screenshot (the Flutter package)
+    # compare it under this tolerance and everything else strictly: a text pixel counts as equal
+    # while no channel differs by more than `color_tolerance`, and the text passes while every 16x16
+    # tile has at most `max_diff_ratio` differing pixels. `gleon diff` sees no text.
+    text:
+      color_tolerance: 24 # 8-bit units [0 - 255]
+      max_diff_ratio: 0.1 # [0.0 - 1.0]
     masks:
       # Optional: Ignore dynamic regions (clocks, avatars, blinking cursors)
       - path: "**/dashboard.png"

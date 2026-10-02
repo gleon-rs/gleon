@@ -1767,6 +1767,17 @@ mod tests {
                 InconsistentCase::Metrics,
             ),
             (
+                serde_json::json!({"candidate": {"width": 4, "height": 4}}),
+                InconsistentCase::CandidateHash,
+            ),
+            (
+                serde_json::json!({
+                    "outcome": "identical", "artifacts": null, "candidate": {"width": 4},
+                    "golden": {"path": "a.png", "sha256": "1".repeat(64)}
+                }),
+                InconsistentCase::IdenticalHashes,
+            ),
+            (
                 serde_json::json!({"outcome": "updated", "golden": {"path": "a.png", "sha256": "0".repeat(64)}}),
                 InconsistentCase::Artifacts,
             ),

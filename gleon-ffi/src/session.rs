@@ -622,7 +622,9 @@ metrics:
         let (_dir, root) = workspace(YAML, "Clock.png");
         let session = session(None);
         let golden = root.join("test/goldens/Clock.png");
-        let plan = session.plan(&golden, None, vec![pixel_mask(5)], None).unwrap();
+        let plan = session
+            .plan(&golden, None, vec![pixel_mask(5)], None)
+            .unwrap();
         assert_eq!(
             plan.tolerance,
             Tolerance::Ssim {
@@ -642,7 +644,10 @@ metrics:
 
         let call = Tolerance::Exact {};
         assert_eq!(
-            session.plan(&golden, Some(call), vec![], None).unwrap().tolerance,
+            session
+                .plan(&golden, Some(call), vec![], None)
+                .unwrap()
+                .tolerance,
             call,
             "the call beats the rule"
         );
@@ -683,7 +688,9 @@ metrics:
     fn test_metrics_env_overrides_the_config() {
         let (_dir, root) = workspace(YAML, "a.png");
         let golden = root.join("test/goldens/a.png");
-        let plan = session(Some("0")).plan(&golden, None, vec![], None).unwrap();
+        let plan = session(Some("0"))
+            .plan(&golden, None, vec![], None)
+            .unwrap();
         assert!(plan.recorded().is_none());
         assert!(
             plan.in_workspace.is_some(),
@@ -759,7 +766,9 @@ metrics:
     fn test_plans_carry_the_artifacts_dir_of_the_rule() {
         let (_dir, root) = workspace(&format!("{YAML}artifacts: .gleon/runs/shots\n"), "a.png");
         let golden = root.join("test/goldens/a.png");
-        let plan = session(Some("0")).plan(&golden, None, vec![], None).unwrap();
+        let plan = session(Some("0"))
+            .plan(&golden, None, vec![], None)
+            .unwrap();
         let golden_in = plan.in_workspace.unwrap();
         assert_eq!(
             (golden_in.artifacts.as_str(), golden_in.name.as_str()),
@@ -805,7 +814,9 @@ metrics:
             (session(None), golden),
             (ignoring, root.join("test/goldens/a.png")),
         ] {
-            let plan = session.plan(&golden, None, vec![pixel_mask(1)], None).unwrap();
+            let plan = session
+                .plan(&golden, None, vec![pixel_mask(1)], None)
+                .unwrap();
             assert_eq!((plan.tolerance, plan.masks.len()), (Tolerance::Exact {}, 1));
             assert!(!plan.has_workspace, "{}", golden.display());
         }
@@ -855,7 +866,12 @@ metrics:
 
         let (_dir, root) = workspace(YAML, "with space.png");
         let error = session(None)
-            .plan(&root.join("test/goldens/with space.png"), None, vec![], None)
+            .plan(
+                &root.join("test/goldens/with space.png"),
+                None,
+                vec![],
+                None,
+            )
             .unwrap_err();
         assert!(
             error.message.contains("not a valid gleon test path"),
