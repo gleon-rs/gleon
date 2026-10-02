@@ -35,8 +35,9 @@ pub enum Candidate<'a> {
 }
 
 impl Candidate<'_> {
-    /// The candidate as PNG: the given bytes, or the raw pixels encoded (`None` for pixels of
-    /// the wrong length or an encoder failure).
+    /// The candidate as PNG: the given bytes, or the raw pixels encoded (`None` for pixels over
+    /// the decoding budget, which no comparison could read back, of the wrong length, or an
+    /// encoder failure).
     #[must_use]
     pub fn to_png(&self) -> Option<std::borrow::Cow<'_, [u8]>> {
         match *self {
@@ -47,7 +48,7 @@ impl Candidate<'_> {
                 pixels,
             } => {
                 // Encoded in place: a copy of the pixels would cost as much as a frame.
-                if !is_rgba_len(width, height, pixels.len()) {
+                if !fits_budget(width, height) || !is_rgba_len(width, height, pixels.len()) {
                     return None;
                 }
                 let mut png = Vec::new();
@@ -559,6 +560,13 @@ mod tests {
                 height: 1
             }))
         ));
+        let wide = vec![0; 16_385 * 4];
+        let over_budget = Candidate::Rgba {
+            width: 16_385,
+            height: 1,
+            pixels: &wide,
+        };
+        assert!(over_budget.to_png().is_none(), "never kept as a candidate");
         assert_eq!(Candidate::Png(&a).to_png().unwrap().as_ref(), &a[..]);
     }
 
