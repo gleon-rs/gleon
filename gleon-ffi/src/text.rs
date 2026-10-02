@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-pub use gleon_model::case::text::{dimension_summary, metrics_summary, tolerance};
+pub use gleon_model::case::text::{dimension_summary, metrics_summary, text_tolerance, tolerance};
 use gleon_model::{
     case::{
         CaseOutcome, Metrics,
@@ -201,6 +201,7 @@ mod tests {
             diff_pixels: 2,
             diff_ratio: 0.02,
             headroom: -0.01,
+            text: None,
         };
         assert_eq!(
             console_line(
@@ -220,6 +221,7 @@ mod tests {
             diff_pixels: 0,
             diff_ratio: 0.0,
             headroom: 0.0,
+            text: None,
         };
         assert_eq!(
             console_line(

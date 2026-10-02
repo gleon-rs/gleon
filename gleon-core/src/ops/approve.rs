@@ -43,6 +43,8 @@ enum Target {
 /// A candidate to approve.
 struct Candidate<'a> {
     report: &'a CaseReport,
+    /// Its hash: a kept candidate always has one (`CaseReport::validate`).
+    sha256: &'a Sha256Hex,
     file: PathBuf,
     target: Target,
 }
@@ -95,7 +97,7 @@ fn read_candidate(candidate: &Candidate<'_>) -> Result<Vec<u8>, ApproveError> {
     if read > MAX_IMAGE_FILE_SIZE {
         return Err(too_large(read));
     }
-    if Sha256Hex::of(&bytes) != candidate.report.candidate.sha256 {
+    if Sha256Hex::of(&bytes) != *candidate.sha256 {
         return Err(ApproveError::CandidateChanged {
             name: candidate.report.name.clone(),
             path: path.clone(),
@@ -349,7 +351,10 @@ fn candidates_of<'a>(
                 .artifacts
                 .as_ref()
                 .and_then(|artifacts| artifacts.candidate.as_ref());
-            let Some(candidate) = candidate.filter(|_| can_approve) else {
+            let (Some(candidate), Some(sha256)) = (
+                candidate.filter(|_| can_approve),
+                report.candidate.sha256.as_ref(),
+            ) else {
                 continue;
             };
             let file = cases.artifact_path(candidate).ok_or_else(|| {
@@ -360,7 +365,7 @@ fn candidates_of<'a>(
             })?;
             let target = target(base_dir, report)?;
             match by_target.entry(target.clone()) {
-                Entry::Occupied(first) if *first.get().0 != report.candidate.sha256 => {
+                Entry::Occupied(first) if first.get().0 != sha256 => {
                     return Err(ApproveError::ConflictingCandidates {
                         name: report.name.clone(),
                         first: first.get().1.to_path_buf(),
@@ -370,11 +375,12 @@ fn candidates_of<'a>(
                 // The same candidate from another run (e.g. two jobs of one platform).
                 Entry::Occupied(_) => continue,
                 Entry::Vacant(slot) => {
-                    let _ = slot.insert((&report.candidate.sha256, run));
+                    let _ = slot.insert((sha256, run));
                 }
             }
             candidates.push(Candidate {
                 report,
+                sha256,
                 file,
                 target,
             });
@@ -492,7 +498,7 @@ pub fn approve_workspace(
             } => (candidate, platform_key, phash, width, height),
         };
         let report = candidate.report;
-        let sha256_hex = report.candidate.sha256.as_str();
+        let sha256_hex = candidate.sha256.as_str();
         let blob = blobs_dir.join(sha256_hex);
         // Blobs are named by their content and written atomically: one that exists is this one
         // (cases often share a candidate), and a durable write costs an fsync.
@@ -605,7 +611,7 @@ mod tests {
         case.source.tool = tool.to_owned();
         case.platform = platform;
         case.golden.path = format!("goldens/{name}.png");
-        case.candidate.sha256 = Sha256Hex::of(candidate);
+        case.candidate.sha256 = Some(Sha256Hex::of(candidate));
         let file = runs_latest.join(format!("artifacts/{name}/candidate.png"));
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, candidate).unwrap();

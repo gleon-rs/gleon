@@ -179,8 +179,15 @@
           "minimum": 0
         },
         "sha256": {
-          "description": "SHA-256 of the PNG bytes.",
-          "$ref": "#/$defs/Sha256Hex"
+          "description": "SHA-256 of the PNG bytes; absent when the integration compared raw pixels and encoded no\nPNG (a pass); a candidate kept in `artifacts` always has it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Hex"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "width": {
           "description": "Width in pixels; absent if the PNG header could not be read.",
@@ -192,10 +199,7 @@
           "minimum": 0
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "sha256"
-      ]
+      "additionalProperties": false
     },
     "CaseErrorKind": {
       "description": "Class of an `error` outcome, so readers tell a broken image from a broken file system or a\nbug without parsing messages.",
@@ -306,6 +310,17 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "text": {
+          "description": "The tolerance of the text regions the integration reported (pixel and exact only);\nabsent when there were none or no text tolerance applied.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextTolerance"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "tolerance": {
           "description": "The effective tolerance.",
@@ -420,8 +435,19 @@
               "type": "string",
               "const": "pixel"
             },
+            "text": {
+              "description": "The text regions, compared under `comparison.text` instead (left out of the pixels\nabove); the worst tile is a `text` entry of `regions`.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TextMetrics"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "total_pixels": {
-              "description": "Pixels compared.",
+              "description": "Pixels compared strictly (masked pixels and text under `comparison.text` left out).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -609,9 +635,14 @@
       "description": "Kind of a compared region.",
       "oneOf": [
         {
-          "description": "Pixels compared as an image (today: the whole golden).",
+          "description": "Pixels compared as an image (the whole golden).",
           "type": "string",
           "const": "image"
+        },
+        {
+          "description": "Text compared under `comparison.text`: the tile of its text regions with the largest\nshare of differing pixels.",
+          "type": "string",
+          "const": "text"
         }
       ]
     },
@@ -715,6 +746,66 @@
         }
       },
       "additionalProperties": false
+    },
+    "TextMetrics": {
+      "description": "What the text regions of a pixel or exact comparison measured.",
+      "type": "object",
+      "properties": {
+        "diff_pixels": {
+          "description": "Text pixels beyond the color tolerance of the text.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "headroom": {
+          "description": "`max_diff_ratio` of the text minus `worst_tile_diff_ratio`; negative means it failed.",
+          "type": "number",
+          "format": "double"
+        },
+        "pixels": {
+          "description": "Text pixels (masked ones left out).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "worst_tile_diff_ratio": {
+          "description": "Share of differing pixels of the worst tile.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pixels",
+        "diff_pixels",
+        "worst_tile_diff_ratio",
+        "headroom"
+      ]
+    },
+    "TextTolerance": {
+      "description": "How much text may differ, in pixel and exact mode: the text regions an integration reports\n(paragraphs of the render tree) are compared under it, everything else strictly.\n\nText is what operating systems draw differently; a pixel of text counts as equal while no\nchannel differs by more than `color_tolerance`, and the text passes while every tile of\n[`gleon_engine::pixel::TEXT_TILE`] pixels has at most `max_diff_ratio` differing pixels (a\nchanged word is a dense cluster, rendering noise is spread thin).",
+      "type": "object",
+      "properties": {
+        "color_tolerance": {
+          "description": "Largest difference of any channel of a text pixel, in 8-bit units, `[0, 255]`.",
+          "type": "number",
+          "format": "double",
+          "maximum": 255.0,
+          "minimum": 0.0
+        },
+        "max_diff_ratio": {
+          "description": "Largest share of differing pixels in any tile of text, `[0, 1]`.",
+          "type": "number",
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "color_tolerance",
+        "max_diff_ratio"
+      ]
     },
     "Tolerance": {
       "description": "Comparison tolerance.\n\nEach mode carries only its own parameters, so a parameter of another mode is unrepresentable.",

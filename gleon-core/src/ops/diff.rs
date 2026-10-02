@@ -7,13 +7,14 @@
 
 use std::{io, path::Path, time::Instant};
 
-use gleon_engine::{ComparisonResult, compare_images, config::Zone, decode::decode_rgba};
+use gleon_engine::config::Zone;
 use gleon_model::{
     case::{
         self, ArtifactImages, CASE_SCHEMA_VERSION, CandidateImage, CaseErrorKind, CaseOutcome,
         CaseReport, CaseTimings, Comparison, GoldenImage, Metrics, RegionMetrics, RunId, Source,
         text,
     },
+    compare::{self, Compared},
     config::ArtifactsDir,
     platform::PlatformConfig,
     tolerance::Tolerance,
@@ -101,6 +102,8 @@ struct Judged {
     error_kind: Option<CaseErrorKind>,
     message: Option<String>,
     metrics: Option<Metrics>,
+    /// The compared regions of a match or mismatch.
+    regions: Vec<RegionMetrics>,
     /// The baseline's bytes, when they were read.
     golden: Option<Vec<u8>>,
     /// The PNG-encoded diff of a mismatch.
@@ -114,6 +117,7 @@ impl Judged {
             error_kind: None,
             message: None,
             metrics: None,
+            regions: Vec::new(),
             golden: None,
             diff: None,
         }
@@ -199,7 +203,7 @@ impl DiffRun<'_> {
         );
         if judged.outcome == CaseOutcome::Identical {
             // Identical bytes are the baseline's bytes, already hashed.
-            golden.sha256 = Some(candidate_image.sha256.clone());
+            golden.sha256.clone_from(&candidate_image.sha256);
         }
         if let Some(manifest) = manifest.filter(|_| golden.width.is_none()) {
             golden.width = Some(manifest.width);
@@ -215,6 +219,8 @@ impl DiffRun<'_> {
             test: None,
             comparison: Comparison {
                 tolerance,
+                // `gleon diff` sees no text: its screenshots are compared strictly.
+                text: None,
                 masks,
                 policy_version: gleon_engine::ssim::POLICY_VERSION,
             },
@@ -222,11 +228,7 @@ impl DiffRun<'_> {
             error_kind: judged.error_kind,
             message: judged.message,
             metrics: judged.metrics,
-            regions: judged
-                .metrics
-                .map(RegionMetrics::whole_image)
-                .into_iter()
-                .collect(),
+            regions: judged.regions,
             artifacts,
             timings_ms: CaseTimings::new(total, None),
             run_id: Some(self.run_id.clone()),
@@ -253,11 +255,14 @@ impl DiffRun<'_> {
         };
         // The manifest names its bytes: equal bytes are the baseline, decided without the blob.
         let is_identical = manifest.hash.scheme() == "sha256"
-            && manifest.hash.value() == candidate_image.sha256.as_str();
+            && candidate_image
+                .sha256
+                .as_ref()
+                .is_some_and(|sha256| manifest.hash.value() == sha256.as_str());
         if is_identical {
             return match SingleTestManifest::validate_image_bytes(candidate) {
                 Ok(()) => Judged::new(CaseOutcome::Identical),
-                Err(e) => Judged::error(CaseErrorKind::Image, format!("invalid screenshot: {e}")),
+                Err(e) => Judged::error(CaseErrorKind::Image, format!("candidate image: {e}")),
             };
         }
         let blob_path = crate::storage::local_blob_path(&self.blobs_root, &manifest.hash);
@@ -280,100 +285,35 @@ impl DiffRun<'_> {
                 );
             }
         };
-        let (mut golden_rgba, mut candidate_rgba) = match decode_both(&golden, candidate) {
-            Ok(images) => images,
-            Err(message) => {
-                return Judged::error(CaseErrorKind::Image, message).with_golden(golden);
-            }
-        };
-        if !masks.is_empty() {
-            gleon_engine::masking::apply_masks(&mut golden_rgba, masks);
-            gleon_engine::masking::apply_masks(&mut candidate_rgba, masks);
-        }
-        compare(&golden_rgba, &candidate_rgba, tolerance).with_golden(golden)
-    }
-}
-
-/// Decodes the baseline and the screenshot with the same resource-limited decoder as the
-/// integrations, so both see the same pixels for the same bytes; the error says which is
-/// invalid.
-fn decode_both(
-    golden: &[u8],
-    candidate: &[u8],
-) -> Result<(image::RgbaImage, image::RgbaImage), String> {
-    let decode = |bytes: &[u8], what: &str| {
-        SingleTestManifest::validate_image_bytes(bytes)
-            .map_err(|e| e.to_string())
-            .and_then(|()| decode_rgba(bytes).map_err(|e| e.to_string()))
-            .map_err(|e| format!("invalid {what}: {e}"))
-    };
-    Ok((
-        decode(golden, "baseline")?,
-        decode(candidate, "screenshot")?,
-    ))
-}
-
-/// Compares the decoded (and masked) images under `tolerance`.
-fn compare(
-    golden: &image::RgbaImage,
-    candidate: &image::RgbaImage,
-    tolerance: &Tolerance,
-) -> Judged {
-    let (mode, config) = tolerance.engine_config();
-    let (width, height) = golden.dimensions();
-    let total_pixels = u64::from(width) * u64::from(height);
-    let judged = |measurement, outcome, diff| {
-        Metrics::from_measurement(&measurement, tolerance, total_pixels).map_or_else(
-            || {
-                Judged::error(
-                    CaseErrorKind::Internal,
-                    "internal error: the engine measurement does not match the tolerance"
-                        .to_owned(),
-                )
-            },
-            |metrics| Judged {
+        let candidate = compare::Candidate::Png(candidate);
+        let judged = match compare::compare(&golden, candidate, tolerance, masks, None) {
+            Ok(compare::Comparison { compared, .. }) => match compared {
+                Compared::Match { metrics, regions } => Judged {
+                    metrics: Some(metrics),
+                    regions,
+                    ..Judged::new(CaseOutcome::Match)
+                },
                 // Failure messages read like the integrations' (shared texts of the model).
-                message: (outcome == CaseOutcome::Mismatch)
-                    .then(|| text::metrics_summary(&metrics)),
-                metrics: Some(metrics),
-                diff,
-                ..Judged::new(outcome)
+                Compared::Mismatch {
+                    metrics,
+                    regions,
+                    diff_png,
+                } => Judged {
+                    message: Some(text::metrics_summary(&metrics)),
+                    metrics: Some(metrics),
+                    regions,
+                    diff: Some(diff_png),
+                    ..Judged::new(CaseOutcome::Mismatch)
+                },
+                Compared::DimensionMismatch { golden, candidate } => Judged {
+                    message: Some(text::dimension_summary(golden, candidate)),
+                    ..Judged::new(CaseOutcome::DimensionMismatch)
+                },
             },
-        )
-    };
-    match compare_images(golden, candidate, mode, &config) {
-        ComparisonResult::Match { measurement } => judged(measurement, CaseOutcome::Match, None),
-        ComparisonResult::TooLarge {
-            size: (width, height),
-        } => Judged::error(
-            CaseErrorKind::Image,
-            text::too_large_for_ssim(width, height),
-        ),
-        ComparisonResult::DimensionMismatch {
-            baseline_size,
-            actual_size,
-        } => Judged {
-            message: Some(text::dimension_summary(baseline_size, actual_size)),
-            ..Judged::new(CaseOutcome::DimensionMismatch)
-        },
-        ComparisonResult::Mismatch {
-            measurement,
-            diff_image,
-        } => match encode_png(&diff_image) {
-            Ok(diff) => judged(measurement, CaseOutcome::Mismatch, Some(diff)),
-            Err(e) => Judged::error(
-                CaseErrorKind::Image,
-                format!("cannot encode the diff image: {e}"),
-            ),
-        },
+            Err(e) => Judged::error(e.kind(), e.to_string()),
+        };
+        judged.with_golden(golden)
     }
-}
-
-fn encode_png(image: &image::RgbaImage) -> Result<Vec<u8>, image::ImageError> {
-    let mut bytes = Vec::new();
-    image
-        .write_to(&mut io::Cursor::new(&mut bytes), image::ImageFormat::Png)
-        .map(|()| bytes)
 }
 
 /// Removes the output of the previous `gleon diff` from `runs_latest`: its rendered reports and
@@ -535,7 +475,7 @@ mod tests {
         assert_eq!(report.source.tool, CLI_TOOL);
         assert_eq!(report.run_id.as_ref().unwrap().as_str(), "ci-7");
         assert_eq!(report.golden.path, "shots/a.png");
-        assert_eq!(report.golden.sha256, Some(report.candidate.sha256.clone()));
+        assert_eq!(report.golden.sha256, report.candidate.sha256.clone());
         assert!(report.golden.blob.is_some());
         assert_eq!(
             report.comparison.tolerance,
@@ -712,7 +652,7 @@ mod tests {
         let report = case_report(root, "shots/a");
         assert_eq!(report.error_kind, Some(CaseErrorKind::Image));
         assert!(
-            report.message.unwrap().starts_with("invalid screenshot"),
+            report.message.unwrap().starts_with("candidate image"),
             "decided without the blob"
         );
     }
@@ -986,7 +926,7 @@ mod tests {
             (corrupt.outcome, corrupt.error_kind),
             (CaseOutcome::Error, Some(CaseErrorKind::Image))
         );
-        assert!(corrupt.message.unwrap().starts_with("invalid baseline: "));
+        assert!(corrupt.message.unwrap().starts_with("golden image: "));
         assert!(corrupt.golden.sha256.is_some(), "the blob was read");
 
         std::fs::remove_file(&blob).unwrap();

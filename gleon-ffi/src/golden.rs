@@ -13,21 +13,23 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    cell::OnceCell,
     fs, io,
     path::Path,
     time::{Duration, Instant},
 };
 
-use gleon_engine::{config::Zone, masking::clamped_zones};
+use gleon_engine::{Region, config::Zone, masking::clamped_zones};
 use gleon_model::{
     case::{
         self, ArtifactImages, Artifacts, CASE_SCHEMA_VERSION, CandidateImage, CaseErrorKind,
         CaseOutcome, CaseReport, CaseTimings, GoldenImage, Metrics, RegionMetrics, Source,
         TestInfo,
     },
+    compare::{Candidate, Text},
     fs::Durability,
     platform::PlatformConfig,
-    tolerance::Tolerance,
+    tolerance::{TextTolerance, Tolerance},
 };
 
 use crate::{
@@ -119,12 +121,16 @@ pub struct Request<'a> {
     pub failures_dir: &'a str,
     /// The running test's full name, when known.
     pub test_name: Option<&'a str>,
-    /// The candidate PNG.
-    pub candidate: &'a [u8],
+    /// The candidate: PNG bytes, or raw pixels (compare mode only).
+    pub candidate: Candidate<'a>,
     /// The call's tolerance; `None` uses the `.gleon/gleon.yaml` rule, else exact.
     pub tolerance: Option<Tolerance>,
     /// The call's masks.
     pub masks: Vec<Zone>,
+    /// The text regions of the candidate (pixels).
+    pub text_regions: Vec<Region>,
+    /// The call's tolerance of text; `None` uses the rule's.
+    pub text: Option<TextTolerance>,
 }
 
 /// Runs `request` in `session`.
@@ -141,15 +147,20 @@ pub fn run(session: &Session, request: &Request<'_>) -> Finished {
 }
 
 fn update(session: &Session, request: &Request<'_>, started: Instant) -> Finished {
+    let Candidate::Png(candidate) = request.candidate else {
+        return Finished::failed(Failure::invalid_input(
+            "gleon: update mode takes the candidate as PNG",
+        ));
+    };
     let path = request.golden_path;
     let current = fs::read(path).ok();
     // Rewriting the same bytes would cost a flush to disk and touch the file for build tools.
-    let written = if current.as_deref() == Some(request.candidate) {
+    let written = if current.as_deref() == Some(candidate) {
         Ok(())
     } else {
-        gleon_model::fs::write_atomically(path, request.candidate, Durability::Durable)
+        gleon_model::fs::write_atomically(path, candidate, Durability::Durable)
     };
-    let plan = match session.plan(path, request.tolerance, request.masks.clone()) {
+    let plan = match session.plan(path, request.tolerance, request.masks.clone(), request.text) {
         Ok(plan) => plan,
         Err(failure) => return Finished::failed(failure),
     };
@@ -159,11 +170,12 @@ fn update(session: &Session, request: &Request<'_>, started: Instant) -> Finishe
         request,
         plan: &plan,
         golden,
+        encoded: OnceCell::new(),
         started,
     };
     let finished = match written {
         // After an update the golden is the candidate.
-        Ok(()) => call(Some(request.candidate)).finish(
+        Ok(()) => call(Some(candidate)).finish(
             CaseOutcome::Updated,
             Details::default(),
             Verdict::Updated,
@@ -188,7 +200,7 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
         Err(e) if e.kind() == io::ErrorKind::NotFound || path.is_dir() => Ok(None),
         Err(e) => Err(format!("cannot read the golden: {e}")),
     };
-    let plan = match session.plan(path, request.tolerance, request.masks.clone()) {
+    let plan = match session.plan(path, request.tolerance, request.masks.clone(), request.text) {
         Ok(plan) => plan,
         Err(failure) => return Finished::failed(failure),
     };
@@ -198,6 +210,7 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
         request,
         plan: &plan,
         golden: golden.as_ref().ok().and_then(Option::as_deref),
+        encoded: OnceCell::new(),
         started,
     };
     let finished = match golden.as_ref().map(Option::as_deref) {
@@ -210,7 +223,9 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
             CaseOutcome::Missing,
             Details {
                 images: ArtifactImages {
-                    candidate: case::png_size(request.candidate).map(|_| request.candidate),
+                    candidate: call
+                        .candidate_png()
+                        .filter(|png| case::png_size(png).is_some()),
                     ..ArtifactImages::default()
                 },
                 ..Details::default()
@@ -220,7 +235,7 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
         ),
         // Identical encodings are identical pixels: no decoding at all, so the masks are checked
         // against the size in the PNG header.
-        Ok(Some(golden)) if golden == request.candidate => {
+        Ok(Some(golden)) if matches!(request.candidate, Candidate::Png(png) if png == golden) => {
             let clamped = case::png_size(golden).map_or(0, |(width, height)| {
                 clamped_zones(&plan.masks, width, height)
             });
@@ -232,10 +247,16 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
             )
             .warn(clamped_masks(request.golden_uri, clamped))
         }
-        Ok(Some(golden)) => judge(
-            &call,
-            compare::compare(golden, request.candidate, &plan.tolerance, &plan.masks),
-        ),
+        Ok(Some(golden)) => {
+            let text = call.text().map(|tolerance| Text {
+                regions: &request.text_regions,
+                tolerance,
+            });
+            judge(
+                &call,
+                compare::compare(golden, request.candidate, &plan.tolerance, &plan.masks, text),
+            )
+        }
     };
     finished.warn(warning)
 }
@@ -251,6 +272,7 @@ fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
     match comparison {
         Comparison::Match {
             metrics,
+            regions,
             clamped_masks: clamped,
             native,
         } => call
@@ -258,6 +280,7 @@ fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
                 CaseOutcome::Match,
                 Details {
                     metrics: Some(metrics),
+                    regions,
                     native: Some(native),
                     ..Details::default()
                 },
@@ -291,18 +314,24 @@ fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
         }
         Comparison::Mismatch {
             metrics,
+            regions,
             diff_png,
             clamped_masks: clamped,
             native,
         } => {
             let summary = text::metrics_summary(&metrics);
-            let reason = format!(
-                "{summary} (gleon {}).",
-                text::tolerance(&call.plan.tolerance)
-            );
+            let tolerance = text::tolerance(&call.plan.tolerance);
+            let reason = match call.text() {
+                Some(text) => format!(
+                    "{summary} (gleon {tolerance}, {}).",
+                    text::text_tolerance(&text)
+                ),
+                None => format!("{summary} (gleon {tolerance})."),
+            };
             let details = Details {
                 message: Some(summary),
                 metrics: Some(metrics),
+                regions,
                 native: Some(native),
                 images: call.images(Some(&diff_png)),
                 ..Details::default()
@@ -321,6 +350,8 @@ struct Details<'a> {
     message: Option<String>,
     error_kind: Option<CaseErrorKind>,
     metrics: Option<Metrics>,
+    /// The compared regions of a match or mismatch.
+    regions: Vec<RegionMetrics>,
     native: Option<Duration>,
     /// The images for the artifacts directory; none for passes and errors, which remove the
     /// images of an earlier failure.
@@ -333,10 +364,53 @@ struct Call<'a> {
     request: &'a Request<'a>,
     plan: &'a Plan,
     golden: Option<&'a [u8]>,
+    /// The PNG of raw candidate pixels, encoded once when a failure keeps the candidate.
+    encoded: OnceCell<Option<Vec<u8>>>,
     started: Instant,
 }
 
 impl Call<'_> {
+    /// The candidate as PNG: the given bytes, or the raw pixels encoded on first use (`None` if
+    /// they cannot be). Only failures need it, so a passing raw candidate is never encoded.
+    fn candidate_png(&self) -> Option<&[u8]> {
+        match self.request.candidate {
+            Candidate::Png(png) => Some(png),
+            Candidate::Rgba { .. } => self
+                .encoded
+                .get_or_init(|| {
+                    self.request
+                        .candidate
+                        .to_png()
+                        .map(std::borrow::Cow::into_owned)
+                })
+                .as_deref(),
+        }
+    }
+
+    /// The candidate of the case report: hashed when there is a PNG of it (given, or encoded
+    /// for a failure), else the size of the raw pixels.
+    fn candidate_image(&self) -> CandidateImage {
+        match self.request.candidate {
+            Candidate::Png(png) => CandidateImage::of(png),
+            Candidate::Rgba { width, height, .. } => self
+                .encoded
+                .get()
+                .and_then(Option::as_deref)
+                .map_or(CandidateImage::raw(width, height), CandidateImage::of),
+        }
+    }
+
+    /// The tolerance of text that applies: the plan's, for text regions in pixel or exact mode.
+    fn text(&self) -> Option<TextTolerance> {
+        let is_pixel = matches!(
+            self.plan.tolerance,
+            Tolerance::Exact {} | Tolerance::Pixel { .. }
+        );
+        self.plan
+            .text
+            .filter(|_| is_pixel && !self.request.text_regions.is_empty())
+    }
+
     /// Keeps the images of `details` in the artifacts directory and records the case report (and
     /// console line) when the plan asks for them, then finishes with `verdict` and the message
     /// built by `message`; `message` runs last, so the integration's failure artifacts are written
@@ -390,10 +464,10 @@ impl Call<'_> {
     }
 
     /// The golden and candidate of this call plus `diff_png`, as images to keep.
-    const fn images<'a>(&'a self, diff_png: Option<&'a [u8]>) -> ArtifactImages<'a> {
+    fn images<'a>(&'a self, diff_png: Option<&'a [u8]>) -> ArtifactImages<'a> {
         ArtifactImages {
             golden: self.golden,
-            candidate: Some(self.request.candidate),
+            candidate: self.candidate_png(),
             diff: diff_png,
         }
     }
@@ -480,7 +554,7 @@ impl Call<'_> {
             schema_version: CASE_SCHEMA_VERSION,
             name: golden.name.clone(),
             golden: GoldenImage::of(golden.golden_path.clone(), self.golden, None),
-            candidate: CandidateImage::of(self.request.candidate),
+            candidate: self.candidate_image(),
             source: Source {
                 tool: integration.tool.clone(),
                 tool_version: integration.tool_version.clone(),
@@ -494,16 +568,21 @@ impl Call<'_> {
                 tolerance: self.plan.tolerance,
                 masks: self.plan.masks.clone(),
                 policy_version: gleon_engine::ssim::POLICY_VERSION,
+                text: self.text(),
             },
             outcome,
             error_kind: details.error_kind,
             message: details.message,
             metrics: details.metrics,
-            regions: details
-                .metrics
-                .map(RegionMetrics::whole_image)
-                .into_iter()
-                .collect(),
+            regions: if details.regions.is_empty() {
+                details
+                    .metrics
+                    .map(RegionMetrics::whole_image)
+                    .into_iter()
+                    .collect()
+            } else {
+                details.regions
+            },
             artifacts,
             timings_ms: CaseTimings::new(total, details.native),
             run_id: self.session.run_id.clone(),
@@ -540,7 +619,7 @@ impl Call<'_> {
         let files = [
             (&names.diff, diff_png),
             (&names.golden, *golden),
-            (&names.candidate, Some(request.candidate)),
+            (&names.candidate, self.candidate_png()),
         ];
         let written = files.into_iter().try_for_each(|(pattern, bytes)| {
             let file = dir.join(ArtifactNames::file(pattern, &stem));
@@ -601,7 +680,7 @@ mod tests {
         let img = image::RgbaImage::from_fn(width, height, |x, y| {
             if dot && (x, y) == (1, 1) { BLUE } else { RED }
         });
-        compare::encode_png(&img).unwrap()
+        gleon_model::compare::encode_png(&img).unwrap()
     }
 
     /// `image` re-encoded as PNG in another pixel format.
@@ -716,9 +795,11 @@ mod tests {
                     golden_uri: "goldens/a.png",
                     failures_dir: &self.failures,
                     test_name: Some("group test"),
-                    candidate,
+                    candidate: Candidate::Png(candidate),
                     tolerance,
                     masks,
+                    text_regions: Vec::new(),
+                    text: None,
                 },
             )
         }
@@ -913,7 +994,7 @@ metrics:
         assert_eq!(case.name, "test/goldens/a");
         assert_eq!(case.golden.path, "test/goldens/a.png");
         assert_eq!(case.golden.width, Some(4));
-        assert_eq!(case.golden.sha256, Some(case.candidate.sha256.clone()));
+        assert_eq!(case.golden.sha256, case.candidate.sha256.clone());
         assert_eq!(case.test.unwrap().name.as_deref(), Some("group test"));
         assert_eq!(case.source.renderer.as_deref(), Some("flutter-3.47.5"));
         assert_eq!(case.source.tool, "gleon_flutter");
@@ -1504,7 +1585,7 @@ metrics:
         );
         let case = fixture.case();
         assert_eq!(case.outcome, CaseOutcome::Updated);
-        assert_eq!(case.golden.sha256, Some(case.candidate.sha256));
+        assert_eq!(case.golden.sha256, case.candidate.sha256);
 
         let broken = Fixture::new(Some("not: [valid"));
         let finished = broken.run(&broken.session(None), Mode::Update, &candidate);

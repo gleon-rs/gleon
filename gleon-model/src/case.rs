@@ -29,7 +29,7 @@ use crate::{
     hash::ImageHash,
     naming::{is_portable_relative_path, validate_canonical_test_name},
     platform::PlatformConfig,
-    tolerance::Tolerance,
+    tolerance::{TextTolerance, Tolerance},
 };
 
 /// Version of the case report format.
@@ -48,7 +48,7 @@ pub const RUN_ID_ENV: &str = "GLEON_RUN_ID";
 pub enum Metrics {
     /// Exact and pixel tolerances.
     Pixel {
-        /// Pixels compared.
+        /// Pixels compared strictly (masked pixels and text under `comparison.text` left out).
         total_pixels: u64,
         /// Pixels whose RGBA bytes differ.
         diff_pixels: u64,
@@ -56,6 +56,10 @@ pub enum Metrics {
         diff_ratio: f64,
         /// `max_diff_ratio - diff_ratio` (exact: `-diff_ratio`); negative means it failed.
         headroom: f64,
+        /// The text regions, compared under `comparison.text` instead (left out of the pixels
+        /// above); the worst tile is a `text` entry of `regions`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<TextMetrics>,
     },
     /// SSIM tolerance (values as defined by the engine's `SsimAnalysis`).
     Ssim {
@@ -83,6 +87,20 @@ pub enum Metrics {
     },
 }
 
+/// What the text regions of a pixel or exact comparison measured.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TextMetrics {
+    /// Text pixels (masked ones left out).
+    pub pixels: u64,
+    /// Text pixels beyond the color tolerance of the text.
+    pub diff_pixels: u64,
+    /// Share of differing pixels of the worst tile.
+    pub worst_tile_diff_ratio: f64,
+    /// `max_diff_ratio` of the text minus `worst_tile_diff_ratio`; negative means it failed.
+    pub headroom: f64,
+}
+
 /// Distance of SSIM metrics to their thresholds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -95,7 +113,8 @@ pub struct SsimHeadroom {
 }
 
 impl Metrics {
-    /// Combines an engine measurement with the tolerance it was taken under.
+    /// Combines an engine measurement with the tolerance (and the tolerance of text) it was
+    /// taken under.
     ///
     /// Returns `None` if they belong to different modes (a pixel measurement under an SSIM
     /// tolerance or vice versa), which callers treat as an internal error.
@@ -103,15 +122,37 @@ impl Metrics {
     pub fn from_measurement(
         measurement: &Measurement,
         tolerance: &Tolerance,
-        total_pixels: u64,
+        text: Option<&TextTolerance>,
     ) -> Option<Self> {
         // Every pairing is spelled out, so a new mode cannot silently fall into a wrong arm.
         match (*measurement, *tolerance) {
-            (Measurement::Pixel { diff_count }, Tolerance::Exact {}) => {
-                Some(Self::pixel(diff_count, total_pixels, 0.0))
-            }
-            (Measurement::Pixel { diff_count }, Tolerance::Pixel { max_diff_ratio }) => {
-                Some(Self::pixel(diff_count, total_pixels, max_diff_ratio))
+            (
+                Measurement::Pixel {
+                    checked_pixels,
+                    diff_count,
+                    text: analysis,
+                },
+                Tolerance::Exact {} | Tolerance::Pixel { .. },
+            ) => {
+                let max_diff_ratio = match *tolerance {
+                    Tolerance::Pixel { max_diff_ratio } => max_diff_ratio,
+                    Tolerance::Exact {} | Tolerance::Ssim { .. } => 0.0,
+                };
+                let text = analysis.zip(text).map(|(analysis, text)| {
+                    let worst = analysis.worst_tile.map_or(0.0, |tile| tile.diff_ratio());
+                    TextMetrics {
+                        pixels: analysis.pixels,
+                        diff_pixels: analysis.diff_pixels,
+                        worst_tile_diff_ratio: worst,
+                        headroom: text.max_diff_ratio - worst,
+                    }
+                });
+                Some(Self::pixel(
+                    diff_count,
+                    checked_pixels,
+                    max_diff_ratio,
+                    text,
+                ))
             }
             (
                 Measurement::Ssim {
@@ -147,7 +188,12 @@ impl Metrics {
         }
     }
 
-    fn pixel(diff_pixels: u64, total_pixels: u64, max_diff_ratio: f64) -> Self {
+    fn pixel(
+        diff_pixels: u64,
+        total_pixels: u64,
+        max_diff_ratio: f64,
+        text: Option<TextMetrics>,
+    ) -> Self {
         #[expect(
             clippy::cast_precision_loss,
             reason = "pixel counts are far below 2^52, so the f64 conversion is exact"
@@ -162,6 +208,7 @@ impl Metrics {
             diff_pixels,
             diff_ratio,
             headroom: max_diff_ratio - diff_ratio,
+            text,
         }
     }
 }
@@ -241,8 +288,11 @@ impl schemars::JsonSchema for Sha256Hex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RegionKind {
-    /// Pixels compared as an image (today: the whole golden).
+    /// Pixels compared as an image (the whole golden).
     Image,
+    /// Text compared under `comparison.text`: the tile of its text regions with the largest
+    /// share of differing pixels.
+    Text,
 }
 
 /// Metrics of one region of the golden.
@@ -267,6 +317,34 @@ impl RegionMetrics {
             rect: None,
             metrics,
         }
+    }
+
+    /// The regions of a comparison: the whole image with `metrics`, then the worst text tile of
+    /// `measurement` under `text` (if any).
+    #[must_use]
+    pub fn of(
+        metrics: Metrics,
+        measurement: &Measurement,
+        text: Option<&TextTolerance>,
+    ) -> Vec<Self> {
+        let tile = match (measurement, text) {
+            (Measurement::Pixel { text: analysis, .. }, Some(text)) => analysis
+                .and_then(|analysis| analysis.worst_tile)
+                .map(|tile| Self {
+                    kind: RegionKind::Text,
+                    rect: Some(tile.region),
+                    metrics: Metrics::pixel(
+                        tile.diff_pixels,
+                        tile.pixels,
+                        text.max_diff_ratio,
+                        None,
+                    ),
+                }),
+            _ => None,
+        };
+        std::iter::once(Self::whole_image(metrics))
+            .chain(tile)
+            .collect()
     }
 }
 
@@ -314,8 +392,10 @@ impl GoldenImage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateImage {
-    /// SHA-256 of the PNG bytes.
-    pub sha256: Sha256Hex,
+    /// SHA-256 of the PNG bytes; absent when the integration compared raw pixels and encoded no
+    /// PNG (a pass); a candidate kept in `artifacts` always has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<Sha256Hex>,
     /// Width in pixels; absent if the PNG header could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
@@ -330,9 +410,19 @@ impl CandidateImage {
     pub fn of(png: &[u8]) -> Self {
         let size = png_size(png);
         Self {
-            sha256: Sha256Hex::of(png),
+            sha256: Some(Sha256Hex::of(png)),
             width: size.map(|(width, _)| width),
             height: size.map(|(_, height)| height),
+        }
+    }
+
+    /// A candidate of raw pixels, `width` x `height`, encoded as no PNG.
+    #[must_use]
+    pub const fn raw(width: u32, height: u32) -> Self {
+        Self {
+            sha256: None,
+            width: Some(width),
+            height: Some(height),
         }
     }
 }
@@ -488,6 +578,10 @@ pub struct TestInfo {
 pub struct Comparison {
     /// The effective tolerance.
     pub tolerance: Tolerance,
+    /// The tolerance of the text regions the integration reported (pixel and exact only);
+    /// absent when there were none or no text tolerance applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<TextTolerance>,
     /// Ignored zones, applied to both images.
     pub masks: Vec<Zone>,
     /// Version of the engine's tolerant (SSIM) decision policy.
@@ -785,9 +879,16 @@ impl CaseReport {
             return Err(InconsistentCase::MissingGoldenHash);
         }
         if self.outcome == O::Identical
-            && self.golden.sha256.as_ref() != Some(&self.candidate.sha256)
+            && (self.candidate.sha256.is_none() || self.golden.sha256 != self.candidate.sha256)
         {
             return Err(InconsistentCase::IdenticalHashes);
+        }
+        let keeps_candidate = self
+            .artifacts
+            .as_ref()
+            .is_some_and(|artifacts| artifacts.candidate.is_some());
+        if keeps_candidate && self.candidate.sha256.is_none() {
+            return Err(InconsistentCase::CandidateHash);
         }
         if self.metrics.is_some() && !matches!(self.outcome, O::Match | O::Mismatch) {
             return Err(InconsistentCase::Metrics);
@@ -857,6 +958,9 @@ pub enum InconsistentCase {
     /// Identical images with different hashes.
     #[error("`identical` images have the same `sha256`")]
     IdenticalHashes,
+    /// A kept candidate image without its hash (`gleon approve` checks the file against it).
+    #[error("a candidate kept in `artifacts` has its `candidate.sha256`")]
+    CandidateHash,
     /// Metrics of an outcome that compared no pixels or did not finish.
     #[error("`metrics` belong to `match` and `mismatch` only")]
     Metrics,
@@ -922,7 +1026,7 @@ pub mod text {
     use gleon_engine::Region;
 
     use super::Metrics;
-    use crate::tolerance::Tolerance;
+    use crate::tolerance::{TextTolerance, Tolerance};
 
     /// The most decimals any number is shown with.
     pub const MAX_DECIMALS: usize = 4;
@@ -996,6 +1100,16 @@ pub mod text {
         }
     }
 
+    /// A tolerance of text, e.g. `text color ±24, ≤ 10.00% per tile`.
+    #[must_use]
+    pub fn text_tolerance(text: &TextTolerance) -> String {
+        format!(
+            "text color ±{}, ≤ {}% per tile",
+            decimal(text.color_tolerance, 0, 2),
+            percent(text.max_diff_ratio)
+        )
+    }
+
     /// A region, e.g. `(4, 8) 16x32px`.
     #[must_use]
     pub fn region(region: &Region) -> String {
@@ -1013,11 +1127,22 @@ pub mod text {
                 total_pixels,
                 diff_pixels,
                 diff_ratio,
+                text,
                 ..
-            } => format!(
-                "{}% ({diff_pixels} of {total_pixels}px) differ",
-                percent(*diff_ratio)
-            ),
+            } => {
+                let mut summary = format!(
+                    "{}% ({diff_pixels} of {total_pixels}px) differ",
+                    percent(*diff_ratio)
+                );
+                if let Some(text) = text.filter(|text| text.diff_pixels > 0) {
+                    let _infallible = write!(
+                        summary,
+                        ", text up to {}% of a tile",
+                        percent(text.worst_tile_diff_ratio)
+                    );
+                }
+                summary
+            }
             Metrics::Ssim {
                 min_ssim,
                 peak_excess,
@@ -1141,6 +1266,7 @@ pub mod text {
                 diff_pixels: 1,
                 diff_ratio: 1.0 / 6000.0,
                 headroom: -1.0 / 6000.0,
+                text: None,
             };
             assert_eq!(metrics_summary(&pixel), "0.0167% (1 of 6000px) differ");
             let area = Region {
@@ -1206,7 +1332,7 @@ mod tests {
             min_similarity: 0.8,
             color_tolerance: 8.0,
         };
-        let metrics = Metrics::from_measurement(&ssim_measurement(), &tolerance, 100);
+        let metrics = Metrics::from_measurement(&ssim_measurement(), &tolerance, None);
         assert!(
             matches!(
                 metrics,
@@ -1220,25 +1346,38 @@ mod tests {
 
     #[test]
     fn test_pixel_headroom_for_exact_and_pixel() {
-        let measurement = Measurement::Pixel { diff_count: 5 };
+        let measurement = Measurement::Pixel {
+            checked_pixels: 100,
+            diff_count: 5,
+            text: None,
+        };
         assert_eq!(
-            Metrics::from_measurement(&measurement, &Tolerance::Exact {}, 100),
+            Metrics::from_measurement(&measurement, &Tolerance::Exact {}, None),
             Some(Metrics::Pixel {
                 total_pixels: 100,
                 diff_pixels: 5,
                 diff_ratio: 0.05,
-                headroom: -0.05
+                headroom: -0.05,
+                text: None,
             })
         );
         let pixel = Tolerance::Pixel {
             max_diff_ratio: 0.1,
         };
-        let metrics = Metrics::from_measurement(&measurement, &pixel, 100);
+        let metrics = Metrics::from_measurement(&measurement, &pixel, None);
         assert!(
             matches!(metrics, Some(Metrics::Pixel { headroom, .. }) if (headroom - 0.05).abs() < 1e-12),
             "{metrics:?}"
         );
-        let empty = Metrics::from_measurement(&Measurement::Pixel { diff_count: 0 }, &pixel, 0);
+        let empty = Metrics::from_measurement(
+            &Measurement::Pixel {
+                checked_pixels: 0,
+                diff_count: 0,
+                text: None,
+            },
+            &pixel,
+            None,
+        );
         assert!(matches!(
             empty,
             Some(Metrics::Pixel {
@@ -1251,7 +1390,7 @@ mod tests {
     #[test]
     fn test_mode_mismatch_is_rejected() {
         assert_eq!(
-            Metrics::from_measurement(&ssim_measurement(), &Tolerance::Exact {}, 1),
+            Metrics::from_measurement(&ssim_measurement(), &Tolerance::Exact {}, None),
             None
         );
         let ssim = Tolerance::Ssim {
@@ -1259,7 +1398,15 @@ mod tests {
             color_tolerance: 8.0,
         };
         assert_eq!(
-            Metrics::from_measurement(&Measurement::Pixel { diff_count: 0 }, &ssim, 1),
+            Metrics::from_measurement(
+                &Measurement::Pixel {
+                    checked_pixels: 1,
+                    diff_count: 0,
+                    text: None
+                },
+                &ssim,
+                None
+            ),
             None
         );
     }
@@ -1286,7 +1433,7 @@ mod tests {
             min_similarity: 0.8,
             color_tolerance: 8.0,
         };
-        let metrics = Metrics::from_measurement(&ssim_measurement(), &tolerance, 100).unwrap();
+        let metrics = Metrics::from_measurement(&ssim_measurement(), &tolerance, None).unwrap();
         let json = serde_json::to_value(RegionMetrics::whole_image(metrics)).unwrap();
         assert_eq!(json["kind"], "image");
         assert!(json.get("rect").is_none());
@@ -1340,7 +1487,7 @@ mod tests {
         let missing = GoldenImage::of("a.png".to_owned(), None, None);
         assert_eq!((missing.sha256, missing.width), (None, None));
         let candidate = CandidateImage::of(b"garbage");
-        assert_eq!(candidate.sha256, Sha256Hex::of(b"garbage"));
+        assert_eq!(candidate.sha256, Some(Sha256Hex::of(b"garbage")));
         assert_eq!((candidate.width, candidate.height), (None, None));
     }
 
@@ -1489,6 +1636,7 @@ mod tests {
                 tolerance: Tolerance::Exact {},
                 masks: vec![],
                 policy_version: 2,
+                text: None,
             },
             outcome: CaseOutcome::Error,
             error_kind: Some(CaseErrorKind::Image),

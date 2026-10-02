@@ -516,12 +516,14 @@ pub(crate) mod fixtures {
                 diff_pixels: 0,
                 diff_ratio: 0.0,
                 headroom: 0.01,
+                text: None,
             }),
             O::Mismatch => Some(Metrics::Pixel {
                 total_pixels: 100,
                 diff_pixels: 5,
                 diff_ratio: 0.05,
                 headroom: -0.05,
+                text: None,
             }),
             _ => None,
         };
@@ -560,7 +562,7 @@ pub(crate) mod fixtures {
                 height: Some(10),
             },
             candidate: CandidateImage {
-                sha256: candidate,
+                sha256: Some(candidate),
                 width: Some(if outcome == O::DimensionMismatch {
                     20
                 } else {
@@ -579,6 +581,7 @@ pub(crate) mod fixtures {
                 tolerance: Tolerance::Exact {},
                 masks: Vec::new(),
                 policy_version: 2,
+                text: None,
             },
             outcome,
             error_kind: (outcome == O::Error).then_some(CaseErrorKind::Image),

@@ -143,20 +143,15 @@ fn classify_test_case(
         Err(e) => return Err(CoreError::Io(e).into()),
     };
 
-    // Same resource-limited decoder as `gleon diff` and the Flutter package.
-    let decode = |label: &str, bytes: &[u8]| {
-        gleon_engine::decode::decode_rgba(bytes).map_err(|e| {
+    // Decoded and masked exactly like `gleon diff` and the integrations compare.
+    let decoded = gleon_model::compare::decode_masked(&b_bytes, &raw_bytes, &matched_zones)
+        .map_err(|e| {
             CoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Invalid {label} image: {e}"),
+                e.to_string(),
             ))
-        })
-    };
-    let mut b_rgba = decode("baseline", &b_bytes)?;
-    let mut a_rgba = decode("actual", &raw_bytes)?;
-    gleon_engine::masking::apply_masks(&mut b_rgba, &matched_zones);
-    gleon_engine::masking::apply_masks(&mut a_rgba, &matched_zones);
-    if b_rgba == a_rgba {
+        })?;
+    if decoded.golden == decoded.candidate {
         return Ok((None, None));
     }
 
@@ -456,6 +451,7 @@ mod tests {
                             height: gleon_engine::config::Dimension::Pixels(1),
                         }],
                     }],
+                    text: None,
                 }],
                 ..Default::default()
             }),
@@ -781,6 +777,7 @@ screenshots:
                             height: gleon_engine::config::Dimension::Pixels(1),
                         }],
                     }],
+                    text: None,
                 }],
                 ..Default::default()
             }),

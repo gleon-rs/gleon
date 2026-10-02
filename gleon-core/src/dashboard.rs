@@ -719,6 +719,7 @@ mod tests {
                 diff_pixels,
                 diff_ratio: diff_pixels as f64 / 1000.0,
                 headroom: 0.0,
+                text: None,
             }),
             message,
         }

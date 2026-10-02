@@ -308,12 +308,7 @@ screenshots:
     assert_ne!(report_corrupt_blob.failed_tests, 0);
     let corrupt_blob = case_report(base_path, "billing/form");
     assert_eq!(corrupt_blob.error_kind, Some(CaseErrorKind::Image));
-    assert!(
-        corrupt_blob
-            .message
-            .unwrap()
-            .starts_with("invalid baseline")
-    );
+    assert!(corrupt_blob.message.unwrap().starts_with("golden image"));
 
     // Restore valid baseline blob so run_diff decodes the baseline and tests corrupt actual screenshot
     fs::write(blobs_dir.join(&blob_digest), &baseline_png_bytes).unwrap();
@@ -328,7 +323,7 @@ screenshots:
         corrupt_actual
             .message
             .unwrap()
-            .starts_with("invalid screenshot")
+            .starts_with("candidate image")
     );
     let md = fs::read_to_string(report_corrupt_actual.runs_dir.join("report.md")).unwrap();
     assert!(

@@ -24,7 +24,7 @@
 )]
 
 use gleon_engine::{
-    ComparisonResult, compare_images,
+    ComparisonResult, PixelRegions, compare_images,
     config::{DiffConfig, Mode},
     ssim::{SsimPolicy, analyze},
 };
@@ -522,7 +522,8 @@ fn test_compare_images_uses_the_same_policy() {
                 ..Scene::default()
             }),
             Mode::Ssim,
-            &config
+            &config,
+            &PixelRegions::NONE
         ),
         ComparisonResult::Match { .. }
     ));
@@ -534,7 +535,8 @@ fn test_compare_images_uses_the_same_policy() {
                 ..Scene::default()
             }),
             Mode::Ssim,
-            &config
+            &config,
+            &PixelRegions::NONE
         ),
         ComparisonResult::Mismatch { .. }
     ));

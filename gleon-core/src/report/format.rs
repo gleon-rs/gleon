@@ -189,6 +189,7 @@ mod tests {
             diff_pixels: 1,
             diff_ratio: 1.0 / 4_000_000.0,
             headroom: -1.0,
+            text: None,
         });
         assert_eq!(
             CaseSummary(&tiny).to_string(),

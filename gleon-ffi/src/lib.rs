@@ -43,11 +43,15 @@ use std::{
 };
 
 use error::{ErrorKind, Failure};
-use gleon_engine::config::{Dimension, Zone};
+use gleon_engine::{
+    Region,
+    config::{Dimension, Zone},
+};
 use gleon_model::{
     case::RUN_ID_ENV,
+    compare::Candidate,
     config::{ARTIFACTS_ENV, METRICS_ENV},
-    tolerance::Tolerance,
+    tolerance::{TextTolerance, Tolerance},
 };
 use golden::{Finished, Mode, Request};
 pub use handles::{GleonResult, GleonSession, GleonSummary};
@@ -56,7 +60,7 @@ use session::{ArtifactNames, Integration, Session, SessionOptions};
 
 /// Version of the C contract. Bumped on any breaking change so the caller can refuse a
 /// mismatched native library instead of misreading it.
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 8;
 
 /// Session flag: goldens belong to workspaces, each golden to the nearest directory above it with
 /// `.gleon/gleon.yaml` (without, every golden compares exactly and nothing is recorded).
@@ -353,6 +357,64 @@ fn call_tolerance(
         .map_err(|e| format!("invalid tolerance: {e}"))
 }
 
+/// The call's tolerance of text: both NaN use the `.gleon/gleon.yaml` rule's.
+fn call_text_tolerance(
+    color_tolerance: f64,
+    max_diff_ratio: f64,
+) -> Result<Option<TextTolerance>, String> {
+    if color_tolerance.is_nan() && max_diff_ratio.is_nan() {
+        return Ok(None);
+    }
+    let text = TextTolerance {
+        color_tolerance,
+        max_diff_ratio,
+    };
+    text.validate()
+        .map(|()| Some(text))
+        .map_err(|e| format!("invalid text tolerance: {e}"))
+}
+
+/// The candidate: `format` `0` PNG bytes, `1` raw straight RGBA8 of `width` x `height`.
+fn call_candidate(
+    format: u8,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> Result<Candidate<'_>, String> {
+    match format {
+        0 => Ok(Candidate::Png(bytes)),
+        1 => {
+            let expected = u64::from(width) * u64::from(height) * 4;
+            if u64::try_from(bytes.len()).ok() != Some(expected) {
+                return Err(format!(
+                    "`candidate` has {} bytes, {width}x{height} RGBA needs {expected}",
+                    bytes.len()
+                ));
+            }
+            Ok(Candidate::Rgba {
+                width,
+                height,
+                pixels: bytes,
+            })
+        }
+        other => Err(format!("unknown candidate format {other}")),
+    }
+}
+
+/// Text regions from `[x, y, width, height]` quadruples.
+fn call_regions(flat: &[u32]) -> Vec<Region> {
+    flat.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&[x, y, width, height]| Region {
+            x,
+            y,
+            width,
+            height,
+        })
+        .collect()
+}
+
 /// Pixel masks from `[x, y, width, height]` quadruples.
 fn call_masks(flat: &[u32]) -> Vec<Zone> {
     flat.as_chunks::<4>()
@@ -367,21 +429,28 @@ fn call_masks(flat: &[u32]) -> Vec<Zone> {
         .collect()
 }
 
-/// Compares the PNG `candidate` against the golden file (`mode` 0), or writes it there (`mode`
-/// 1, update mode).
+/// Compares `candidate` against the golden file (`mode` 0), or writes it there (`mode` 1,
+/// update mode, PNG only).
 ///
 /// The strings are `lengths_count` (4) UTF-8 strings packed into `strings`, `lengths` giving
 /// their byte lengths, in this order: `golden_path` (the file), `golden_uri` (the key shown in
 /// messages), `failures_dir` (the directory for failure artifacts, shown verbatim), `test_name`
 /// (the running test, may be empty).
 ///
-/// The call's tolerance is described at [`call_tolerance`]; `mask_count` pixel masks
-/// `[x, y, width, height]` are at `masks`.
+/// `candidate_format` `0` passes PNG bytes, `1` the raw straight (not premultiplied) RGBA8 pixels
+/// of a `candidate_width` x `candidate_height` capture (exactly `4 * width * height` bytes),
+/// which spares the integration encoding a PNG on every passing comparison.
+///
+/// The call's tolerance is described at `call_tolerance`; `mask_count` pixel masks
+/// `[x, y, width, height]` are at `masks`. `text_region_count` text regions `[x, y, width,
+/// height]` (candidate pixels) are at `text_regions`, compared under `text_color_tolerance` and
+/// `text_max_diff_ratio` (both NaN: the rule's `text:`) in pixel and exact mode.
 ///
 /// # Safety
 /// Each `(ptr, len)` pair must describe a readable buffer of `len` elements (bytes for
 /// `strings` and `candidate`, aligned `u32`s for `lengths`, `4 * mask_count` aligned `u32`s for
-/// `masks`), or be `(null, 0)`, that stays valid for the duration of this call.
+/// `masks`, `4 * text_region_count` for `text_regions`), or be `(null, 0)`, that stays valid for
+/// the duration of this call.
 #[ffi_export]
 #[must_use]
 pub unsafe fn gleon_golden(
@@ -393,12 +462,19 @@ pub unsafe fn gleon_golden(
     lengths_count: usize,
     candidate: *const u8,
     candidate_len: usize,
+    candidate_format: u8,
+    candidate_width: u32,
+    candidate_height: u32,
     tolerance_kind: u8,
     max_diff_ratio: f64,
     min_similarity: f64,
     color_tolerance: f64,
     masks: *const u32,
     mask_count: usize,
+    text_regions: *const u32,
+    text_region_count: usize,
+    text_color_tolerance: f64,
+    text_max_diff_ratio: f64,
 ) -> repr_c::Box<GleonResult> {
     guarded(|| {
         let Some(GleonSession(session)) = session else {
@@ -419,6 +495,16 @@ pub unsafe fn gleon_golden(
             let flat_len = mask_count.checked_mul(4).ok_or("`masks` is too long")?;
             // SAFETY: as above.
             let masks = unsafe { borrow(masks, flat_len, "masks") }?;
+            let text_len = text_region_count
+                .checked_mul(4)
+                .ok_or("`text_regions` is too long")?;
+            // SAFETY: as above.
+            let text_regions = unsafe { borrow(text_regions, text_len, "text_regions") }?;
+            let candidate =
+                call_candidate(candidate_format, candidate_width, candidate_height, candidate)?;
+            if mode == Mode::Update && !matches!(candidate, Candidate::Png(_)) {
+                return Err("update mode takes the candidate as PNG".to_owned());
+            }
             let [golden_path, golden_uri, failures_dir, test_name] =
                 split(strings, lengths, GOLDEN_STRINGS)?;
             Ok(Request {
@@ -435,6 +521,8 @@ pub unsafe fn gleon_golden(
                     color_tolerance,
                 )?,
                 masks: call_masks(masks),
+                text_regions: call_regions(text_regions),
+                text: call_text_tolerance(text_color_tolerance, text_max_diff_ratio)?,
             })
         };
         match request() {
@@ -574,8 +662,13 @@ mod tests {
         mode: u8,
         strings: [&'a str; 4],
         candidate: &'a [u8],
+        /// Format, width and height of the candidate.
+        format: (u8, u32, u32),
         tolerance: (u8, f64, f64, f64),
         masks: (*const u32, usize),
+        text_regions: (*const u32, usize),
+        /// Color tolerance and largest diff ratio of text (NaN: the rule's).
+        text: (f64, f64),
     }
 
     impl Default for Call<'_> {
@@ -584,8 +677,11 @@ mod tests {
                 mode: 0,
                 strings: ["/definitely/missing/golden.png", "a.png", "", ""],
                 candidate: &[],
+                format: (0, 0, 0),
                 tolerance: (0, 0.0, 0.0, 0.0),
                 masks: (std::ptr::null(), 0),
+                text_regions: (std::ptr::null(), 0),
+                text: (f64::NAN, f64::NAN),
             }
         }
     }
@@ -603,12 +699,19 @@ mod tests {
                 lengths.len(),
                 call.candidate.as_ptr(),
                 call.candidate.len(),
+                call.format.0,
+                call.format.1,
+                call.format.2,
                 kind,
                 ratio,
                 similarity,
                 color,
                 call.masks.0,
                 call.masks.1,
+                call.text_regions.0,
+                call.text_regions.1,
+                call.text.0,
+                call.text.1,
             )
         })
     }

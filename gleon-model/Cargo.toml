@@ -15,6 +15,7 @@ workspace = true
 gleon-engine = { path = "../gleon-engine", features = ["schemars"] }
 chrono = { workspace = true }
 globset = { workspace = true }
+image = { workspace = true }
 schemars = { workspace = true, features = ["chrono04"] }
 semver = { workspace = true }
 serde = { workspace = true }

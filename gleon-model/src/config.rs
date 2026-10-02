@@ -434,6 +434,10 @@ pub struct ScreenshotRule {
     /// Optional zones to mask out (ignore) during verification.
     #[serde(default)]
     pub masks: Vec<MaskRule>,
+    /// How much text may differ, in `pixel` mode: integrations that report the text of a
+    /// screenshot compare it under this tolerance and everything else strictly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<crate::tolerance::TextTolerance>,
 }
 
 impl ScreenshotRule {
@@ -582,6 +586,15 @@ impl GleonConfig {
                     rule.diff.color_tolerance
                 )));
             }
+            if let Some(text) = &rule.text {
+                if rule.mode != Mode::Pixel {
+                    return Err(ConfigError::Validation(format!(
+                        "screenshots[{i}].text applies to `mode: pixel` only"
+                    )));
+                }
+                text.validate()
+                    .map_err(|e| ConfigError::Validation(format!("screenshots[{i}].text: {e}")))?;
+            }
             for (j, mask) in rule.masks.iter().enumerate() {
                 for (k, zone) in mask.zones.iter().enumerate() {
                     match zone.width {
@@ -642,6 +655,7 @@ impl Default for GleonConfig {
                 mode: Mode::Pixel,
                 diff: DiffConfig::default(),
                 masks: vec![],
+                text: None,
             }],
             exclude: vec![
                 #[expect(

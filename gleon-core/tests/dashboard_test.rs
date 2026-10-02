@@ -198,6 +198,7 @@ fn sample_history() -> DashboardHistory {
                 diff_pixels: 128,
                 diff_ratio: 128.0 / 60_000.0,
                 headroom: -128.0 / 60_000.0,
+                text: None,
             }),
             ..failure(
                 "cart/checkout",

@@ -270,7 +270,7 @@ screenshots:
     let md = ReportGenerator::render_pr_comment(&cases, &MarkdownReportOptions::default());
     assert!(md.contains("(5 diffs)"), "{md}");
     assert!(
-        md.contains("| `shots/broken` | Error (image): invalid screenshot:"),
+        md.contains("| `shots/broken` | Error (image): candidate image:"),
         "{md}"
     );
     assert!(md.contains("| `shots/new` | Missing Baseline: "), "{md}");

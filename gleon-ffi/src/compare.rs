@@ -1,17 +1,16 @@
-//! Decoding and comparing two PNG-encoded images with the engine.
+//! Comparing two PNG-encoded images: the shared pipeline of `gleon_model::compare`, run
+//! single-threaded and timed.
 
 #![forbid(unsafe_code)]
 
 use std::time::{Duration, Instant};
 
-use gleon_engine::{
-    ComparisonResult, Measurement, compare_images,
-    config::Zone,
-    decode::{DecodeError, decode_rgba},
-    masking::apply_masks,
+use gleon_engine::config::Zone;
+use gleon_model::{
+    case::{Metrics, RegionMetrics},
+    compare::{Candidate, CompareError, Compared, Text},
+    tolerance::Tolerance,
 };
-use gleon_model::{case::Metrics, tolerance::Tolerance};
-use image::{ImageFormat, RgbaImage};
 
 use crate::error::{ErrorKind, Failure};
 
@@ -22,6 +21,8 @@ pub enum Comparison {
     Match {
         /// Whole-image metrics, reported for matches too (headroom to the tolerance).
         metrics: Metrics,
+        /// The compared regions (the whole image, then the worst tile of text).
+        regions: Vec<RegionMetrics>,
         /// Masks that reached beyond the image and were clipped.
         clamped_masks: usize,
         /// Time spent decoding and comparing.
@@ -31,6 +32,8 @@ pub enum Comparison {
     Mismatch {
         /// Whole-image metrics.
         metrics: Metrics,
+        /// The compared regions (the whole image, then the worst tile of text).
+        regions: Vec<RegionMetrics>,
         /// PNG-encoded diff visualization.
         diff_png: Vec<u8>,
         /// Masks that reached beyond the image and were clipped.
@@ -51,23 +54,6 @@ pub enum Comparison {
     Error(Failure),
 }
 
-fn decode(label: &str, bytes: &[u8]) -> Result<RgbaImage, Failure> {
-    decode_rgba(bytes)
-        .map_err(|e: DecodeError| Failure::new(ErrorKind::Image, format!("{label} image: {e}")))
-}
-
-/// Encodes `image` as PNG.
-///
-/// # Errors
-/// Returns the encoder's message.
-pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    image
-        .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
-        .map(|()| bytes)
-        .map_err(|e| format!("failed to encode diff image: {e}"))
-}
-
 /// Runs the engine single-threaded inside this library.
 ///
 /// The test runners of the integrations (`flutter test`, Playwright) run their workers as
@@ -85,78 +71,59 @@ fn limit_engine_threads() {
     });
 }
 
-/// Compares the PNGs `golden` and `candidate` under `tolerance`.
-///
-/// Masks are applied to both images before comparing, exactly like `gleon diff`.
+/// Compares the PNG `golden` with `candidate` under `tolerance` with `masks` and `text`, exactly
+/// like `gleon diff` (`gleon_model::compare::compare`).
 #[must_use]
 pub fn compare(
     golden: &[u8],
-    candidate: &[u8],
+    candidate: Candidate<'_>,
     tolerance: &Tolerance,
     masks: &[Zone],
+    text: Option<Text<'_>>,
 ) -> Comparison {
     limit_engine_threads();
-    let image_error = |message: String| Failure::new(ErrorKind::Image, message);
-    let run = || -> Result<Comparison, Failure> {
-        let (mode, config) = tolerance.engine_config();
-        let started = Instant::now();
-        let mut golden_img = decode("golden", golden)?;
-        let mut candidate_img = decode("candidate", candidate)?;
-        let golden_size = golden_img.dimensions();
-        let candidate_size = candidate_img.dimensions();
-        let clamped_masks = if !masks.is_empty() && golden_size == candidate_size {
-            apply_masks(&mut candidate_img, masks);
-            apply_masks(&mut golden_img, masks)
-        } else {
-            0
-        };
-        let total_pixels = u64::from(golden_size.0) * u64::from(golden_size.1);
-        let metrics_of = |measurement| metrics_of(&measurement, tolerance, total_pixels);
-        match compare_images(&golden_img, &candidate_img, mode, &config) {
-            ComparisonResult::Match { measurement } => Ok(Comparison::Match {
-                metrics: metrics_of(measurement)?,
-                clamped_masks,
-                native: started.elapsed(),
-            }),
-            ComparisonResult::TooLarge {
-                size: (width, height),
-            } => Err(image_error(format!(
-                "{width}x{height} exceeds the SSIM analysis budget of {} pixels; use exact or \
-                 pixel mode or a smaller capture",
-                gleon_engine::ssim::MAX_ANALYSIS_PIXELS
-            ))),
-            ComparisonResult::DimensionMismatch { .. } => Ok(Comparison::DimensionMismatch {
-                golden: golden_size,
-                candidate: candidate_size,
-                native: started.elapsed(),
-            }),
-            ComparisonResult::Mismatch {
-                measurement,
-                diff_image,
-            } => Ok(Comparison::Mismatch {
-                metrics: metrics_of(measurement)?,
-                diff_png: encode_png(&diff_image).map_err(image_error)?,
-                clamped_masks,
-                native: started.elapsed(),
-            }),
+    let started = Instant::now();
+    let compared = gleon_model::compare::compare(golden, candidate, tolerance, masks, text);
+    let native = started.elapsed();
+    match compared {
+        Ok(comparison) => {
+            let clamped_masks = comparison.clamped_masks;
+            match comparison.compared {
+                Compared::Match { metrics, regions } => Comparison::Match {
+                    metrics,
+                    regions,
+                    clamped_masks,
+                    native,
+                },
+                Compared::Mismatch {
+                    metrics,
+                    regions,
+                    diff_png,
+                } => Comparison::Mismatch {
+                    metrics,
+                    regions,
+                    diff_png,
+                    clamped_masks,
+                    native,
+                },
+                Compared::DimensionMismatch { golden, candidate } => {
+                    Comparison::DimensionMismatch {
+                        golden,
+                        candidate,
+                        native,
+                    }
+                }
+            }
         }
-    };
-    run().unwrap_or_else(Comparison::Error)
-}
-
-/// The metrics of `measurement`; an internal failure if the engine measured in another mode than
-/// `tolerance` asked for (a bug).
-fn metrics_of(
-    measurement: &Measurement,
-    tolerance: &Tolerance,
-    total_pixels: u64,
-) -> Result<Metrics, Failure> {
-    Metrics::from_measurement(measurement, tolerance, total_pixels).ok_or_else(|| {
-        Failure::new(
-            ErrorKind::Internal,
-            "internal error: the engine measurement does not match the tolerance",
-        )
-    })
+        Err(error) => {
+            let kind = match error {
+                CompareError::Internal => ErrorKind::Internal,
+                CompareError::CandidatePixels { .. } => ErrorKind::InvalidInput,
+                _ => ErrorKind::Image,
+            };
+            Comparison::Error(Failure::new(kind, error.to_string()))
+        }
+    }
 }
 
 #[cfg(all(test, not(miri)))]
@@ -172,182 +139,58 @@ fn metrics_of(
 )]
 mod tests {
     use gleon_engine::config::Dimension;
+    use gleon_model::compare::encode_png;
     use image::{ImageBuffer, Rgba};
 
     use super::*;
 
-    pub(crate) fn png(width: u32, height: u32, paint: impl Fn(u32, u32) -> Rgba<u8>) -> Vec<u8> {
-        let img: RgbaImage = ImageBuffer::from_fn(width, height, paint);
-        encode_png(&img).unwrap()
-    }
-
     const RED: Rgba<u8> = Rgba([255, 0, 0, 255]);
-    const BLUE: Rgba<u8> = Rgba([0, 0, 255, 255]);
     const EXACT: Tolerance = Tolerance::Exact {};
-    const SSIM: Tolerance = Tolerance::Ssim {
-        min_similarity: 0.8,
-        color_tolerance: 8.0,
-    };
 
-    fn one_blue_pixel(x: u32, y: u32) -> Rgba<u8> {
-        if (x, y) == (3, 3) { BLUE } else { RED }
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        encode_png(&ImageBuffer::from_pixel(width, height, RED)).unwrap()
     }
 
-    /// The metrics of a match or mismatch.
-    fn metrics(comparison: &Comparison) -> Option<Metrics> {
-        match comparison {
-            Comparison::Match { metrics, .. } | Comparison::Mismatch { metrics, .. } => {
-                Some(*metrics)
-            }
-            Comparison::DimensionMismatch { .. } | Comparison::Error(_) => None,
-        }
-    }
-
+    /// The shared comparison (tested in `gleon_model::compare`) reaches the integration with
+    /// its clipped masks and timing.
     #[test]
-    fn test_exact_match_reports_metrics() {
-        let a = png(10, 10, |_, _| RED);
-        let comparison = compare(&a, &a, &EXACT, &[]);
-        assert!(matches!(comparison, Comparison::Match { .. }));
-        assert_eq!(
-            metrics(&comparison),
-            Some(Metrics::Pixel {
-                total_pixels: 100,
-                diff_pixels: 0,
-                diff_ratio: 0.0,
-                headroom: 0.0
-            })
-        );
-    }
-
-    #[test]
-    fn test_exact_single_pixel_mismatch_has_diff() {
-        let a = png(10, 10, |_, _| RED);
-        let b = png(10, 10, one_blue_pixel);
-        let comparison = compare(&a, &b, &EXACT, &[]);
-        assert!(matches!(&comparison, Comparison::Mismatch { diff_png, .. }
-            if image::load_from_memory(diff_png).is_ok()));
-        assert!(matches!(
-            metrics(&comparison),
-            Some(Metrics::Pixel { diff_pixels: 1, headroom, .. }) if headroom == -0.01
-        ));
-    }
-
-    #[test]
-    fn test_pixel_threshold_tolerates_small_change() {
-        let a = png(10, 10, |_, _| RED);
-        let b = png(10, 10, one_blue_pixel);
-        let tolerance = Tolerance::Pixel {
-            max_diff_ratio: 0.05,
-        };
-        assert!(matches!(
-            compare(&a, &b, &tolerance, &[]),
-            Comparison::Match {
-                metrics: Metrics::Pixel { diff_pixels: 1, .. },
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_ssim_reports_policy_metrics() {
-        let a = png(64, 64, |_, _| RED);
-        let b = png(64, 64, |x, _| if x < 32 { BLUE } else { RED });
-        let comparison = compare(&a, &b, &SSIM, &[]);
-        assert!(matches!(comparison, Comparison::Mismatch { .. }));
-        assert!(matches!(
-            metrics(&comparison),
-            Some(Metrics::Ssim {
-                peak_excess,
-                failing_region: Some(region),
-                changed_pixels: 2048,
-                headroom,
-                ..
-            }) if peak_excess > 100.0 && headroom.color < 0.0 && region.width == 32
-        ));
-    }
-
-    #[test]
-    fn test_masks_hide_changed_region() {
-        let a = png(10, 10, |_, _| RED);
-        let b = png(10, 10, |x, y| if x < 2 && y < 2 { BLUE } else { RED });
-        let mask = |x, width| Zone {
-            x,
+    fn test_comparisons_carry_clipped_masks() {
+        let a = png(10, 10);
+        let mask = Zone {
+            x: 9,
             y: 0,
-            width: Dimension::Pixels(width),
+            width: Dimension::Pixels(5),
             height: Dimension::Pixels(2),
         };
         assert!(matches!(
-            compare(&a, &b, &EXACT, &[mask(0, 2)]),
-            Comparison::Match {
-                clamped_masks: 0,
-                ..
-            }
-        ));
-        assert!(matches!(
-            compare(&a, &b, &EXACT, &[mask(0, 2), mask(9, 5)]),
+            compare(&a, Candidate::Png(&a), &EXACT, &[mask], None),
             Comparison::Match {
                 clamped_masks: 1,
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn test_dimension_mismatch_reports_sizes_with_masks() {
-        let a = png(10, 10, |_, _| RED);
-        let b = png(12, 10, |_, _| RED);
-        let mask = Zone {
-            x: 0,
-            y: 0,
-            width: Dimension::Percent(50.0),
-            height: Dimension::Pixels(2),
-        };
-        let comparison = compare(&a, &b, &EXACT, &[mask]);
         assert!(matches!(
-            comparison,
+            compare(&a, Candidate::Png(&png(12, 10)), &EXACT, &[], None),
             Comparison::DimensionMismatch {
                 golden: (10, 10),
                 candidate: (12, 10),
                 ..
             }
         ));
-        assert_eq!(metrics(&comparison), None);
-    }
-
-    #[test]
-    fn test_ssim_over_analysis_budget_is_an_error() {
-        let big = png(4097, 4096, |_, _| RED);
-        let comparison = compare(&big, &big, &SSIM, &[]);
-        assert_eq!(metrics(&comparison), None);
-        assert!(matches!(
-            comparison,
-            Comparison::Error(Failure { kind: ErrorKind::Image, message })
-                if message.contains("SSIM analysis budget")
-        ));
     }
 
     #[test]
     fn test_corrupt_images_are_errors_not_passes() {
-        let a = png(4, 4, |_, _| RED);
+        let a = png(4, 4);
         for (golden, candidate, needle) in [
             (&b"garbage"[..], &a[..], "golden image"),
             (&a[..], &b"garbage"[..], "candidate image"),
         ] {
             assert!(matches!(
-                compare(golden, candidate, &EXACT, &[]),
+                compare(golden, Candidate::Png(candidate), &EXACT, &[], None),
                 Comparison::Error(Failure { kind: ErrorKind::Image, message })
                     if message.contains(needle)
             ));
         }
-    }
-
-    #[test]
-    fn test_a_measurement_of_another_mode_is_an_internal_error() {
-        let pixel = Measurement::Pixel { diff_count: 0 };
-        assert!(metrics_of(&pixel, &EXACT, 1).is_ok());
-        assert!(matches!(
-            metrics_of(&pixel, &SSIM, 1),
-            Err(Failure { kind: ErrorKind::Internal, message }) if message.contains("internal error")
-        ));
     }
 }
