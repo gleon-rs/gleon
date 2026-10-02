@@ -193,12 +193,22 @@ impl TextTolerance {
         Ok(())
     }
 
+    /// `self` with `-0.0` values as `0.0`, like [`Tolerance::without_negative_zero`].
+    #[must_use]
+    pub const fn without_negative_zero(self) -> Self {
+        // `-0.0 + 0.0` is `0.0`; every other value (NaN included) stays as it is.
+        Self {
+            color_tolerance: self.color_tolerance + 0.0,
+            max_diff_ratio: self.max_diff_ratio + 0.0,
+        }
+    }
+
     /// The engine policy implementing this tolerance.
     #[must_use]
     pub const fn policy(&self) -> gleon_engine::TextPolicy {
         gleon_engine::TextPolicy {
-            color_tolerance: self.color_tolerance + 0.0,
-            max_diff_ratio: self.max_diff_ratio + 0.0,
+            color_tolerance: self.color_tolerance,
+            max_diff_ratio: self.max_diff_ratio,
         }
     }
 }
@@ -326,6 +336,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Tolerance::from_rule(Mode::Ssim, &zeros)).unwrap(),
             r#"{"kind":"ssim","min_similarity":0.0,"color_tolerance":0.0}"#
+        );
+        let text = TextTolerance {
+            color_tolerance: -0.0,
+            max_diff_ratio: -0.0,
+        };
+        assert_eq!(
+            serde_json::to_string(&text.without_negative_zero()).unwrap(),
+            r#"{"color_tolerance":0.0,"max_diff_ratio":0.0}"#
         );
         let kept = Tolerance::Ssim {
             min_similarity: -0.5,

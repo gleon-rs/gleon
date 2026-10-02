@@ -149,7 +149,8 @@ fn execute_pixel_comparison(
     threshold: f64,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult {
-    let analysis = pixel::analyze(baseline, actual, regions);
+    let compared = pixel::compare(baseline, actual, regions);
+    let analysis = compared.analysis;
     let strict_passes = if threshold == 0.0 || analysis.checked_pixels == 0 {
         analysis.diff_pixels == 0
     } else {
@@ -181,7 +182,7 @@ fn execute_pixel_comparison(
     // Only generate the diff image once we know there's actually a mismatch to report.
     ComparisonResult::Mismatch {
         measurement,
-        diff_image: pixel::diff_image(baseline, actual, regions),
+        diff_image: compared.diff_image(baseline, actual),
     }
 }
 

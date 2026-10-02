@@ -10,7 +10,7 @@ use gleon_engine::{
     decode::{DecodeError, decode_rgba, fits_budget},
     masking::{apply_masks, resolve_zones},
 };
-use image::RgbaImage;
+use image::{ExtendedColorType, ImageEncoder, RgbaImage, codecs::png::PngEncoder};
 
 use crate::{
     case::{CaseErrorKind, Metrics, RegionMetrics, text},
@@ -45,9 +45,17 @@ impl Candidate<'_> {
                 width,
                 height,
                 pixels,
-            } => RgbaImage::from_raw(width, height, pixels.to_vec())
-                .and_then(|image| encode_png(&image).ok())
-                .map(std::borrow::Cow::Owned),
+            } => {
+                // Encoded in place: a copy of the pixels would cost as much as a frame.
+                if !is_rgba_len(width, height, pixels.len()) {
+                    return None;
+                }
+                let mut png = Vec::new();
+                PngEncoder::new(&mut png)
+                    .write_image(pixels, width, height, ExtendedColorType::Rgba8)
+                    .ok()
+                    .map(|()| std::borrow::Cow::Owned(png))
+            }
         }
     }
 
@@ -66,23 +74,32 @@ impl Candidate<'_> {
                         height,
                     }));
                 }
-                RgbaImage::from_raw(width, height, pixels.to_vec()).ok_or(
-                    CompareError::CandidatePixels {
+                // Checked before the copy, so a wrong length costs nothing.
+                if !is_rgba_len(width, height, pixels.len()) {
+                    return Err(CompareError::CandidatePixels {
                         width,
                         height,
                         len: pixels.len(),
-                    },
-                )
+                    });
+                }
+                // The length is right, so this cannot fail.
+                RgbaImage::from_raw(width, height, pixels.to_vec()).ok_or(CompareError::Internal)
             }
         }
     }
+}
+
+/// Whether `len` bytes are the straight RGBA8 pixels of a `width` x `height` image.
+#[must_use]
+pub fn is_rgba_len(width: u32, height: u32, len: usize) -> bool {
+    u64::try_from(len).ok() == Some(u64::from(width) * u64::from(height) * 4)
 }
 
 /// The text of a candidate, compared under its own tolerance in pixel and exact mode (SSIM
 /// compares it like everything else).
 #[derive(Debug, Clone, Copy)]
 pub struct Text<'a> {
-    /// Text regions in candidate pixels (clipped to the image).
+    /// Text regions in candidate pixels; [`compare`] clips them to the image.
     pub regions: &'a [Region],
     /// Their tolerance.
     pub tolerance: TextTolerance,
@@ -514,6 +531,35 @@ mod tests {
         assert_eq!(err.kind(), CaseErrorKind::InvalidInput);
         assert_eq!(err.to_string(), "candidate pixels: 12 bytes for 10x10 RGBA");
         assert!(short.to_png().is_none());
+
+        // Surplus bytes are as wrong as missing ones.
+        let mut surplus = b.as_raw().clone();
+        surplus.push(0);
+        let long = Candidate::Rgba {
+            width: 10,
+            height: 10,
+            pixels: &surplus,
+        };
+        assert_eq!(
+            compare(&a, long, &EXACT, &[], None).unwrap_err().kind(),
+            CaseErrorKind::InvalidInput
+        );
+        assert!(long.to_png().is_none());
+
+        // A size over the decoding budget is refused before its pixels are looked at.
+        let huge = Candidate::Rgba {
+            width: 20_000,
+            height: 1,
+            pixels: &[],
+        };
+        assert!(matches!(
+            compare(&a, huge, &EXACT, &[], None),
+            Err(CompareError::Candidate(DecodeError::TooLarge {
+                width: 20_000,
+                height: 1
+            }))
+        ));
+        assert_eq!(Candidate::Png(&a).to_png().unwrap().as_ref(), &a[..]);
     }
 
     /// Text regions (clipped to the image) are compared under their tolerance, the rest

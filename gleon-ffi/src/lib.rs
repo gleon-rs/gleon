@@ -49,7 +49,7 @@ use gleon_engine::{
 };
 use gleon_model::{
     case::RUN_ID_ENV,
-    compare::Candidate,
+    compare::{Candidate, is_rgba_len},
     config::{ARTIFACTS_ENV, METRICS_ENV},
     tolerance::{TextTolerance, Tolerance},
 };
@@ -368,7 +368,8 @@ fn call_text_tolerance(
     let text = TextTolerance {
         color_tolerance,
         max_diff_ratio,
-    };
+    }
+    .without_negative_zero();
     text.validate()
         .map(|()| Some(text))
         .map_err(|e| format!("invalid text tolerance: {e}"))
@@ -384,11 +385,11 @@ fn call_candidate(
     match format {
         0 => Ok(Candidate::Png(bytes)),
         1 => {
-            let expected = u64::from(width) * u64::from(height) * 4;
-            if u64::try_from(bytes.len()).ok() != Some(expected) {
+            if !is_rgba_len(width, height, bytes.len()) {
                 return Err(format!(
-                    "`candidate` has {} bytes, {width}x{height} RGBA needs {expected}",
-                    bytes.len()
+                    "`candidate` has {} bytes, {width}x{height} RGBA needs {}",
+                    bytes.len(),
+                    u64::from(width) * u64::from(height) * 4
                 ));
             }
             Ok(Candidate::Rgba {
@@ -403,10 +404,8 @@ fn call_candidate(
 
 /// Text regions from `[x, y, width, height]` quadruples.
 fn call_regions(flat: &[u32]) -> Vec<Region> {
-    flat.as_chunks::<4>()
-        .0
-        .iter()
-        .map(|&[x, y, width, height]| Region {
+    quadruples(flat)
+        .map(|[x, y, width, height]| Region {
             x,
             y,
             width,
@@ -417,16 +416,19 @@ fn call_regions(flat: &[u32]) -> Vec<Region> {
 
 /// Pixel masks from `[x, y, width, height]` quadruples.
 fn call_masks(flat: &[u32]) -> Vec<Zone> {
-    flat.as_chunks::<4>()
-        .0
-        .iter()
-        .map(|&[x, y, width, height]| Zone {
+    quadruples(flat)
+        .map(|[x, y, width, height]| Zone {
             x,
             y,
             width: Dimension::Pixels(width),
             height: Dimension::Pixels(height),
         })
         .collect()
+}
+
+/// The `[x, y, width, height]` quadruples of `flat` (a trailing partial one is ignored).
+fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
+    flat.as_chunks::<4>().0.iter().copied()
 }
 
 /// Compares `candidate` against the golden file (`mode` 0), or writes it there (`mode` 1,
@@ -506,9 +508,6 @@ pub unsafe fn gleon_golden(
                 candidate_height,
                 candidate,
             )?;
-            if mode == Mode::Update && !matches!(candidate, Candidate::Png(_)) {
-                return Err("update mode takes the candidate as PNG".to_owned());
-            }
             let [golden_path, golden_uri, failures_dir, test_name] =
                 split(strings, lengths, GOLDEN_STRINGS)?;
             Ok(Request {
@@ -771,6 +770,33 @@ mod tests {
             assert_eq!(answer.error_kind, INVALID_INPUT, "{needle}");
             assert!(answer.message.contains(needle), "{}", answer.message);
         }
+    }
+
+    /// Text regions and a text tolerance cross the C contract; a valid call goes on to the
+    /// golden (missing here).
+    #[test]
+    #[cfg_attr(miri, ignore = "touches the file system")]
+    fn test_text_regions_cross_the_contract() {
+        let session = new_session(SESSION_ENV, UNSET);
+        let pixels = [0u8; 4 * 4 * 4];
+        let regions = [0u32, 0, 4, 2, 1, 1, 2, 2];
+        let answer = golden(
+            Some(&*session),
+            Call {
+                candidate: &pixels,
+                format: (1, 4, 4),
+                text_regions: (regions.as_ptr(), 2),
+                text: (24.0, 0.1),
+                ..Call::default()
+            },
+        );
+        assert_eq!(
+            answer.verdict,
+            golden::Verdict::Missing as u8,
+            "{}",
+            answer.message
+        );
+        assert_eq!(answer.error_kind, ErrorKind::None as u8);
     }
 
     #[test]

@@ -172,7 +172,9 @@ impl RuleSet {
             index,
             name: name.to_owned(),
             tolerance: Tolerance::from_rule(rule.mode, &rule.diff),
-            text: rule.text,
+            text: rule
+                .text
+                .map(crate::tolerance::TextTolerance::without_negative_zero),
             masks: rule.matched_mask_zones(std::path::Path::new(normalized.as_ref())),
         })
     }

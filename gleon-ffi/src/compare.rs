@@ -1,4 +1,4 @@
-//! Comparing two PNG-encoded images: the shared pipeline of `gleon_model::compare`, run
+//! Comparing a golden with a candidate: the shared pipeline of `gleon_model::compare`, run
 //! single-threaded and timed.
 
 #![forbid(unsafe_code)]
@@ -7,51 +7,19 @@ use std::time::{Duration, Instant};
 
 use gleon_engine::config::Zone;
 use gleon_model::{
-    case::{Metrics, RegionMetrics},
-    compare::{Candidate, CompareError, Compared, Text},
+    compare::{Candidate, Comparison, Text},
     tolerance::Tolerance,
 };
 
-use crate::error::{ErrorKind, Failure};
+use crate::error::Failure;
 
-/// Result of comparing two PNGs.
+/// A comparison and the time it took.
 #[derive(Debug)]
-pub enum Comparison {
-    /// Within the tolerance.
-    Match {
-        /// Whole-image metrics, reported for matches too (headroom to the tolerance).
-        metrics: Metrics,
-        /// The compared regions (the whole image, then the worst tile of text).
-        regions: Vec<RegionMetrics>,
-        /// Masks that reached beyond the image and were clipped.
-        clamped_masks: usize,
-        /// Time spent decoding and comparing.
-        native: Duration,
-    },
-    /// Beyond the tolerance.
-    Mismatch {
-        /// Whole-image metrics.
-        metrics: Metrics,
-        /// The compared regions (the whole image, then the worst tile of text).
-        regions: Vec<RegionMetrics>,
-        /// PNG-encoded diff visualization.
-        diff_png: Vec<u8>,
-        /// Masks that reached beyond the image and were clipped.
-        clamped_masks: usize,
-        /// Time spent decoding, comparing and encoding the diff.
-        native: Duration,
-    },
-    /// Different image sizes; no pixel comparison was attempted.
-    DimensionMismatch {
-        /// Width and height of the golden.
-        golden: (u32, u32),
-        /// Width and height of the candidate.
-        candidate: (u32, u32),
-        /// Time spent decoding.
-        native: Duration,
-    },
-    /// Invalid input (a corrupt PNG, an image over the SSIM budget); never a pass.
-    Error(Failure),
+pub struct Timed {
+    /// What the comparison found, or why the images could not be compared (never a pass).
+    pub comparison: Result<Comparison, Failure>,
+    /// Time spent decoding, comparing and encoding the diff.
+    pub native: Duration,
 }
 
 /// Runs the engine single-threaded inside this library.
@@ -80,49 +48,14 @@ pub fn compare(
     tolerance: &Tolerance,
     masks: &[Zone],
     text: Option<Text<'_>>,
-) -> Comparison {
+) -> Timed {
     limit_engine_threads();
     let started = Instant::now();
-    let compared = gleon_model::compare::compare(golden, candidate, tolerance, masks, text);
-    let native = started.elapsed();
-    match compared {
-        Ok(comparison) => {
-            let clamped_masks = comparison.clamped_masks;
-            match comparison.compared {
-                Compared::Match { metrics, regions } => Comparison::Match {
-                    metrics,
-                    regions,
-                    clamped_masks,
-                    native,
-                },
-                Compared::Mismatch {
-                    metrics,
-                    regions,
-                    diff_png,
-                } => Comparison::Mismatch {
-                    metrics,
-                    regions,
-                    diff_png,
-                    clamped_masks,
-                    native,
-                },
-                Compared::DimensionMismatch { golden, candidate } => {
-                    Comparison::DimensionMismatch {
-                        golden,
-                        candidate,
-                        native,
-                    }
-                }
-            }
-        }
-        Err(error) => {
-            let kind = match error {
-                CompareError::Internal => ErrorKind::Internal,
-                CompareError::CandidatePixels { .. } => ErrorKind::InvalidInput,
-                _ => ErrorKind::Image,
-            };
-            Comparison::Error(Failure::new(kind, error.to_string()))
-        }
+    let comparison = gleon_model::compare::compare(golden, candidate, tolerance, masks, text)
+        .map_err(|error| Failure::new(error.kind().into(), error.to_string()));
+    Timed {
+        comparison,
+        native: started.elapsed(),
     }
 }
 
@@ -139,10 +72,11 @@ pub fn compare(
 )]
 mod tests {
     use gleon_engine::config::Dimension;
-    use gleon_model::compare::encode_png;
+    use gleon_model::compare::{Compared, encode_png};
     use image::{ImageBuffer, Rgba};
 
     use super::*;
+    use crate::error::ErrorKind;
 
     const RED: Rgba<u8> = Rgba([255, 0, 0, 255]);
     const EXACT: Tolerance = Tolerance::Exact {};
@@ -163,19 +97,21 @@ mod tests {
             height: Dimension::Pixels(2),
         };
         assert!(matches!(
-            compare(&a, Candidate::Png(&a), &EXACT, &[mask], None),
-            Comparison::Match {
+            compare(&a, Candidate::Png(&a), &EXACT, &[mask], None).comparison,
+            Ok(Comparison {
+                compared: Compared::Match { .. },
                 clamped_masks: 1,
-                ..
-            }
+            })
         ));
         assert!(matches!(
-            compare(&a, Candidate::Png(&png(12, 10)), &EXACT, &[], None),
-            Comparison::DimensionMismatch {
-                golden: (10, 10),
-                candidate: (12, 10),
+            compare(&a, Candidate::Png(&png(12, 10)), &EXACT, &[], None).comparison,
+            Ok(Comparison {
+                compared: Compared::DimensionMismatch {
+                    golden: (10, 10),
+                    candidate: (12, 10),
+                },
                 ..
-            }
+            })
         ));
     }
 
@@ -187,9 +123,8 @@ mod tests {
             (&a[..], &b"garbage"[..], "candidate image"),
         ] {
             assert!(matches!(
-                compare(golden, Candidate::Png(candidate), &EXACT, &[], None),
-                Comparison::Error(Failure { kind: ErrorKind::Image, message })
-                    if message.contains(needle)
+                compare(golden, Candidate::Png(candidate), &EXACT, &[], None).comparison,
+                Err(Failure { kind: ErrorKind::Image, message }) if message.contains(needle)
             ));
         }
     }

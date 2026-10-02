@@ -39,6 +39,18 @@ impl ErrorKind {
     }
 }
 
+impl From<CaseErrorKind> for ErrorKind {
+    fn from(kind: CaseErrorKind) -> Self {
+        match kind {
+            CaseErrorKind::InvalidInput => Self::InvalidInput,
+            CaseErrorKind::Config => Self::Config,
+            CaseErrorKind::Io => Self::Io,
+            CaseErrorKind::Image => Self::Image,
+            CaseErrorKind::Internal => Self::Internal,
+        }
+    }
+}
+
 /// A failed call: its class and the complete message to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {

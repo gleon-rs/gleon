@@ -26,14 +26,14 @@ use gleon_model::{
         CaseOutcome, CaseReport, CaseTimings, GoldenImage, Metrics, RegionMetrics, Source,
         TestInfo,
     },
-    compare::{Candidate, Text},
+    compare::{Candidate, Compared, Comparison, Text},
     fs::Durability,
     platform::PlatformConfig,
     tolerance::{TextTolerance, Tolerance},
 };
 
 use crate::{
-    compare::{self, Comparison},
+    compare::{self, Timed},
     error::{ErrorKind, Failure},
     session::{ArtifactNames, Plan, Session},
     text,
@@ -213,6 +213,11 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
         encoded: OnceCell::new(),
         started,
     };
+    // The call asked for a text tolerance that cannot apply (an SSIM rule, or a candidate
+    // without text regions): say so instead of comparing the text like everything else
+    // silently.
+    let unused_text = (request.text.is_some() && call.text().is_none())
+        .then(|| text::unused_text_tolerance(request.golden_uri));
     let finished = match golden.as_ref().map(Option::as_deref) {
         Err(reason) => call.error(
             Failure::io(text::could_not_compare(request.golden_uri, reason)),
@@ -264,7 +269,7 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
             )
         }
     };
-    finished.warn(warning)
+    finished.warn(warning).warn(unused_text)
 }
 
 /// The warning for `count` masks of `golden_uri` that reached beyond the image, if any.
@@ -272,16 +277,23 @@ fn clamped_masks(golden_uri: &str, count: usize) -> Option<String> {
     (count > 0).then(|| text::clamped_masks(golden_uri, count))
 }
 
-/// Finishes `call` according to the engine's `comparison`.
-fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
+/// Finishes `call` according to the engine's comparison.
+fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
     let uri = call.request.golden_uri;
-    match comparison {
-        Comparison::Match {
-            metrics,
-            regions,
-            clamped_masks: clamped,
-            native,
-        } => call
+    let Comparison {
+        compared,
+        clamped_masks: clamped,
+    } = match comparison {
+        Ok(comparison) => comparison,
+        Err(Failure { kind, message }) => {
+            return call.error(
+                Failure::new(kind, text::could_not_compare(uri, &message)),
+                message,
+            );
+        }
+    };
+    match compared {
+        Compared::Match { metrics, regions } => call
             .finish(
                 CaseOutcome::Match,
                 Details {
@@ -294,15 +306,7 @@ fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
                 String::new,
             )
             .warn(clamped_masks(uri, clamped)),
-        Comparison::Error(Failure { kind, message }) => call.error(
-            Failure::new(kind, text::could_not_compare(uri, &message)),
-            message,
-        ),
-        Comparison::DimensionMismatch {
-            golden,
-            candidate,
-            native,
-        } => {
+        Compared::DimensionMismatch { golden, candidate } => {
             let summary = text::dimension_summary(golden, candidate);
             let reason = format!("image sizes differ: {summary}.");
             let details = Details {
@@ -318,12 +322,10 @@ fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
                 || call.failure(&reason, None),
             )
         }
-        Comparison::Mismatch {
+        Compared::Mismatch {
             metrics,
             regions,
             diff_png,
-            clamped_masks: clamped,
-            native,
         } => {
             let summary = text::metrics_summary(&metrics);
             let mut tolerance = text::tolerance(&call.plan.tolerance);
@@ -1176,9 +1178,24 @@ metrics:
             min_similarity: 0.5,
             color_tolerance: 255.0,
         };
-        let finished = fixture.compare_raw(&session, &noisy, Some(ssim), text, None);
+        let finished = fixture.compare_raw(&session, &noisy, Some(ssim), text.clone(), None);
         assert_eq!(finished.verdict, Verdict::Mismatch, "{}", finished.message);
         assert_eq!(fixture.case().comparison.text, None);
+        assert!(finished.warning.is_empty(), "the rule's text: no warning");
+
+        // A text tolerance of the call that cannot apply warns: under SSIM, and without text
+        // regions (byte inputs).
+        for (tolerance, regions) in [(Some(ssim), text), (None, Vec::new())] {
+            let finished =
+                fixture.compare_raw(&session, &noisy, tolerance, regions, Some(strict_text));
+            assert!(
+                finished
+                    .warning
+                    .contains("the text tolerance of golden \"goldens/a.png\" did not apply"),
+                "{}",
+                finished.warning
+            );
+        }
     }
 
     #[test]

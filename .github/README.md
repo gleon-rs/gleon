@@ -150,7 +150,8 @@ screenshots:
     # Optional, 'pixel' only: integrations that report the text of a screenshot (the Flutter package)
     # compare it under this tolerance and everything else strictly: a text pixel counts as equal
     # while no channel differs by more than `color_tolerance`, and the text passes while every 16x16
-    # tile has at most `max_diff_ratio` differing pixels. `gleon diff` sees no text.
+    # square of it (wherever it starts) has at most `max_diff_ratio` differing pixels. `gleon diff`
+    # sees no text.
     text:
       color_tolerance: 24 # 8-bit units [0 - 255]
       max_diff_ratio: 0.1 # [0.0 - 1.0]
