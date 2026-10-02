@@ -7,7 +7,9 @@
 
 #![forbid(unsafe_code)]
 
-pub use gleon_model::case::text::{dimension_summary, metrics_summary, tolerance};
+use std::fmt::Write as _;
+
+pub use gleon_model::case::text::{dimension_summary, metrics_summary, text_tolerance, tolerance};
 use gleon_model::{
     case::{
         CaseOutcome, Metrics,
@@ -65,6 +67,7 @@ pub fn console_line(
                 diff_pixels,
                 diff_ratio,
                 headroom,
+                text,
                 ..
             }),
             Tolerance::Pixel { .. } | Tolerance::Exact {},
@@ -74,12 +77,23 @@ pub fn console_line(
                 Tolerance::Pixel { max_diff_ratio } => max_diff_ratio,
                 Tolerance::Exact {} | Tolerance::Ssim { .. } => 0.0,
             };
-            format!(
+            let mut detail = format!(
                 "pixel {}% ({diff_pixels} px, ≤{}%, {}%)",
                 percent(diff_ratio),
                 percent(max_diff_ratio),
                 signed(decimal(headroom * 100.0, 2, MAX_DECIMALS))
-            )
+            );
+            // Text can fail on its own, so its line shows it too.
+            if let Some(text) = text {
+                let _infallible = write!(
+                    detail,
+                    "  text {}% of a tile (≤{}%, {}%)",
+                    percent(text.worst_tile_diff_ratio),
+                    percent(text.worst_tile_diff_ratio + text.headroom),
+                    signed(decimal(text.headroom * 100.0, 2, MAX_DECIMALS))
+                );
+            }
+            detail
         }
         _ => match outcome {
             CaseOutcome::Identical | CaseOutcome::Updated | CaseOutcome::Missing => {
@@ -108,6 +122,15 @@ pub fn clamped_masks(golden_uri: &str, count: usize) -> String {
     format!(
         "gleon: {count} {masks} of golden \"{golden_uri}\" {reach} beyond the image and {were} \
          clipped to it."
+    )
+}
+
+/// The call's text tolerance of `golden_uri` could not apply, so its text was compared like
+/// everything else.
+pub fn unused_text_tolerance(golden_uri: &str) -> String {
+    format!(
+        "gleon: the text tolerance of golden \"{golden_uri}\" did not apply: text is compared \
+         under it for widgets only, in pixel and exact mode."
     )
 }
 
@@ -201,6 +224,7 @@ mod tests {
             diff_pixels: 2,
             diff_ratio: 0.02,
             headroom: -0.01,
+            text: None,
         };
         assert_eq!(
             console_line(
@@ -220,6 +244,7 @@ mod tests {
             diff_pixels: 0,
             diff_ratio: 0.0,
             headroom: 0.0,
+            text: None,
         };
         assert_eq!(
             console_line(
@@ -231,6 +256,30 @@ mod tests {
                 None
             ),
             "gleon ✓ a.png  pixel 0.00% (0 px, ≤0.00%, +0.00%)  1 ms"
+        );
+        let text_only = Metrics::Pixel {
+            total_pixels: 100_000,
+            diff_pixels: 0,
+            diff_ratio: 0.0,
+            headroom: 0.0,
+            text: Some(gleon_model::case::TextMetrics {
+                pixels: 300,
+                diff_pixels: 46,
+                worst_tile_diff_ratio: 0.18,
+                headroom: -0.08,
+            }),
+        };
+        assert_eq!(
+            console_line(
+                "a.png",
+                CaseOutcome::Mismatch,
+                &Tolerance::Exact {},
+                1.0,
+                Some(&text_only),
+                None
+            ),
+            "gleon ✗ a.png  pixel 0.00% (0 px, ≤0.00%, +0.00%)  text 18.00% of a tile (≤10.00%, \
+             -8.00%)  1 ms"
         );
         let line = |outcome, message| {
             console_line("a.png", outcome, &Tolerance::Exact {}, 1.0, None, message)

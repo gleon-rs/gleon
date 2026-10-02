@@ -269,6 +269,7 @@ mod tests {
             mode: gleon_engine::config::Mode::Pixel,
             diff: gleon_engine::config::DiffConfig::default(),
             masks: vec![],
+            text: None,
         });
 
         let mut cases = vec![

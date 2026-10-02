@@ -39,6 +39,18 @@ impl ErrorKind {
     }
 }
 
+impl From<CaseErrorKind> for ErrorKind {
+    fn from(kind: CaseErrorKind) -> Self {
+        match kind {
+            CaseErrorKind::InvalidInput => Self::InvalidInput,
+            CaseErrorKind::Config => Self::Config,
+            CaseErrorKind::Io => Self::Io,
+            CaseErrorKind::Image => Self::Image,
+            CaseErrorKind::Internal => Self::Internal,
+        }
+    }
+}
+
 /// A failed call: its class and the complete message to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
@@ -98,6 +110,7 @@ mod tests {
             (ErrorKind::Internal, "internal"),
         ] {
             assert_eq!(kind.case_kind().unwrap().as_str(), name);
+            assert_eq!(ErrorKind::from(kind.case_kind().unwrap()), kind);
         }
     }
 }

@@ -13,25 +13,27 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    cell::OnceCell,
     fs, io,
     path::Path,
     time::{Duration, Instant},
 };
 
-use gleon_engine::{config::Zone, masking::clamped_zones};
+use gleon_engine::{Region, config::Zone, masking::clamped_zones};
 use gleon_model::{
     case::{
         self, ArtifactImages, Artifacts, CASE_SCHEMA_VERSION, CandidateImage, CaseErrorKind,
         CaseOutcome, CaseReport, CaseTimings, GoldenImage, Metrics, RegionMetrics, Source,
         TestInfo,
     },
+    compare::{Candidate, Compared, Comparison, Text},
     fs::Durability,
     platform::PlatformConfig,
-    tolerance::Tolerance,
+    tolerance::{TextTolerance, Tolerance},
 };
 
 use crate::{
-    compare::{self, Comparison},
+    compare::{self, Timed},
     error::{ErrorKind, Failure},
     session::{ArtifactNames, Plan, Session},
     text,
@@ -119,12 +121,16 @@ pub struct Request<'a> {
     pub failures_dir: &'a str,
     /// The running test's full name, when known.
     pub test_name: Option<&'a str>,
-    /// The candidate PNG.
-    pub candidate: &'a [u8],
+    /// The candidate: PNG bytes, or raw pixels (compare mode only).
+    pub candidate: Candidate<'a>,
     /// The call's tolerance; `None` uses the `.gleon/gleon.yaml` rule, else exact.
     pub tolerance: Option<Tolerance>,
     /// The call's masks.
     pub masks: Vec<Zone>,
+    /// The text regions of the candidate (pixels).
+    pub text_regions: Vec<Region>,
+    /// The call's tolerance of text; `None` uses the rule's.
+    pub text: Option<TextTolerance>,
 }
 
 /// Runs `request` in `session`.
@@ -141,15 +147,20 @@ pub fn run(session: &Session, request: &Request<'_>) -> Finished {
 }
 
 fn update(session: &Session, request: &Request<'_>, started: Instant) -> Finished {
+    let Candidate::Png(candidate) = request.candidate else {
+        return Finished::failed(Failure::invalid_input(
+            "gleon: update mode takes the candidate as PNG",
+        ));
+    };
     let path = request.golden_path;
     let current = fs::read(path).ok();
     // Rewriting the same bytes would cost a flush to disk and touch the file for build tools.
-    let written = if current.as_deref() == Some(request.candidate) {
+    let written = if current.as_deref() == Some(candidate) {
         Ok(())
     } else {
-        gleon_model::fs::write_atomically(path, request.candidate, Durability::Durable)
+        gleon_model::fs::write_atomically(path, candidate, Durability::Durable)
     };
-    let plan = match session.plan(path, request.tolerance, request.masks.clone()) {
+    let plan = match session.plan(path, request.tolerance, request.masks.clone(), request.text) {
         Ok(plan) => plan,
         Err(failure) => return Finished::failed(failure),
     };
@@ -159,11 +170,12 @@ fn update(session: &Session, request: &Request<'_>, started: Instant) -> Finishe
         request,
         plan: &plan,
         golden,
+        encoded: OnceCell::new(),
         started,
     };
     let finished = match written {
         // After an update the golden is the candidate.
-        Ok(()) => call(Some(request.candidate)).finish(
+        Ok(()) => call(Some(candidate)).finish(
             CaseOutcome::Updated,
             Details::default(),
             Verdict::Updated,
@@ -188,7 +200,7 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
         Err(e) if e.kind() == io::ErrorKind::NotFound || path.is_dir() => Ok(None),
         Err(e) => Err(format!("cannot read the golden: {e}")),
     };
-    let plan = match session.plan(path, request.tolerance, request.masks.clone()) {
+    let plan = match session.plan(path, request.tolerance, request.masks.clone(), request.text) {
         Ok(plan) => plan,
         Err(failure) => return Finished::failed(failure),
     };
@@ -198,8 +210,14 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
         request,
         plan: &plan,
         golden: golden.as_ref().ok().and_then(Option::as_deref),
+        encoded: OnceCell::new(),
         started,
     };
+    // The call asked for a text tolerance that cannot apply (an SSIM rule, or a candidate
+    // without text regions): say so instead of comparing the text like everything else
+    // silently.
+    let unused_text = (request.text.is_some() && call.text().is_none())
+        .then(|| text::unused_text_tolerance(request.golden_uri));
     let finished = match golden.as_ref().map(Option::as_deref) {
         Err(reason) => call.error(
             Failure::io(text::could_not_compare(request.golden_uri, reason)),
@@ -210,7 +228,9 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
             CaseOutcome::Missing,
             Details {
                 images: ArtifactImages {
-                    candidate: case::png_size(request.candidate).map(|_| request.candidate),
+                    candidate: call
+                        .candidate_png()
+                        .filter(|png| case::png_size(png).is_some()),
                     ..ArtifactImages::default()
                 },
                 ..Details::default()
@@ -220,7 +240,7 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
         ),
         // Identical encodings are identical pixels: no decoding at all, so the masks are checked
         // against the size in the PNG header.
-        Ok(Some(golden)) if golden == request.candidate => {
+        Ok(Some(golden)) if matches!(request.candidate, Candidate::Png(png) if png == golden) => {
             let clamped = case::png_size(golden).map_or(0, |(width, height)| {
                 clamped_zones(&plan.masks, width, height)
             });
@@ -232,12 +252,24 @@ fn compare(session: &Session, request: &Request<'_>, started: Instant) -> Finish
             )
             .warn(clamped_masks(request.golden_uri, clamped))
         }
-        Ok(Some(golden)) => judge(
-            &call,
-            compare::compare(golden, request.candidate, &plan.tolerance, &plan.masks),
-        ),
+        Ok(Some(golden)) => {
+            let text = call.text().map(|tolerance| Text {
+                regions: &request.text_regions,
+                tolerance,
+            });
+            judge(
+                &call,
+                compare::compare(
+                    golden,
+                    request.candidate,
+                    &plan.tolerance,
+                    &plan.masks,
+                    text,
+                ),
+            )
+        }
     };
-    finished.warn(warning)
+    finished.warn(warning).warn(unused_text)
 }
 
 /// The warning for `count` masks of `golden_uri` that reached beyond the image, if any.
@@ -245,19 +277,28 @@ fn clamped_masks(golden_uri: &str, count: usize) -> Option<String> {
     (count > 0).then(|| text::clamped_masks(golden_uri, count))
 }
 
-/// Finishes `call` according to the engine's `comparison`.
-fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
+/// Finishes `call` according to the engine's comparison.
+fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
     let uri = call.request.golden_uri;
-    match comparison {
-        Comparison::Match {
-            metrics,
-            clamped_masks: clamped,
-            native,
-        } => call
+    let Comparison {
+        compared,
+        clamped_masks: clamped,
+    } = match comparison {
+        Ok(comparison) => comparison,
+        Err(Failure { kind, message }) => {
+            return call.error(
+                Failure::new(kind, text::could_not_compare(uri, &message)),
+                message,
+            );
+        }
+    };
+    match compared {
+        Compared::Match { metrics, regions } => call
             .finish(
                 CaseOutcome::Match,
                 Details {
                     metrics: Some(metrics),
+                    regions,
                     native: Some(native),
                     ..Details::default()
                 },
@@ -265,15 +306,7 @@ fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
                 String::new,
             )
             .warn(clamped_masks(uri, clamped)),
-        Comparison::Error(Failure { kind, message }) => call.error(
-            Failure::new(kind, text::could_not_compare(uri, &message)),
-            message,
-        ),
-        Comparison::DimensionMismatch {
-            golden,
-            candidate,
-            native,
-        } => {
+        Compared::DimensionMismatch { golden, candidate } => {
             let summary = text::dimension_summary(golden, candidate);
             let reason = format!("image sizes differ: {summary}.");
             let details = Details {
@@ -289,20 +322,21 @@ fn judge(call: &Call<'_>, comparison: Comparison) -> Finished {
                 || call.failure(&reason, None),
             )
         }
-        Comparison::Mismatch {
+        Compared::Mismatch {
             metrics,
+            regions,
             diff_png,
-            clamped_masks: clamped,
-            native,
         } => {
             let summary = text::metrics_summary(&metrics);
-            let reason = format!(
-                "{summary} (gleon {}).",
-                text::tolerance(&call.plan.tolerance)
-            );
+            let mut tolerance = text::tolerance(&call.plan.tolerance);
+            if let Some(text) = call.text() {
+                tolerance = format!("{tolerance}, {}", text::text_tolerance(&text));
+            }
+            let reason = format!("{summary} (gleon {tolerance}).");
             let details = Details {
                 message: Some(summary),
                 metrics: Some(metrics),
+                regions,
                 native: Some(native),
                 images: call.images(Some(&diff_png)),
                 ..Details::default()
@@ -321,6 +355,8 @@ struct Details<'a> {
     message: Option<String>,
     error_kind: Option<CaseErrorKind>,
     metrics: Option<Metrics>,
+    /// The compared regions of a match or mismatch.
+    regions: Vec<RegionMetrics>,
     native: Option<Duration>,
     /// The images for the artifacts directory; none for passes and errors, which remove the
     /// images of an earlier failure.
@@ -333,10 +369,53 @@ struct Call<'a> {
     request: &'a Request<'a>,
     plan: &'a Plan,
     golden: Option<&'a [u8]>,
+    /// The PNG of raw candidate pixels, encoded once when a failure keeps the candidate.
+    encoded: OnceCell<Option<Vec<u8>>>,
     started: Instant,
 }
 
 impl Call<'_> {
+    /// The candidate as PNG: the given bytes, or the raw pixels encoded on first use (`None` if
+    /// they cannot be). Only failures need it, so a passing raw candidate is never encoded.
+    fn candidate_png(&self) -> Option<&[u8]> {
+        match self.request.candidate {
+            Candidate::Png(png) => Some(png),
+            Candidate::Rgba { .. } => self
+                .encoded
+                .get_or_init(|| {
+                    self.request
+                        .candidate
+                        .to_png()
+                        .map(std::borrow::Cow::into_owned)
+                })
+                .as_deref(),
+        }
+    }
+
+    /// The candidate of the case report: hashed when there is a PNG of it (given, or encoded
+    /// for a failure), else the size of the raw pixels.
+    fn candidate_image(&self) -> CandidateImage {
+        match self.request.candidate {
+            Candidate::Png(png) => CandidateImage::of(png),
+            Candidate::Rgba { width, height, .. } => self
+                .encoded
+                .get()
+                .and_then(Option::as_deref)
+                .map_or_else(|| CandidateImage::raw(width, height), CandidateImage::of),
+        }
+    }
+
+    /// The tolerance of text that applies: the plan's, for text regions in pixel or exact mode.
+    fn text(&self) -> Option<TextTolerance> {
+        let is_pixel = matches!(
+            self.plan.tolerance,
+            Tolerance::Exact {} | Tolerance::Pixel { .. }
+        );
+        self.plan
+            .text
+            .filter(|_| is_pixel && !self.request.text_regions.is_empty())
+    }
+
     /// Keeps the images of `details` in the artifacts directory and records the case report (and
     /// console line) when the plan asks for them, then finishes with `verdict` and the message
     /// built by `message`; `message` runs last, so the integration's failure artifacts are written
@@ -390,10 +469,10 @@ impl Call<'_> {
     }
 
     /// The golden and candidate of this call plus `diff_png`, as images to keep.
-    const fn images<'a>(&'a self, diff_png: Option<&'a [u8]>) -> ArtifactImages<'a> {
+    fn images<'a>(&'a self, diff_png: Option<&'a [u8]>) -> ArtifactImages<'a> {
         ArtifactImages {
             golden: self.golden,
-            candidate: Some(self.request.candidate),
+            candidate: self.candidate_png(),
             diff: diff_png,
         }
     }
@@ -480,7 +559,7 @@ impl Call<'_> {
             schema_version: CASE_SCHEMA_VERSION,
             name: golden.name.clone(),
             golden: GoldenImage::of(golden.golden_path.clone(), self.golden, None),
-            candidate: CandidateImage::of(self.request.candidate),
+            candidate: self.candidate_image(),
             source: Source {
                 tool: integration.tool.clone(),
                 tool_version: integration.tool_version.clone(),
@@ -494,16 +573,21 @@ impl Call<'_> {
                 tolerance: self.plan.tolerance,
                 masks: self.plan.masks.clone(),
                 policy_version: gleon_engine::ssim::POLICY_VERSION,
+                text: self.text(),
             },
             outcome,
             error_kind: details.error_kind,
             message: details.message,
             metrics: details.metrics,
-            regions: details
-                .metrics
-                .map(RegionMetrics::whole_image)
-                .into_iter()
-                .collect(),
+            regions: if details.regions.is_empty() {
+                details
+                    .metrics
+                    .map(RegionMetrics::whole_image)
+                    .into_iter()
+                    .collect()
+            } else {
+                details.regions
+            },
             artifacts,
             timings_ms: CaseTimings::new(total, details.native),
             run_id: self.session.run_id.clone(),
@@ -540,7 +624,7 @@ impl Call<'_> {
         let files = [
             (&names.diff, diff_png),
             (&names.golden, *golden),
-            (&names.candidate, Some(request.candidate)),
+            (&names.candidate, self.candidate_png()),
         ];
         let written = files.into_iter().try_for_each(|(pattern, bytes)| {
             let file = dir.join(ArtifactNames::file(pattern, &stem));
@@ -601,7 +685,7 @@ mod tests {
         let img = image::RgbaImage::from_fn(width, height, |x, y| {
             if dot && (x, y) == (1, 1) { BLUE } else { RED }
         });
-        compare::encode_png(&img).unwrap()
+        gleon_model::compare::encode_png(&img).unwrap()
     }
 
     /// `image` re-encoded as PNG in another pixel format.
@@ -716,15 +800,48 @@ mod tests {
                     golden_uri: "goldens/a.png",
                     failures_dir: &self.failures,
                     test_name: Some("group test"),
-                    candidate,
+                    candidate: Candidate::Png(candidate),
                     tolerance,
                     masks,
+                    text_regions: Vec::new(),
+                    text: None,
                 },
             )
         }
 
         fn failures(&self) -> Vec<String> {
             entries(&self.root.join("test/failures"))
+        }
+
+        /// Compares the raw pixels of `candidate` with `text_regions` under `text` (the rule's
+        /// when `None`) and `tolerance`.
+        fn compare_raw(
+            &self,
+            session: &Session,
+            candidate: &image::RgbaImage,
+            tolerance: Option<Tolerance>,
+            text_regions: Vec<Region>,
+            text: Option<TextTolerance>,
+        ) -> Finished {
+            run(
+                session,
+                &Request {
+                    mode: Mode::Compare,
+                    golden_path: &self.golden,
+                    golden_uri: "goldens/a.png",
+                    failures_dir: &self.failures,
+                    test_name: None,
+                    candidate: Candidate::Rgba {
+                        width: candidate.width(),
+                        height: candidate.height(),
+                        pixels: candidate.as_raw(),
+                    },
+                    tolerance,
+                    masks: Vec::new(),
+                    text_regions,
+                    text,
+                },
+            )
         }
 
         /// The images kept for the golden under the default artifacts directory.
@@ -913,7 +1030,7 @@ metrics:
         assert_eq!(case.name, "test/goldens/a");
         assert_eq!(case.golden.path, "test/goldens/a.png");
         assert_eq!(case.golden.width, Some(4));
-        assert_eq!(case.golden.sha256, Some(case.candidate.sha256.clone()));
+        assert_eq!(case.golden.sha256, case.candidate.sha256.clone());
         assert_eq!(case.test.unwrap().name.as_deref(), Some("group test"));
         assert_eq!(case.source.renderer.as_deref(), Some("flutter-3.47.5"));
         assert_eq!(case.source.tool, "gleon_flutter");
@@ -943,6 +1060,168 @@ metrics:
             ["a.json"],
             "no temporary files are left"
         );
+    }
+
+    /// Raw pixels compare like their PNG: equal pixels match (with metrics, never `identical`,
+    /// which is about bytes) and no PNG is encoded for it; a failure encodes the candidate once
+    /// for the artifacts, the failure feedback and the hash `gleon approve` checks.
+    #[test]
+    fn test_raw_candidates_encode_a_png_only_for_failures() {
+        let fixture = Fixture::new(Some(METRICS));
+        let session = fixture.session(None);
+        let pixels = |dot| image::load_from_memory(&png(4, 4, dot)).unwrap().to_rgba8();
+
+        let same = fixture.compare_raw(&session, &pixels(false), None, Vec::new(), None);
+        assert_eq!(same.verdict, Verdict::Match);
+        let case = fixture.case();
+        assert_eq!(case.candidate, CandidateImage::raw(4, 4));
+        assert!(fixture.artifacts().is_empty());
+
+        let changed = fixture.compare_raw(&session, &pixels(true), None, Vec::new(), None);
+        assert_eq!(changed.verdict, Verdict::Mismatch);
+        let case = fixture.case();
+        let kept = fixture
+            .root
+            .join(case.artifacts.unwrap().candidate.unwrap());
+        let png = fs::read(kept).unwrap();
+        assert_eq!(case.candidate, CandidateImage::of(&png));
+        assert_eq!(
+            image::load_from_memory(&png).unwrap().to_rgba8(),
+            pixels(true)
+        );
+        assert!(
+            fixture.failures().contains(&"a_testImage.png".to_owned()),
+            "{:?}",
+            fixture.failures()
+        );
+    }
+
+    /// Text regions tolerate text noise under the text tolerance (the rule's, or the call's),
+    /// everything else stays strict; the case report keeps the text tolerance and the worst
+    /// tile. In SSIM mode text regions do not apply.
+    #[test]
+    fn test_text_regions_tolerate_text_noise_only() {
+        let fixture = Fixture::new(Some(&format!("{METRICS}\n",).replace(
+            "diff: { threshold: 0 }",
+            "diff: { threshold: 0 }\n    text: { color_tolerance: 24, max_diff_ratio: 0.1 }",
+        )));
+        let white = Rgba([255, 255, 255, 255]);
+        let golden = image::RgbaImage::from_pixel(32, 16, white);
+        fs::write(
+            &fixture.golden,
+            gleon_model::compare::encode_png(&golden).unwrap(),
+        )
+        .unwrap();
+        let session = fixture.session(None);
+        let text = vec![Region {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+        }];
+        let mut noisy = golden.clone();
+        noisy.put_pixel(3, 3, Rgba([0, 0, 0, 255]));
+
+        let finished = fixture.compare_raw(&session, &noisy, None, text.clone(), None);
+        assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
+        let case = fixture.case();
+        let rule_text = TextTolerance {
+            color_tolerance: 24.0,
+            max_diff_ratio: 0.1,
+        };
+        assert_eq!(case.comparison.text, Some(rule_text));
+        assert!(matches!(
+            case.metrics,
+            Some(Metrics::Pixel {
+                total_pixels: 256,
+                diff_pixels: 0,
+                text: Some(case::TextMetrics {
+                    pixels: 256,
+                    diff_pixels: 1,
+                    ..
+                }),
+                ..
+            })
+        ));
+        assert_eq!(case.regions.len(), 2);
+        assert_eq!(case.regions[1].kind, case::RegionKind::Text);
+
+        // Outside the text: strict.
+        let mut outside = noisy.clone();
+        outside.put_pixel(20, 3, Rgba([0, 0, 0, 255]));
+        let finished = fixture.compare_raw(&session, &outside, None, text.clone(), None);
+        assert_eq!(finished.verdict, Verdict::Mismatch);
+        assert!(
+            finished
+                .message
+                .contains("text color ±24, ≤ 10.00% per tile"),
+            "{}",
+            finished.message
+        );
+
+        // The call's text tolerance beats the rule's.
+        let strict_text = TextTolerance {
+            color_tolerance: 0.0,
+            max_diff_ratio: 0.0,
+        };
+        let finished = fixture.compare_raw(&session, &noisy, None, text.clone(), Some(strict_text));
+        assert_eq!(finished.verdict, Verdict::Mismatch);
+        assert!(
+            finished.message.contains("text up to"),
+            "{}",
+            finished.message
+        );
+
+        // SSIM compares text like everything else (the same dot fails its structural gate); no text
+        // tolerance is recorded.
+        let ssim = Tolerance::Ssim {
+            min_similarity: 0.5,
+            color_tolerance: 255.0,
+        };
+        let finished = fixture.compare_raw(&session, &noisy, Some(ssim), text.clone(), None);
+        assert_eq!(finished.verdict, Verdict::Mismatch, "{}", finished.message);
+        assert_eq!(fixture.case().comparison.text, None);
+        assert!(finished.warning.is_empty(), "the rule's text: no warning");
+
+        // A text tolerance of the call that cannot apply warns: under SSIM, and without text
+        // regions (byte inputs).
+        for (tolerance, regions) in [(Some(ssim), text), (None, Vec::new())] {
+            let finished =
+                fixture.compare_raw(&session, &noisy, tolerance, regions, Some(strict_text));
+            assert!(
+                finished
+                    .warning
+                    .contains("the text tolerance of golden \"goldens/a.png\" did not apply"),
+                "{}",
+                finished.warning
+            );
+        }
+    }
+
+    #[test]
+    fn test_update_mode_takes_a_png() {
+        let fixture = Fixture::new(Some(METRICS));
+        let pixels = image::RgbaImage::from_pixel(4, 4, RED);
+        let finished = run(
+            &fixture.session(None),
+            &Request {
+                mode: Mode::Update,
+                golden_path: &fixture.golden,
+                golden_uri: "goldens/a.png",
+                failures_dir: &fixture.failures,
+                test_name: None,
+                candidate: Candidate::Rgba {
+                    width: 4,
+                    height: 4,
+                    pixels: pixels.as_raw(),
+                },
+                tolerance: None,
+                masks: Vec::new(),
+                text_regions: Vec::new(),
+                text: None,
+            },
+        );
+        assert_eq!(finished.error_kind, ErrorKind::InvalidInput);
     }
 
     const RULE_WITHOUT_METRICS: &str = r#"
@@ -1504,7 +1783,7 @@ metrics:
         );
         let case = fixture.case();
         assert_eq!(case.outcome, CaseOutcome::Updated);
-        assert_eq!(case.golden.sha256, Some(case.candidate.sha256));
+        assert_eq!(case.golden.sha256, case.candidate.sha256);
 
         let broken = Fixture::new(Some("not: [valid"));
         let finished = broken.run(&broken.session(None), Mode::Update, &candidate);

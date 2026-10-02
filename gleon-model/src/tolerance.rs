@@ -156,6 +156,63 @@ impl Tolerance {
     }
 }
 
+/// How much text may differ, in pixel and exact mode: the text regions an integration reports
+/// (paragraphs of the render tree) are compared under it, everything else strictly.
+///
+/// Text is what operating systems draw differently; a pixel of text counts as equal while no
+/// channel differs by more than `color_tolerance`, and the text passes while every tile of
+/// [`gleon_engine::pixel::TEXT_TILE`] pixels has at most `max_diff_ratio` differing pixels (a
+/// changed word is a dense cluster, rendering noise is spread thin).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TextTolerance {
+    /// Largest difference of any channel of a text pixel, in 8-bit units, `[0, 255]`.
+    #[schemars(range(min = 0.0, max = 255.0))]
+    pub color_tolerance: f64,
+    /// Largest share of differing pixels in any tile of text, `[0, 1]`.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub max_diff_ratio: f64,
+}
+
+impl TextTolerance {
+    /// Checks the value ranges.
+    ///
+    /// # Errors
+    /// Returns [`ToleranceError::ColorTolerance`] if `color_tolerance` is outside `[0, 255]` or
+    /// [`ToleranceError::Ratio`] if `max_diff_ratio` is outside `[0, 1]` (NaN included).
+    pub fn validate(&self) -> Result<(), ToleranceError> {
+        if !gleon_engine::config::is_valid_color_tolerance(self.color_tolerance) {
+            return Err(ToleranceError::ColorTolerance(self.color_tolerance));
+        }
+        if !(0.0..=1.0).contains(&self.max_diff_ratio) {
+            return Err(ToleranceError::Ratio {
+                name: "max_diff_ratio",
+                value: self.max_diff_ratio,
+            });
+        }
+        Ok(())
+    }
+
+    /// `self` with `-0.0` values as `0.0`, like [`Tolerance::without_negative_zero`].
+    #[must_use]
+    pub const fn without_negative_zero(self) -> Self {
+        // `-0.0 + 0.0` is `0.0`; every other value (NaN included) stays as it is.
+        Self {
+            color_tolerance: self.color_tolerance + 0.0,
+            max_diff_ratio: self.max_diff_ratio + 0.0,
+        }
+    }
+
+    /// The engine policy implementing this tolerance.
+    #[must_use]
+    pub const fn policy(&self) -> gleon_engine::TextPolicy {
+        gleon_engine::TextPolicy {
+            color_tolerance: self.color_tolerance,
+            max_diff_ratio: self.max_diff_ratio,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -279,6 +336,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Tolerance::from_rule(Mode::Ssim, &zeros)).unwrap(),
             r#"{"kind":"ssim","min_similarity":0.0,"color_tolerance":0.0}"#
+        );
+        let text = TextTolerance {
+            color_tolerance: -0.0,
+            max_diff_ratio: -0.0,
+        };
+        assert_eq!(
+            serde_json::to_string(&text.without_negative_zero()).unwrap(),
+            r#"{"color_tolerance":0.0,"max_diff_ratio":0.0}"#
         );
         let kept = Tolerance::Ssim {
             min_similarity: -0.5,

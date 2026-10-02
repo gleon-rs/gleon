@@ -18,7 +18,7 @@ use gleon_model::{
     case::{RUN_ID_ENV, RunId},
     config::{ArtifactsDir, GITIGNORE_LINES, GleonConfig, MetricsConfig},
     rules::{RuleMatch, RuleSet},
-    tolerance::Tolerance,
+    tolerance::{TextTolerance, Tolerance},
 };
 
 use crate::{error::Failure, text};
@@ -339,6 +339,8 @@ pub struct Plan {
     pub tolerance: Tolerance,
     /// The call's masks followed by the rule's.
     pub masks: Vec<Zone>,
+    /// The tolerance of text: the call's, else the rule's.
+    pub text: Option<TextTolerance>,
     /// Whether the golden belongs to a workspace (failure messages point at `.gleon/gleon.yaml`
     /// otherwise).
     pub has_workspace: bool,
@@ -380,6 +382,7 @@ pub struct Record {
 /// The rule matching a golden inside its workspace.
 struct Rule {
     tolerance: Tolerance,
+    text: Option<TextTolerance>,
     masks: Vec<Zone>,
     golden: InWorkspace,
 }
@@ -478,6 +481,7 @@ impl Session {
         golden: &Path,
         tolerance: Option<Tolerance>,
         mut masks: Vec<Zone>,
+        text: Option<TextTolerance>,
     ) -> Result<Plan, Failure> {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
@@ -488,20 +492,22 @@ impl Session {
             Some(workspace) => self.rule(workspace, golden)?,
             None => None,
         };
-        let (rule_tolerance, in_workspace) = match rule {
+        let (rule_tolerance, rule_text, in_workspace) = match rule {
             Some(Rule {
                 tolerance,
+                text,
                 masks: rule_masks,
                 golden,
             }) => {
                 masks.extend(rule_masks);
-                (Some(tolerance), Some(golden))
+                (Some(tolerance), text, Some(golden))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
         Ok(Plan {
             tolerance: tolerance.or(rule_tolerance).unwrap_or(Tolerance::Exact {}),
             masks,
+            text: text.or(rule_text),
             has_workspace,
             in_workspace,
         })
@@ -521,6 +527,7 @@ impl Session {
         let RuleMatch::Matched {
             name,
             tolerance,
+            text,
             masks,
             ..
         } = compiled
@@ -533,6 +540,7 @@ impl Session {
         let is_recorded = self.metrics_override.unwrap_or(compiled.metrics.enabled);
         Ok(Some(Rule {
             tolerance,
+            text,
             masks,
             golden: InWorkspace {
                 workspace,
@@ -614,7 +622,9 @@ metrics:
         let (_dir, root) = workspace(YAML, "Clock.png");
         let session = session(None);
         let golden = root.join("test/goldens/Clock.png");
-        let plan = session.plan(&golden, None, vec![pixel_mask(5)]).unwrap();
+        let plan = session
+            .plan(&golden, None, vec![pixel_mask(5)], None)
+            .unwrap();
         assert_eq!(
             plan.tolerance,
             Tolerance::Ssim {
@@ -634,7 +644,10 @@ metrics:
 
         let call = Tolerance::Exact {};
         assert_eq!(
-            session.plan(&golden, Some(call), vec![]).unwrap().tolerance,
+            session
+                .plan(&golden, Some(call), vec![], None)
+                .unwrap()
+                .tolerance,
             call,
             "the call beats the rule"
         );
@@ -645,14 +658,14 @@ metrics:
         let (_dir, root) = workspace(YAML, "a.png");
         let session = session(None);
         let plan = session
-            .plan(&root.join("test/goldens/new.png"), None, vec![])
+            .plan(&root.join("test/goldens/new.png"), None, vec![], None)
             .unwrap();
         assert_eq!(
             plan.in_workspace.unwrap().golden_path,
             "test/goldens/new.png"
         );
         let plan = session
-            .plan(&root.join("test/gone/new.png"), None, vec![])
+            .plan(&root.join("test/gone/new.png"), None, vec![], None)
             .unwrap();
         assert!(
             plan.in_workspace.is_none(),
@@ -675,7 +688,9 @@ metrics:
     fn test_metrics_env_overrides_the_config() {
         let (_dir, root) = workspace(YAML, "a.png");
         let golden = root.join("test/goldens/a.png");
-        let plan = session(Some("0")).plan(&golden, None, vec![]).unwrap();
+        let plan = session(Some("0"))
+            .plan(&golden, None, vec![], None)
+            .unwrap();
         assert!(plan.recorded().is_none());
         assert!(
             plan.in_workspace.is_some(),
@@ -687,7 +702,7 @@ metrics:
         );
         let session = session(Some("TRUE"));
         let plan = session
-            .plan(&off_root.join("test/goldens/a.png"), None, vec![])
+            .plan(&off_root.join("test/goldens/a.png"), None, vec![], None)
             .unwrap();
         assert!(plan.recorded().unwrap().1.console, "console defaults to on");
     }
@@ -703,7 +718,7 @@ metrics:
             "gleon: GLEON_METRICS must be 1, 0, true or false (got 'yes')"
         );
         let error = session
-            .plan(&root.join("test/goldens/a.png"), None, vec![])
+            .plan(&root.join("test/goldens/a.png"), None, vec![], None)
             .unwrap_err();
         assert_eq!(&error, failure);
     }
@@ -751,7 +766,9 @@ metrics:
     fn test_plans_carry_the_artifacts_dir_of_the_rule() {
         let (_dir, root) = workspace(&format!("{YAML}artifacts: .gleon/runs/shots\n"), "a.png");
         let golden = root.join("test/goldens/a.png");
-        let plan = session(Some("0")).plan(&golden, None, vec![]).unwrap();
+        let plan = session(Some("0"))
+            .plan(&golden, None, vec![], None)
+            .unwrap();
         let golden_in = plan.in_workspace.unwrap();
         assert_eq!(
             (golden_in.artifacts.as_str(), golden_in.name.as_str()),
@@ -762,7 +779,7 @@ metrics:
             artifacts_env: Some(".gleon/runs/ram".to_owned()),
             ..SessionOptions::default()
         });
-        let plan = overridden.plan(&golden, None, vec![]).unwrap();
+        let plan = overridden.plan(&golden, None, vec![], None).unwrap();
         assert_eq!(
             plan.in_workspace.unwrap().artifacts.as_str(),
             ".gleon/runs/ram"
@@ -779,7 +796,7 @@ metrics:
             (root.join("lib.png"), true),
             (outside.path().to_path_buf(), false),
         ] {
-            let plan = session.plan(&golden, None, vec![]).unwrap();
+            let plan = session.plan(&golden, None, vec![], None).unwrap();
             assert_eq!(plan.tolerance, Tolerance::Exact {});
             assert_eq!(plan.has_workspace, has_workspace);
             assert!(plan.in_workspace.is_none());
@@ -797,7 +814,9 @@ metrics:
             (session(None), golden),
             (ignoring, root.join("test/goldens/a.png")),
         ] {
-            let plan = session.plan(&golden, None, vec![pixel_mask(1)]).unwrap();
+            let plan = session
+                .plan(&golden, None, vec![pixel_mask(1)], None)
+                .unwrap();
             assert_eq!((plan.tolerance, plan.masks.len()), (Tolerance::Exact {}, 1));
             assert!(!plan.has_workspace, "{}", golden.display());
         }
@@ -811,7 +830,7 @@ metrics:
         let session = session(None);
         let record = |golden: PathBuf| {
             session
-                .plan(&golden, None, vec![])
+                .plan(&golden, None, vec![], None)
                 .unwrap()
                 .in_workspace
                 .unwrap()
@@ -836,7 +855,7 @@ metrics:
     fn test_config_errors_name_the_config() {
         let (_dir, root) = workspace("required_version: \">=0.1.0\"\nscreenshots: []", "a.png");
         let error = session(None)
-            .plan(&root.join("test/goldens/a.png"), None, vec![])
+            .plan(&root.join("test/goldens/a.png"), None, vec![], None)
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Config);
         assert!(error.message.starts_with(&format!(
@@ -847,7 +866,12 @@ metrics:
 
         let (_dir, root) = workspace(YAML, "with space.png");
         let error = session(None)
-            .plan(&root.join("test/goldens/with space.png"), None, vec![])
+            .plan(
+                &root.join("test/goldens/with space.png"),
+                None,
+                vec![],
+                None,
+            )
             .unwrap_err();
         assert!(
             error.message.contains("not a valid gleon test path"),
@@ -857,7 +881,7 @@ metrics:
         let (_dir, root) = workspace(YAML, "a.png");
         fs::write(root.join(".gleon/gleon.yaml"), [0xff, 0xfe]).unwrap();
         let error = session(None)
-            .plan(&root.join("test/goldens/a.png"), None, vec![])
+            .plan(&root.join("test/goldens/a.png"), None, vec![], None)
             .unwrap_err();
         assert!(error.message.contains("cannot read it"), "{error:?}");
     }
@@ -869,7 +893,7 @@ metrics:
         let golden = root.join("test/goldens/a.png");
         let console = |session: &Session| {
             session
-                .plan(&golden, None, vec![])
+                .plan(&golden, None, vec![], None)
                 .unwrap()
                 .recorded()
                 .unwrap()
@@ -885,7 +909,7 @@ metrics:
         .unwrap();
         assert!(console(&session));
         fs::remove_file(root.join(".gleon/gleon.yaml")).unwrap();
-        let error = session.plan(&golden, None, vec![]).unwrap_err();
+        let error = session.plan(&golden, None, vec![], None).unwrap_err();
         assert!(error.message.contains("cannot read it"), "{error:?}");
     }
 
@@ -894,7 +918,7 @@ metrics:
         let dir = tempfile::tempdir().unwrap();
         let outside = dir.path().join("a.png");
         let plan_of =
-            |session: &Session, golden: &Path| session.plan(golden, None, vec![]).unwrap();
+            |session: &Session, golden: &Path| session.plan(golden, None, vec![], None).unwrap();
         let requested = session(Some(" true "));
         let plan = plan_of(&requested, &outside);
         assert_eq!(

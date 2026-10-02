@@ -1728,6 +1728,7 @@ dependencies = [
  "chrono",
  "gleon-engine",
  "globset",
+ "image",
  "schemars",
  "semver",
  "serde",

@@ -434,6 +434,10 @@ pub struct ScreenshotRule {
     /// Optional zones to mask out (ignore) during verification.
     #[serde(default)]
     pub masks: Vec<MaskRule>,
+    /// How much text may differ, in `pixel` mode: integrations that report the text of a
+    /// screenshot compare it under this tolerance and everything else strictly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<crate::tolerance::TextTolerance>,
 }
 
 impl ScreenshotRule {
@@ -582,6 +586,15 @@ impl GleonConfig {
                     rule.diff.color_tolerance
                 )));
             }
+            if let Some(text) = &rule.text {
+                if rule.mode != Mode::Pixel {
+                    return Err(ConfigError::Validation(format!(
+                        "screenshots[{i}].text applies to `mode: pixel` only"
+                    )));
+                }
+                text.validate()
+                    .map_err(|e| ConfigError::Validation(format!("screenshots[{i}].text: {e}")))?;
+            }
             for (j, mask) in rule.masks.iter().enumerate() {
                 for (k, zone) in mask.zones.iter().enumerate() {
                     match zone.width {
@@ -642,6 +655,7 @@ impl Default for GleonConfig {
                 mode: Mode::Pixel,
                 diff: DiffConfig::default(),
                 masks: vec![],
+                text: None,
             }],
             exclude: vec![
                 #[expect(
@@ -875,6 +889,48 @@ screenshots:
             result.unwrap_err(),
             ConfigError::Validation(msg) if msg.contains("threshold must be between 0.0 and 1.0")
         ));
+    }
+
+    /// `text:` belongs to pixel rules and takes valid ranges.
+    #[test]
+    fn test_rule_text_tolerance() {
+        let yaml = |mode: &str, text: &str| {
+            format!(
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n    text: {text}\n"
+            )
+        };
+        let config = GleonConfig::from_yaml_str(&yaml(
+            "pixel",
+            "{ color_tolerance: 24, max_diff_ratio: 0.1 }",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.screenshots[0].text,
+            Some(crate::tolerance::TextTolerance {
+                color_tolerance: 24.0,
+                max_diff_ratio: 0.1
+            })
+        );
+        for (mode, text, needle) in [
+            (
+                "ssim",
+                "{ color_tolerance: 24, max_diff_ratio: 0.1 }",
+                "text applies to `mode: pixel` only",
+            ),
+            (
+                "pixel",
+                "{ color_tolerance: 256, max_diff_ratio: 0.1 }",
+                "screenshots[0].text: `color_tolerance` must be between 0 and 255",
+            ),
+            (
+                "pixel",
+                "{ color_tolerance: 8, max_diff_ratio: 2 }",
+                "`max_diff_ratio` must be between 0.0 and 1.0",
+            ),
+        ] {
+            let err = GleonConfig::from_yaml_str(&yaml(mode, text)).unwrap_err();
+            assert!(err.to_string().contains(needle), "{err}");
+        }
     }
 
     #[test]

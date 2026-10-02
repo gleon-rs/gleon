@@ -221,6 +221,7 @@ mod tests {
                 mode: gleon_engine::config::Mode::Pixel,
                 diff: gleon_engine::config::DiffConfig::default(),
                 masks: vec![],
+                text: None,
             }],
             exclude: exclude.to_vec(),
             ..GleonConfig::default()
@@ -708,6 +709,7 @@ screenshots:
                     color_tolerance: 8.0,
                 },
                 masks: vec![],
+                text: None,
             }),
         };
 

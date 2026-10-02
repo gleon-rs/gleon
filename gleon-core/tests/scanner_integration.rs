@@ -38,6 +38,7 @@ fn test_scanner_with_real_fixture() {
         mode: Mode::Pixel,
         diff: DiffConfig::default(),
         masks: vec![],
+        text: None,
     });
 
     let config = GleonConfig {

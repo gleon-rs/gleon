@@ -3,7 +3,10 @@
 use image::RgbaImage;
 use tracing::warn;
 
-use crate::config::{Dimension, Zone};
+use crate::{
+    config::{Dimension, Zone},
+    ssim::Region,
+};
 
 /// Modifies the provided image buffer, setting masked pixels to absolute black (0, 0, 0, 255).
 ///
@@ -17,90 +20,86 @@ use crate::config::{Dimension, Zone};
 ///
 /// Returns how many zones extended beyond the image and were clamped, so callers without a
 /// `tracing` subscriber (the FFI integrations) can tell their users.
-///
-/// # Panics
-/// Does not panic in practice: internal pixel-slice indices are always clamped to the
-/// image's bounds before use, so the internal `.expect()` calls documenting that invariant
-/// can never trigger.
 pub fn apply_masks(img: &mut RgbaImage, zones: &[Zone]) -> usize {
-    let img_w = img.width();
-    let img_h = img.height();
+    let (regions, clamped) = resolve_zones(zones, img.width(), img.height());
+    paint_black(img, &regions);
+    clamped
+}
 
-    if img_w == 0 || img_h == 0 {
-        return 0;
+/// The pixel rectangles of `zones` in a `width` x `height` image, clamped to it.
+///
+/// Also returns how many zones reached beyond the image (each logged via `warn!`). Zones of zero
+/// width or height, or entirely outside the image, give no rectangle.
+#[must_use]
+pub fn resolve_zones(zones: &[Zone], width: u32, height: u32) -> (Vec<Region>, usize) {
+    if width == 0 || height == 0 {
+        return (Vec::new(), 0);
     }
-
+    let mut regions = Vec::with_capacity(zones.len());
     let mut clamped = 0;
     for zone in zones {
         let Some(ResolvedZone {
             x_end,
             y_end,
             is_out_of_bounds,
-        }) = resolve_zone(zone, img_w, img_h)
+        }) = resolve_zone(zone, width, height)
         else {
             continue;
         };
-
         if is_out_of_bounds {
             clamped += 1;
             warn!(
                 "Mask zone extends beyond image bounds: \
                  zone = x:{}, y:{}, w:{:?}, h:{:?}, image_dims = {}x{}",
-                zone.x, zone.y, zone.width, zone.height, img_w, img_h
+                zone.x, zone.y, zone.width, zone.height, width, height
             );
         }
-
-        // Clamp to image bounds. After this, all indices are guaranteed valid.
-        let x_min = zone.x.min(img_w);
-        let x_max = x_end.min(img_w);
-        let y_min = zone.y.min(img_h);
-        let y_max = y_end.min(img_h);
-
-        // Guard both axes: if either dimension collapsed to zero after clamping, nothing to paint.
-        if x_min == x_max || y_min == y_max {
-            continue;
-        }
-
-        let img_w_usize = img_w as usize;
-        // `.as_mut()` via the public `AsMut<[u8]>` impl — preferred over `&mut **img` (DerefMut hack).
-        let raw_pixels: &mut [u8] = img.as_mut();
-
-        // Fast path: if the mask spans the entire width, we can mutate the contiguous memory block at once.
-        if x_min == 0 && x_max == img_w {
-            let start_idx = (y_min as usize) * img_w_usize * 4;
-            let end_idx = (y_max as usize) * img_w_usize * 4;
-
-            #[expect(
-                clippy::expect_used,
-                reason = "indices are clamped to image bounds above"
-            )]
-            let block_slice = raw_pixels
-                .get_mut(start_idx..end_idx)
-                .expect("block indices are clamped to image bounds above");
-
-            fill_black(block_slice);
-            continue;
-        }
-
-        // O(mask_w * mask_h): compute byte offsets once per row, then fill the exact pixel slice.
-        // Indices are guaranteed in-bounds: x_max <= img_w and y_max <= img_h after clamping above.
-        for y in y_min..y_max {
-            let row_start = (y as usize) * img_w_usize * 4;
-            let start_idx = row_start + (x_min as usize) * 4;
-            let end_idx = row_start + (x_max as usize) * 4;
-
-            #[expect(
-                clippy::expect_used,
-                reason = "indices are clamped to image bounds above"
-            )]
-            let row_slice = raw_pixels
-                .get_mut(start_idx..end_idx)
-                .expect("pixel indices are clamped to image bounds above");
-
-            fill_black(row_slice);
+        let (x, y) = (zone.x.min(width), zone.y.min(height));
+        let region = Region {
+            x,
+            y,
+            width: x_end.min(width) - x,
+            height: y_end.min(height) - y,
+        };
+        if region.width > 0 && region.height > 0 {
+            regions.push(region);
         }
     }
-    clamped
+    (regions, clamped)
+}
+
+/// Paints `regions` of `img` opaque black (0, 0, 0, 255); the regions lie inside the image
+/// ([`resolve_zones`]).
+///
+/// # Panics
+/// Panics if a region reaches beyond the image.
+pub fn paint_black(img: &mut RgbaImage, regions: &[Region]) {
+    let row_bytes = img.width() as usize * 4;
+    let raw_pixels: &mut [u8] = img.as_mut();
+    for region in regions {
+        let left = region.x as usize * 4;
+        let right = (region.x + region.width) as usize * 4;
+        let (top, bottom) = (region.y as usize, (region.y + region.height) as usize);
+        let mut fill = |start: usize, end: usize| {
+            #[expect(
+                clippy::expect_used,
+                reason = "the regions are resolved inside the image"
+            )]
+            fill_black(
+                raw_pixels
+                    .get_mut(start..end)
+                    .expect("a region lies inside the image"),
+            );
+        };
+        // A full-width region is one contiguous block.
+        if left == 0 && right == row_bytes {
+            fill(top * row_bytes, bottom * row_bytes);
+        } else {
+            for y in top..bottom {
+                fill(y * row_bytes + left, y * row_bytes + right);
+            }
+        }
+    }
 }
 
 /// How many of `zones` reach beyond a `width` x `height` image: the count [`apply_masks`] returns

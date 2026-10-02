@@ -52,8 +52,11 @@ fn html_failure_dto<'a>(
         actual_path,
         baseline_path,
         diff_path,
+        // The marked pixels of the diff image: strict differences and text beyond its tolerance.
         diff_count: match report.metrics {
-            Some(Metrics::Pixel { diff_pixels, .. }) => Some(diff_pixels),
+            Some(Metrics::Pixel {
+                diff_pixels, text, ..
+            }) => Some(diff_pixels.saturating_add(text.map_or(0, |text| text.diff_pixels))),
             _ => None,
         },
         actual_size: size(report.candidate.width, report.candidate.height),
@@ -173,6 +176,30 @@ mod tests {
         assert!(html.contains("Mismatch: 5.00% (5 of 100px) differ"));
         assert!(html.contains("(5 diffs)"));
         assert!(!html.contains("&#x2f;w&#x2f;"), "paths are relative");
+    }
+
+    /// A mismatch of text only marks its text pixels in the diff image: they are its diffs, not
+    /// the zero strict differences.
+    #[test]
+    fn test_generate_html_counts_the_text_diffs() {
+        let mut mismatch = report("billing/form", CaseOutcome::Mismatch);
+        mismatch.metrics = Some(Metrics::Pixel {
+            total_pixels: 100,
+            diff_pixels: 0,
+            diff_ratio: 0.0,
+            headroom: 0.0,
+            text: Some(gleon_model::case::TextMetrics {
+                pixels: 300,
+                diff_pixels: 46,
+                worst_tile_diff_ratio: 0.18,
+                headroom: -0.08,
+            }),
+        });
+        let cases = Cases::new("/w/.gleon/runs/latest", vec![mismatch]);
+        let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
+            .unwrap()
+            .unwrap();
+        assert!(html.contains("(46 diffs)"), "{html}");
     }
 
     #[test]
