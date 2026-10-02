@@ -304,7 +304,8 @@
             {% for run in chart_runs %}
             {% set x = loop.index0 * 24 + 10 %}
             {% set h = 70 %}
-            {% set passed_h = (run.summary.passed / [run.summary.total, 1]|max * h)|round %}
+            {% set passed = [run.summary.total - run.summary.failed, 0]|max %}
+            {% set passed_h = (passed / [run.summary.total, 1]|max * h)|round %}
             {% set failed_h = h - passed_h %}
             
             {% if run.summary.failed > 0 %}
@@ -313,9 +314,9 @@
             </rect>
             {% endif %}
             
-            {% if run.summary.passed > 0 %}
+            {% if passed > 0 %}
             <rect x="{{ x }}" y="{{ 15 + failed_h }}" width="14" height="{{ passed_h }}" rx="2" fill="#10b981">
-                <title>{{ run.branch }} ({{ run.platform }}): {{ run.summary.passed }} passed</title>
+                <title>{{ run.branch }} ({{ run.platform }}): {{ passed }} passed</title>
             </rect>
             {% endif %}
             
@@ -366,14 +367,14 @@
                         <span class="run-time">{{ run.timestamp }}</span>
                     </div>
                     <div class="run-stats">
-                        <span><strong>{{ run.summary.passed }}</strong> / {{ run.summary.total }} passed</span>
+                        <span><strong>{{ [run.summary.total - run.summary.failed, 0]|max }}</strong> / {{ run.summary.total }} passed</span>
                         {% if run.summary.failed > 0 %}
                         <span style="color: var(--danger);"><strong>{{ run.summary.failed }}</strong> failed</span>
                         {% endif %}
                     </div>
                 </summary>
                 <div class="run-details">
-                    {% if run.tests %}
+                    {% if run.failures %}
                     <table class="test-table">
                         <thead>
                             <tr>
@@ -383,34 +384,38 @@
                             </tr>
                         </thead>
                         <tbody>
-                            {% for t in run.tests %}
+                            {% for t in run.failures %}
                             <tr>
                                 <td><code>{{ t.name }}</code></td>
                                 <td>
-                                    <span class="badge {% if t.status == 'Success' %}badge-success{% else %}badge-danger{% endif %}">
-                                        {{ t.status }}
+                                    <span class="badge badge-danger">
+                                        {{ t.outcome }}{% if t.error_kind %} ({{ t.error_kind }}){% endif %}
                                     </span>
                                 </td>
                                 <td>
-                                    {% set has_diff = t.diff_count is defined and t.diff_count is not none %}
-                                    {% set has_error = t.error is defined and t.error is not none %}
-                                    {% if has_diff and has_error %}
-                                    <div>Diff pixels: {{ t.diff_count }}</div>
-                                    <div style="color: var(--warning); font-size: 0.8rem;">{{ t.error }}</div>
-                                    {% elif has_diff %}
-                                    <span>Diff pixels: {{ t.diff_count }}</span>
-                                    {% elif has_error %}
-                                    <span style="color: var(--danger);">{{ t.error }}</span>
-                                    {% else %}
+                                    {% if t.metrics and t.metrics.kind == 'pixel' %}
+                                    <div>Diff pixels: {{ t.metrics.diff_pixels }}</div>
+                                    {% elif t.metrics %}
+                                    <div>Min local SSIM: {{ "%.4f"|format(t.metrics.min_ssim) }}</div>
+                                    {% endif %}
+                                    {% if t.message %}
+                                    <div style="color: var(--danger); font-size: 0.8rem;">{{ t.message }}</div>
+                                    {% endif %}
+                                    {% if not t.metrics and not t.message %}
                                     <span style="color: var(--text-secondary);">-</span>
                                     {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}
+                            {% if run.summary.failed > run.failures|length %}
+                            <tr>
+                                <td colspan="3" style="color: var(--text-secondary);">{{ run.summary.failed - run.failures|length }} more failures not kept in the history</td>
+                            </tr>
+                            {% endif %}
                         </tbody>
                     </table>
                     {% else %}
-                    <p style="color: var(--text-secondary); margin: 0.25rem 0; font-size: 0.85rem;">No test case details recorded for this run.</p>
+                    <p style="color: var(--text-secondary); margin: 0.25rem 0; font-size: 0.85rem;">No failed tests in this run.</p>
                     {% endif %}
                 </div>
             </details>

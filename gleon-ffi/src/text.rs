@@ -1,136 +1,20 @@
-//! Every text an integration shows: failure messages, metric summaries, tolerance descriptions,
-//! warnings and the console line.
+//! Every text an integration shows: failure messages, warnings and the console line. Metric
+//! summaries and tolerance descriptions are the model's (`gleon_model::case::text`), shared with
+//! the CLI's reports.
 //!
-//! Numbers are rounded to what a developer acts on: percentages to 2-4 decimals (`6.25%`,
-//! `0.0167%`), similarities to 3-4 (`0.931`), colors to 1 (`5.2`). The missing-golden message is
-//! Flutter's own; other integrations can show their own from the `missing` verdict.
+//! The missing-golden message is Flutter's own; other integrations can show their own from the
+//! `missing` verdict.
 
 #![forbid(unsafe_code)]
 
-use std::fmt::Write as _;
-
-use gleon_engine::Region;
+pub use gleon_model::case::text::{dimension_summary, metrics_summary, tolerance};
 use gleon_model::{
-    case::{CaseOutcome, Metrics},
+    case::{
+        CaseOutcome, Metrics,
+        text::{MAX_DECIMALS, color, decimal, percent, signed, similarity},
+    },
     tolerance::Tolerance,
 };
-
-/// The most decimals any number is shown with.
-const MAX_DECIMALS: usize = 4;
-
-/// `value` rounded to `max` decimals, trailing zeros dropped down to `min` (`8`, `7.5`,
-/// `0.800`). `-0.0` shows as `0`.
-fn decimal(value: f64, min: usize, max: usize) -> String {
-    let value = if value == 0.0 { 0.0 } else { value };
-    let mut text = format!("{value:.max$}");
-    if let Some(point) = text.find('.') {
-        let kept = text.trim_end_matches('0').len().max(point + 1 + min);
-        text.truncate(kept);
-        if text.ends_with('.') {
-            text.pop();
-        }
-    }
-    text
-}
-
-/// `ratio` as a percentage with 2 to 4 decimals (`6.25`, `0.0167`); a positive ratio too small to
-/// show is `<0.0001`, never a misleading `0.00`.
-fn percent(ratio: f64) -> String {
-    let text = decimal(ratio * 100.0, 2, MAX_DECIMALS);
-    if ratio > 0.0 && text.bytes().all(|b| matches!(b, b'0' | b'.')) {
-        format!("<0.{}1", "0".repeat(MAX_DECIMALS - 1))
-    } else {
-        text
-    }
-}
-
-/// A similarity with 3 to 4 decimals (`0.800`, `0.9995`).
-fn similarity(value: f64) -> String {
-    decimal(value, 3, MAX_DECIMALS)
-}
-
-/// A measured color distance in 8-bit units, one decimal (`5.2`).
-fn color(value: f64) -> String {
-    decimal(value, 1, 1)
-}
-
-/// `text` of a number with an explicit sign (`+0.131`, `-1.00`).
-fn signed(text: String) -> String {
-    if text.starts_with('-') {
-        text
-    } else {
-        format!("+{text}")
-    }
-}
-
-/// The thresholds of `tolerance` as shown in failure messages (`ssim ≥ 0.800, color ±8`).
-pub fn tolerance(tolerance: &Tolerance) -> String {
-    match *tolerance {
-        Tolerance::Exact {} => "exact".to_owned(),
-        Tolerance::Pixel { max_diff_ratio } => {
-            format!("pixel ≤ {}%", percent(max_diff_ratio))
-        }
-        Tolerance::Ssim {
-            min_similarity,
-            color_tolerance,
-        } => format!(
-            "ssim ≥ {}, color ±{}",
-            similarity(min_similarity),
-            decimal(color_tolerance, 0, 2)
-        ),
-    }
-}
-
-/// A region, e.g. `(4, 8) 16x32px`.
-pub fn region(region: &Region) -> String {
-    format!(
-        "({}, {}) {}x{}px",
-        region.x, region.y, region.width, region.height
-    )
-}
-
-/// The metrics of a failed comparison, e.g. `0.02% (1 of 6000px) differ`.
-pub fn metrics_summary(metrics: &Metrics) -> String {
-    match metrics {
-        Metrics::Pixel {
-            total_pixels,
-            diff_pixels,
-            diff_ratio,
-            ..
-        } => format!(
-            "{}% ({diff_pixels} of {total_pixels}px) differ",
-            percent(*diff_ratio)
-        ),
-        Metrics::Ssim {
-            min_ssim,
-            peak_excess,
-            failing_region,
-            headroom,
-            ..
-        } => {
-            let mut gates = format!("min local SSIM {}", similarity(*min_ssim));
-            if headroom.color < 0.0 {
-                let _infallible = write!(
-                    gates,
-                    ", colors deviate by up to {} (8-bit units)",
-                    color(*peak_excess)
-                );
-            }
-            match failing_region {
-                Some(bounds) => format!("changed area at {}: {gates}", region(bounds)),
-                None => gates,
-            }
-        }
-    }
-}
-
-/// Both image sizes, e.g. `golden is 100x60px, test image is 100x61px`.
-pub fn dimension_summary(golden: (u32, u32), candidate: (u32, u32)) -> String {
-    format!(
-        "golden is {}x{}px, test image is {}x{}px",
-        golden.0, golden.1, candidate.0, candidate.1
-    )
-}
 
 /// One-character console marker of `outcome`.
 const fn symbol(outcome: CaseOutcome) -> &'static str {
@@ -280,100 +164,6 @@ mod tests {
     use gleon_model::case::SsimHeadroom;
 
     use super::*;
-
-    #[test]
-    fn test_numbers_are_rounded_to_what_matters() {
-        for (value, min, max, expected) in [
-            (8.0, 0, 2, "8"),
-            (7.5, 0, 2, "7.5"),
-            (0.8, 3, 4, "0.800"),
-            (0.9995, 3, 4, "0.9995"),
-            (0.999_95, 3, 4, "1.000"),
-            (146.0, 1, 1, "146.0"),
-            (100.0, 0, 0, "100"),
-            (-1.0, 2, 4, "-1.00"),
-            (-0.0, 2, 4, "0.00"),
-            (7.000_000_000_000_001, 2, 4, "7.00"),
-        ] {
-            assert_eq!(decimal(value, min, max), expected, "{value}");
-        }
-        for (ratio, expected) in [
-            (0.0, "0.00"),
-            (0.0625, "6.25"),
-            (1.0 / 6000.0, "0.0167"),
-            (0.00001, "0.001"),
-            (0.07, "7.00"),
-            (1.0, "100.00"),
-            (1e-9, "<0.0001"),
-        ] {
-            assert_eq!(percent(ratio), expected, "{ratio}");
-        }
-        assert_eq!(signed(similarity(0.131)), "+0.131");
-        assert_eq!(signed(color(-138.0)), "-138.0");
-    }
-
-    #[test]
-    fn test_descriptions_name_the_thresholds() {
-        assert_eq!(tolerance(&Tolerance::Exact {}), "exact");
-        let pixel = |max_diff_ratio| Tolerance::Pixel { max_diff_ratio };
-        assert_eq!(tolerance(&pixel(0.01)), "pixel ≤ 1.00%");
-        assert_eq!(tolerance(&pixel(0.00001)), "pixel ≤ 0.001%");
-        assert_eq!(tolerance(&pixel(-0.0)), "pixel ≤ 0.00%");
-        assert_eq!(tolerance(&pixel(1e-9)), "pixel ≤ <0.0001%");
-        let ssim = |min_similarity, color_tolerance| Tolerance::Ssim {
-            min_similarity,
-            color_tolerance,
-        };
-        assert_eq!(tolerance(&ssim(0.8, 8.0)), "ssim ≥ 0.800, color ±8");
-        assert_eq!(tolerance(&ssim(0.9995, 7.5)), "ssim ≥ 0.9995, color ±7.5");
-    }
-
-    fn ssim_metrics(failing_region: Option<Region>, color: f64) -> Metrics {
-        Metrics::Ssim {
-            min_ssim: 0.5,
-            mean_ssim: 0.9,
-            max_excess: 138.0,
-            peak_excess: 146.0,
-            changed_pixels: 1,
-            changed_region: failing_region,
-            failing_pixels: 1,
-            failing_region,
-            headroom: SsimHeadroom {
-                similarity: -0.3,
-                color,
-            },
-        }
-    }
-
-    #[test]
-    fn test_summaries() {
-        let pixel = Metrics::Pixel {
-            total_pixels: 6000,
-            diff_pixels: 1,
-            diff_ratio: 1.0 / 6000.0,
-            headroom: -1.0 / 6000.0,
-        };
-        assert_eq!(metrics_summary(&pixel), "0.0167% (1 of 6000px) differ");
-        let area = Region {
-            x: 10,
-            y: 10,
-            width: 1,
-            height: 1,
-        };
-        assert_eq!(
-            metrics_summary(&ssim_metrics(Some(area), -138.0)),
-            "changed area at (10, 10) 1x1px: min local SSIM 0.500, colors deviate by up to \
-             146.0 (8-bit units)"
-        );
-        assert_eq!(
-            metrics_summary(&ssim_metrics(None, 1.0)),
-            "min local SSIM 0.500"
-        );
-        assert_eq!(
-            dimension_summary((100, 60), (100, 61)),
-            "golden is 100x60px, test image is 100x61px"
-        );
-    }
 
     #[test]
     fn test_console_lines() {

@@ -6,7 +6,9 @@
 //! the workspace, even byte-identical or missing ones; a golden that cannot be read or written is
 //! an `io` error that is still recorded; the images in the artifacts directory come first (a pass
 //! removes the images of an earlier failure), then the case report listing them, then the
-//! integration's failure artifacts; nothing is written for a pass without metrics.
+//! integration's failure artifacts. A failure of a golden covered by a rule is always recorded
+//! (`gleon report` and `gleon approve` read it); a pass only with metrics, so nothing is written
+//! for a pass without them.
 
 #![forbid(unsafe_code)]
 
@@ -348,7 +350,7 @@ impl Call<'_> {
     ) -> Finished {
         // The comparison itself, not the writing of its outputs.
         let total = self.started.elapsed();
-        let setup = self.ensure_gitignore(&details.images);
+        let setup = self.ensure_gitignore(outcome);
         let (artifacts, kept) = match self.keep(details.images) {
             Ok(artifacts) => (artifacts, None),
             Err(warning) => (None, Some(warning)),
@@ -397,11 +399,11 @@ impl Call<'_> {
     }
 
     /// Creates `.gleon/.gitignore` (which ignores `runs/`, where the images and reports go) when
-    /// this call writes into the workspace; returns the warning when it cannot, since the writes
-    /// themselves may still succeed.
-    fn ensure_gitignore(&self, images: &ArtifactImages<'_>) -> Option<String> {
+    /// this call writes into the workspace (a failure, or any outcome with metrics); returns the
+    /// warning when it cannot, since the writes themselves may still succeed.
+    fn ensure_gitignore(&self, outcome: CaseOutcome) -> Option<String> {
         let golden = self.plan.in_workspace.as_ref()?;
-        if golden.record.is_none() && images.is_empty() {
+        if golden.record.is_none() && !outcome.is_failure() {
             return None;
         }
         golden.workspace.ensure_gitignore().err().map(|e| {
@@ -425,7 +427,6 @@ impl Call<'_> {
             &golden.name,
             images,
         )
-        .map(|artifacts| (!artifacts.is_empty()).then_some(artifacts))
         .map_err(|e| {
             format!(
                 "gleon: cannot update the artifacts {}/{}: {e}",
@@ -435,9 +436,10 @@ impl Call<'_> {
         })
     }
 
-    /// Writes the case report when the plan asks for it and returns the console line (empty
-    /// without one). A report that cannot be written is returned as a warning: metrics are a side
-    /// channel and never change the verdict.
+    /// Writes the case report of a golden covered by a rule (of a pass only with metrics; a pass
+    /// without them removes the report of an earlier failure) and returns the console line (empty
+    /// without metrics or with `console: false`). A report that cannot be written is returned as a
+    /// warning: reports are a side channel and never change the verdict.
     fn record(
         &self,
         outcome: CaseOutcome,
@@ -445,10 +447,23 @@ impl Call<'_> {
         artifacts: Option<Artifacts>,
         total: Duration,
     ) -> Result<String, String> {
-        let Some((golden, record)) = self.plan.recorded() else {
+        let record = self.plan.recorded().map(|(_, record)| record);
+        let Some(golden) = self.plan.in_workspace.as_ref() else {
             return Ok(String::new());
         };
-        let console = if record.console {
+        if record.is_none() && !outcome.is_failure() {
+            // A pass without metrics records nothing, but the report of an earlier failure of
+            // this golden must not outlive it.
+            let stale = CaseReport::path(&golden.workspace.gleon_dir(), &golden.name);
+            return match fs::remove_file(&stale) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(format!(
+                    "gleon: cannot remove the case report {}: {e}",
+                    stale.display()
+                )),
+                _ => Ok(String::new()),
+            };
+        }
+        let console = if record.is_some_and(|record| record.console) {
             text::console_line(
                 &golden.golden_path,
                 outcome,
@@ -980,10 +995,7 @@ screenshots:
         assert_eq!(identical.verdict, Verdict::Identical);
         assert_eq!(fixture.case().artifacts, None, "a pass keeps no images");
         assert!(
-            !fixture
-                .root
-                .join(".gleon/runs/latest/artifacts/test/goldens/a")
-                .exists(),
+            fixture.artifacts().is_empty(),
             "and removes those of the earlier failure"
         );
 
@@ -1018,22 +1030,44 @@ screenshots:
         );
     }
 
+    /// Without metrics a failure is still recorded with its images (for `gleon report` and
+    /// `gleon approve`), only passes and the console line are left out.
     #[test]
-    fn test_artifacts_are_kept_without_metrics_but_not_without_a_rule() {
+    fn test_failures_are_recorded_without_metrics_but_not_without_a_rule() {
         let fixture = Fixture::new(Some(RULE_WITHOUT_METRICS));
         let finished = fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, true));
         assert_eq!(finished.verdict, Verdict::Mismatch);
         assert!(finished.warning.is_empty(), "{}", finished.warning);
+        assert!(
+            finished.console.is_empty(),
+            "the console line is a metrics feature"
+        );
         assert_eq!(fixture.artifacts().len(), 3);
-        assert!(!fixture.case_path().exists());
+        let case = fixture.case();
+        assert_eq!(case.outcome, CaseOutcome::Mismatch);
+        assert!(case.artifacts.unwrap().candidate.is_some());
         assert!(
             fixture.root.join(".gleon/.gitignore").is_file(),
             "the images under .gleon/runs are ignored"
         );
 
+        let broken = Fixture::new(Some(RULE_WITHOUT_METRICS));
+        let finished = broken.run(&broken.session(None), Mode::Compare, &[7; 64]);
+        assert_eq!(finished.verdict, Verdict::Error);
+        assert_eq!(broken.case().error_kind, Some(CaseErrorKind::Image));
+        assert!(broken.root.join(".gleon/.gitignore").is_file());
+
+        // Fixed: the failure's report goes with its images, nothing new is recorded.
+        let finished = fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, false));
+        assert_eq!(finished.verdict, Verdict::Identical);
+        assert!(finished.warning.is_empty(), "{}", finished.warning);
+        assert!(!fixture.case_path().exists(), "no stale failure");
+        assert!(fixture.artifacts().is_empty());
+
         let passing = Fixture::new(Some(RULE_WITHOUT_METRICS));
         let finished = passing.run(&passing.session(None), Mode::Compare, &png(4, 4, false));
         assert_eq!(finished.verdict, Verdict::Identical);
+        assert!(!passing.case_path().exists());
         assert!(
             !passing.root.join(".gleon/.gitignore").exists(),
             "a pass without metrics writes nothing into the workspace"
@@ -1045,6 +1079,7 @@ screenshots:
         let finished = unmatched.run(&unmatched.session(None), Mode::Compare, &png(4, 4, true));
         assert_eq!(finished.verdict, Verdict::Mismatch);
         assert!(unmatched.artifacts().is_empty());
+        assert!(!unmatched.case_path().exists(), "no rule, no report");
         assert_eq!(unmatched.failures().len(), 3);
     }
 

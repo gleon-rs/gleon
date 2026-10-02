@@ -1,20 +1,39 @@
 //! Diff operation for running visual comparison tests against baseline snapshots.
+//!
+//! Every screenshot gets a case report (`.gleon/runs/latest/cases/<name>.json`, `source.tool`
+//! [`CLI_TOOL`]) and, when it fails, its images in the artifacts directory, exactly like the
+//! integrations record theirs; the reports of the run (`report.md`, ...) are rendered from these
+//! case reports, so they always agree with the exit code.
 
-use std::path::{Path, PathBuf};
+use std::{io, path::Path, time::Instant};
 
-use gleon_engine::{ComparisonResult, compare_images, decode::decode_rgba, masking::apply_masks};
+use gleon_engine::{ComparisonResult, compare_images, config::Zone, decode::decode_rgba};
+use gleon_model::{
+    case::{
+        self, ArtifactImages, CASE_SCHEMA_VERSION, CandidateImage, CaseErrorKind, CaseOutcome,
+        CaseReport, CaseTimings, Comparison, GoldenImage, Metrics, RegionMetrics, RunId, Source,
+        text,
+    },
+    config::ArtifactsDir,
+    platform::PlatformConfig,
+    tolerance::Tolerance,
+};
 use thiserror::Error;
 
 use crate::{
+    cases::{Cases, CasesError, new_run_id, platform_of, remove_reports_of},
     context::ResolvedContext,
-    manifest::WorkspaceIndex,
+    manifest::{SingleTestManifest, WorkspaceIndex},
     ops::common::{
         CoreError, ensure_initialized, load_config_and_scan, load_merged_index_with_fallback,
-        platform_key, sha256_hex_matches,
+        platform_key,
     },
     report::{ReportError, ReportGenerator},
-    results::{TestCaseResult, TestImageResult},
+    scanner::TestCase,
 };
+
+/// `source.tool` of the case reports `gleon diff` writes.
+pub const CLI_TOOL: &str = "gleon_cli";
 
 /// Errors that can occur during diff execution.
 #[derive(Debug, Error)]
@@ -23,258 +42,351 @@ pub enum DiffOpError {
     #[error("Report error: {0}")]
     Report(#[from] ReportError),
 
-    /// Image processing error.
-    #[error("Image error: {0}")]
-    Image(#[from] image::ImageError),
+    /// Error reading the case reports of the run.
+    #[error(transparent)]
+    Cases(#[from] CasesError),
+
+    /// A screenshot cannot be read: the workspace is broken, not the screenshot's test.
+    #[error("cannot read the screenshot '{path}': {source}")]
+    Screenshot {
+        /// The screenshot, relative to the workspace root.
+        path: String,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+
+    /// A case report or its images cannot be written.
+    #[error("cannot record '{name}': {source}")]
+    Record {
+        /// The test name.
+        name: String,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
 
     /// Error shared across `ops::*` operations.
     #[error(transparent)]
     Core(#[from] CoreError),
 }
 
+/// Inputs of `gleon diff` beyond the workspace: where failure images go and which run the case
+/// reports belong to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffOptions {
+    /// `gleon diff --artifacts`, which beats [`Self::artifacts_env`].
+    pub artifacts: Option<ArtifactsDir>,
+    /// The value of `GLEON_ARTIFACTS_DIR`, which beats the config's `artifacts:`.
+    pub artifacts_env: Option<ArtifactsDir>,
+    /// The value of `GLEON_RUN_ID`, stamped on every case report; without it `gleon diff` names
+    /// its own run.
+    pub run_id: Option<RunId>,
+}
+
 /// Result summary of executing `gleon diff`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffReportResult {
-    /// Total number of test cases evaluated.
+    /// Total number of screenshots compared.
     pub total_tests: usize,
-    /// Number of test cases that failed comparison.
+    /// Number of screenshots that failed.
     pub failed_tests: usize,
-    /// Whether every test case passed.
-    pub passed: bool,
-    /// Directory containing this run's output (`report.json`, diffs, etc.).
-    pub runs_dir: PathBuf,
+    /// Directory containing this run's output (case reports, artifacts, `report.md`, ...).
+    pub runs_dir: std::path::PathBuf,
 }
 
-// Genuinely long from the sheer number of distinct byte-identical/missing-baseline/decode/mask/
-// compare branches, each returning a different `TestImageResult` variant with its own message —
-// not from duplicated logic.
-#[expect(
-    clippy::too_many_lines,
-    reason = "long by design; see the comment above"
-)]
-pub(crate) fn process_diff_case(
-    case: &crate::scanner::TestCase,
-    workspace_index: &WorkspaceIndex,
-    actual_dir: &Path,
-    diffs_dir: &Path,
-    blobs_root: &Path,
-) -> TestImageResult {
-    let test_name = case.name.clone();
-    let actual_bytes = match std::fs::read(&case.image.absolute_path) {
-        Ok(b) => b,
-        Err(e) => {
-            return TestImageResult::IoError {
-                relative_path: case.image.relative_path.clone(),
-                error: format!("Failed to read actual screenshot file: {e}"),
+/// What one comparison found, before it is recorded.
+struct Judged {
+    outcome: CaseOutcome,
+    error_kind: Option<CaseErrorKind>,
+    message: Option<String>,
+    metrics: Option<Metrics>,
+    /// The baseline's bytes, when they were read.
+    golden: Option<Vec<u8>>,
+    /// The PNG-encoded diff of a mismatch.
+    diff: Option<Vec<u8>>,
+}
+
+impl Judged {
+    const fn new(outcome: CaseOutcome) -> Self {
+        Self {
+            outcome,
+            error_kind: None,
+            message: None,
+            metrics: None,
+            golden: None,
+            diff: None,
+        }
+    }
+
+    fn error(kind: CaseErrorKind, message: String) -> Self {
+        Self {
+            error_kind: Some(kind),
+            message: Some(message),
+            ..Self::new(CaseOutcome::Error)
+        }
+    }
+
+    fn with_golden(self, golden: Vec<u8>) -> Self {
+        Self {
+            golden: Some(golden),
+            ..self
+        }
+    }
+}
+
+/// Everything the comparisons of one `gleon diff` share.
+struct DiffRun<'a> {
+    root: &'a Path,
+    gleon_dir: std::path::PathBuf,
+    index: &'a WorkspaceIndex,
+    blobs_root: std::path::PathBuf,
+    artifacts: ArtifactsDir,
+    source: Source,
+    platform: PlatformConfig,
+    run_id: RunId,
+}
+
+impl DiffRun<'_> {
+    /// Compares the screenshot of `case`, keeps its images when it fails (removing those of an
+    /// earlier failure otherwise) and writes its case report.
+    fn record(&self, case: &TestCase) -> Result<CaseReport, DiffOpError> {
+        let started = Instant::now();
+        let golden_path = gleon_model::naming::normalize_path_separators(
+            &case.image.relative_path.to_string_lossy(),
+        )
+        .into_owned();
+        let candidate =
+            std::fs::read(&case.image.absolute_path).map_err(|source| DiffOpError::Screenshot {
+                path: golden_path.clone(),
+                source,
+            })?;
+        let candidate_image = CandidateImage::of(&candidate);
+        let tolerance = Tolerance::from_rule(case.rule.mode, &case.rule.diff);
+        let masks = case.rule.matched_mask_zones(&case.image.relative_path);
+        let manifest = self.index.get(&case.name);
+        let judged = self.judge(manifest, &candidate, &candidate_image, &tolerance, &masks);
+        let total = started.elapsed();
+
+        let record_error = |source| DiffOpError::Record {
+            name: case.name.clone(),
+            source,
+        };
+        let images = match judged.outcome {
+            CaseOutcome::Mismatch => ArtifactImages {
+                golden: judged.golden.as_deref(),
+                candidate: Some(&candidate),
+                diff: judged.diff.as_deref(),
+            },
+            CaseOutcome::DimensionMismatch => ArtifactImages {
+                golden: judged.golden.as_deref(),
+                candidate: Some(&candidate),
+                diff: None,
+            },
+            // Kept for `gleon approve`, unless it is no PNG at all.
+            CaseOutcome::Missing => ArtifactImages {
+                candidate: case::png_size(&candidate).map(|_| candidate.as_slice()),
+                ..ArtifactImages::default()
+            },
+            _ => ArtifactImages::default(),
+        };
+        let artifacts = case::write_artifacts(self.root, &self.artifacts, &case.name, images)
+            .map_err(record_error)?;
+        let mut golden = GoldenImage::of(
+            golden_path,
+            judged.golden.as_deref(),
+            manifest.map(|manifest| manifest.hash.clone()),
+        );
+        if judged.outcome == CaseOutcome::Identical {
+            // Identical bytes are the baseline's bytes, already hashed.
+            golden.sha256 = Some(candidate_image.sha256.clone());
+        }
+        if let Some(manifest) = manifest.filter(|_| golden.width.is_none()) {
+            golden.width = Some(manifest.width);
+            golden.height = Some(manifest.height);
+        }
+        let report = CaseReport {
+            schema_version: CASE_SCHEMA_VERSION,
+            name: case.name.clone(),
+            golden,
+            candidate: candidate_image,
+            source: self.source.clone(),
+            platform: self.platform.clone(),
+            test: None,
+            comparison: Comparison {
+                tolerance,
+                masks,
+                policy_version: gleon_engine::ssim::POLICY_VERSION,
+            },
+            outcome: judged.outcome,
+            error_kind: judged.error_kind,
+            message: judged.message,
+            metrics: judged.metrics,
+            regions: judged
+                .metrics
+                .map(RegionMetrics::whole_image)
+                .into_iter()
+                .collect(),
+            artifacts,
+            timings_ms: CaseTimings::new(total, None),
+            run_id: Some(self.run_id.clone()),
+            recorded_at: chrono::Utc::now(),
+        };
+        report.write(&self.gleon_dir).map_err(record_error)?;
+        Ok(report)
+    }
+
+    /// Compares `candidate` against the baseline of `manifest` under `tolerance`, `masks`
+    /// applied to both images.
+    fn judge(
+        &self,
+        manifest: Option<&SingleTestManifest>,
+        candidate: &[u8],
+        candidate_image: &CandidateImage,
+        tolerance: &Tolerance,
+        masks: &[Zone],
+    ) -> Judged {
+        let Some(manifest) = manifest else {
+            let mut missing = Judged::new(CaseOutcome::Missing);
+            missing.message = Some("no baseline is staged for this screenshot".to_owned());
+            return missing;
+        };
+        // The manifest names its bytes: equal bytes are the baseline, decided without the blob.
+        let is_identical = manifest.hash.scheme() == "sha256"
+            && manifest.hash.value() == candidate_image.sha256.as_str();
+        if is_identical {
+            return match SingleTestManifest::validate_image_bytes(candidate) {
+                Ok(()) => Judged::new(CaseOutcome::Identical),
+                Err(e) => Judged::error(CaseErrorKind::Image, format!("invalid screenshot: {e}")),
             };
         }
-    };
-
-    let single_manifest_opt = workspace_index.get(&test_name);
-
-    if let Some(baseline_entry) = single_manifest_opt {
-        let is_byte_identical = sha256_hex_matches(&baseline_entry.hash, &actual_bytes);
-        if is_byte_identical {
-            if !crate::storage::has_usable_local_blob(blobs_root, &baseline_entry.hash) {
-                return TestImageResult::MissingBaseline {
-                    relative_path: case.image.relative_path.clone(),
-                    reason: format!("Baseline blob not found: {}", baseline_entry.hash.value()),
-                };
+        let blob_path = crate::storage::local_blob_path(&self.blobs_root, &manifest.hash);
+        let golden = match std::fs::read(&blob_path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Judged::error(
+                    CaseErrorKind::Io,
+                    format!(
+                        "the baseline blob {} is not in .gleon/blobs: run `gleon pull` (or `gleon \
+                         diff --auto-pull`)",
+                        manifest.hash
+                    ),
+                );
             }
-            if let Err(e) = crate::manifest::SingleTestManifest::validate_image_bytes(&actual_bytes)
-            {
-                return TestImageResult::DecodeError {
-                    relative_path: case.image.relative_path.clone(),
-                    error: format!("Invalid actual image dimensions/format: {e}"),
-                };
+            Err(e) => {
+                return Judged::error(
+                    CaseErrorKind::Io,
+                    format!("cannot read the baseline blob {}: {e}", manifest.hash),
+                );
             }
-            return TestImageResult::Success {
-                relative_path: case.image.relative_path.clone(),
-            };
+        };
+        let (mut golden_rgba, mut candidate_rgba) = match decode_both(&golden, candidate) {
+            Ok(images) => images,
+            Err(message) => {
+                return Judged::error(CaseErrorKind::Image, message).with_golden(golden);
+            }
+        };
+        if !masks.is_empty() {
+            gleon_engine::masking::apply_masks(&mut golden_rgba, masks);
+            gleon_engine::masking::apply_masks(&mut candidate_rgba, masks);
         }
+        compare(&golden_rgba, &candidate_rgba, tolerance).with_golden(golden)
     }
+}
 
-    let actual_dest_path = actual_dir.join(&case.image.relative_path);
-
-    let parent = actual_dest_path.parent().unwrap_or_else(|| Path::new("."));
-    if let Err(e) = std::fs::create_dir_all(parent) {
-        return TestImageResult::IoError {
-            relative_path: case.image.relative_path.clone(),
-            error: format!("Failed to create directory for actual screenshot: {e}"),
-        };
-    }
-    if let Err(e) = crate::io::save_file_atomically(&actual_dest_path, &actual_bytes) {
-        return TestImageResult::IoError {
-            relative_path: case.image.relative_path.clone(),
-            error: format!("Failed to save actual screenshot: {e}"),
-        };
-    }
-
-    let Some(baseline_entry) = single_manifest_opt else {
-        return TestImageResult::MissingBaseline {
-            relative_path: case.image.relative_path.clone(),
-            reason: format!("No staged baseline manifest for test '{test_name}'"),
-        };
+/// Decodes the baseline and the screenshot with the same resource-limited decoder as the
+/// integrations, so both see the same pixels for the same bytes; the error says which is
+/// invalid.
+fn decode_both(
+    golden: &[u8],
+    candidate: &[u8],
+) -> Result<(image::RgbaImage, image::RgbaImage), String> {
+    let decode = |bytes: &[u8], what: &str| {
+        SingleTestManifest::validate_image_bytes(bytes)
+            .map_err(|e| e.to_string())
+            .and_then(|()| decode_rgba(bytes).map_err(|e| e.to_string()))
+            .map_err(|e| format!("invalid {what}: {e}"))
     };
+    Ok((
+        decode(golden, "baseline")?,
+        decode(candidate, "screenshot")?,
+    ))
+}
 
-    let baseline_blob_path = crate::storage::local_blob_path(blobs_root, &baseline_entry.hash);
-
-    let baseline_bytes = match std::fs::read(&baseline_blob_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return TestImageResult::MissingBaseline {
-                relative_path: case.image.relative_path.clone(),
-                reason: format!("Baseline blob not found: {}", baseline_entry.hash.value()),
-            };
-        }
-        Err(e) => {
-            return TestImageResult::IoError {
-                relative_path: case.image.relative_path.clone(),
-                error: format!("Failed to read baseline blob file: {e}"),
-            };
-        }
+/// Compares the decoded (and masked) images under `tolerance`.
+fn compare(
+    golden: &image::RgbaImage,
+    candidate: &image::RgbaImage,
+    tolerance: &Tolerance,
+) -> Judged {
+    let (mode, config) = tolerance.engine_config();
+    let (width, height) = golden.dimensions();
+    let total_pixels = u64::from(width) * u64::from(height);
+    let judged = |measurement, outcome, diff| {
+        Metrics::from_measurement(&measurement, tolerance, total_pixels).map_or_else(
+            || {
+                Judged::error(
+                    CaseErrorKind::Internal,
+                    "internal error: the engine measurement does not match the tolerance"
+                        .to_owned(),
+                )
+            },
+            |metrics| Judged {
+                // Failure messages read like the integrations' (shared texts of the model).
+                message: (outcome == CaseOutcome::Mismatch)
+                    .then(|| text::metrics_summary(&metrics)),
+                metrics: Some(metrics),
+                diff,
+                ..Judged::new(outcome)
+            },
+        )
     };
-
-    if let Err(e) = crate::manifest::SingleTestManifest::validate_image_bytes(&baseline_bytes) {
-        return TestImageResult::DecodeError {
-            relative_path: case.image.relative_path.clone(),
-            error: format!("Invalid baseline dimensions/format: {e}"),
-        };
-    }
-
-    // Same resource-limited decoder as the Flutter package, so both entry points see the same
-    // pixels for the same bytes.
-    let mut baseline_rgba = match decode_rgba(&baseline_bytes) {
-        Ok(img) => img,
-        Err(e) => {
-            return TestImageResult::DecodeError {
-                relative_path: case.image.relative_path.clone(),
-                error: format!("Failed to decode baseline blob: {e}"),
-            };
-        }
-    };
-
-    if let Err(e) = crate::manifest::SingleTestManifest::validate_image_bytes(&actual_bytes) {
-        return TestImageResult::DecodeError {
-            relative_path: case.image.relative_path.clone(),
-            error: format!("Invalid actual image dimensions/format: {e}"),
-        };
-    }
-
-    let mut actual_rgba = match decode_rgba(&actual_bytes) {
-        Ok(img) => img,
-        Err(e) => {
-            return TestImageResult::DecodeError {
-                relative_path: case.image.relative_path.clone(),
-                error: format!("Failed to decode actual screenshot: {e}"),
-            };
-        }
-    };
-
-    let matched_zones = case.rule.matched_mask_zones(&case.image.relative_path);
-    if !matched_zones.is_empty() {
-        apply_masks(&mut baseline_rgba, &matched_zones);
-        apply_masks(&mut actual_rgba, &matched_zones);
-    }
-
-    let comp_result = compare_images(
-        &baseline_rgba,
-        &actual_rgba,
-        case.rule.mode,
-        &case.rule.diff,
-    );
-
-    match comp_result {
-        ComparisonResult::Match { .. } => TestImageResult::Success {
-            relative_path: case.image.relative_path.clone(),
-        },
+    match compare_images(golden, candidate, mode, &config) {
+        ComparisonResult::Match { measurement } => judged(measurement, CaseOutcome::Match, None),
         ComparisonResult::TooLarge {
             size: (width, height),
-        } => TestImageResult::DecodeError {
-            relative_path: case.image.relative_path.clone(),
-            error: format!(
-                "{width}x{height} exceeds the SSIM analysis budget of {} pixels; use pixel mode or a smaller capture",
-                gleon_engine::ssim::MAX_ANALYSIS_PIXELS
-            ),
-        },
+        } => Judged::error(
+            CaseErrorKind::Image,
+            text::too_large_for_ssim(width, height),
+        ),
         ComparisonResult::DimensionMismatch {
             baseline_size,
             actual_size,
-        } => TestImageResult::DimensionMismatch {
-            relative_path: case.image.relative_path.clone(),
-            baseline_size,
-            actual_size,
-            baseline_path: baseline_blob_path,
-            actual_path: actual_dest_path,
+        } => Judged {
+            message: Some(text::dimension_summary(baseline_size, actual_size)),
+            ..Judged::new(CaseOutcome::DimensionMismatch)
         },
         ComparisonResult::Mismatch {
-            measurement: detail,
+            measurement,
             diff_image,
-        } => {
-            let case_diff_dir = diffs_dir.join(&test_name);
-            if let Err(e) = std::fs::create_dir_all(&case_diff_dir) {
-                return TestImageResult::IoError {
-                    relative_path: case.image.relative_path.clone(),
-                    error: format!("Failed to create directory for diff: {e}"),
-                };
-            }
-            // Pushed as `OsStr`, so non-UTF-8 file names survive unchanged. Scanned paths always
-            // end in a file name, so the default is never used.
-            let mut diff_file_name = std::ffi::OsString::from("diff_");
-            diff_file_name.push(case.image.relative_path.file_name().unwrap_or_default());
-            let diff_file_path = case_diff_dir.join(&diff_file_name);
-
-            let mut cursor = std::io::Cursor::new(Vec::new());
-            if let Err(e) = diff_image.write_to(&mut cursor, image::ImageFormat::Png) {
-                return TestImageResult::EncodeError {
-                    relative_path: case.image.relative_path.clone(),
-                    actual_path: actual_dest_path,
-                    error: format!("Failed to encode diff visualization: {e}"),
-                };
-            }
-            let encoded = cursor.into_inner();
-            if let Err(e) = crate::io::save_file_atomically(&diff_file_path, &encoded) {
-                return TestImageResult::IoError {
-                    relative_path: case.image.relative_path.clone(),
-                    error: format!("Failed to save diff visualization: {e}"),
-                };
-            }
-
-            TestImageResult::Mismatch {
-                relative_path: case.image.relative_path.clone(),
-                detail,
-                diff_path: diff_file_path,
-                baseline_path: baseline_blob_path,
-                actual_path: actual_dest_path,
-            }
-        }
+        } => match encode_png(&diff_image) {
+            Ok(diff) => judged(measurement, CaseOutcome::Mismatch, Some(diff)),
+            Err(e) => Judged::error(
+                CaseErrorKind::Image,
+                format!("cannot encode the diff image: {e}"),
+            ),
+        },
     }
 }
 
-/// Removes the previous `gleon diff` output from `runs_latest`, keeping the case reports and
-/// failure images of integrations (`cases/`, `artifacts/`): they are written by other tools (test
-/// runs) and consumed separately.
-fn clear_previous_run(runs_latest: &Path) -> std::io::Result<()> {
-    let entries = match std::fs::read_dir(runs_latest) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        entries => entries?,
-    };
-    let kept = [
-        gleon_model::case::CASES_DIR,
-        gleon_model::config::DEFAULT_ARTIFACTS_DIR,
-    ]
-    .map(|dir| Path::new(dir).file_name().unwrap_or_default());
-    for entry in entries {
-        let entry = entry?;
-        if kept.contains(&entry.file_name().as_os_str()) {
-            continue;
-        }
-        if entry.file_type()?.is_dir() {
-            std::fs::remove_dir_all(entry.path())?;
-        } else {
-            std::fs::remove_file(entry.path())?;
+fn encode_png(image: &image::RgbaImage) -> Result<Vec<u8>, image::ImageError> {
+    let mut bytes = Vec::new();
+    image
+        .write_to(&mut io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .map(|()| bytes)
+}
+
+/// Removes the output of the previous `gleon diff` from `runs_latest`: its rendered reports and
+/// its case reports with their images. Case reports of other tools (test runs of integrations)
+/// and the run file stay.
+fn clear_previous_run(runs_latest: &Path) -> Result<(), DiffOpError> {
+    for output in ReportGenerator::OUTPUT_FILES {
+        match std::fs::remove_file(runs_latest.join(output)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(CoreError::Io(e).into()),
+            _ => {}
         }
     }
+    remove_reports_of(runs_latest, CLI_TOOL)?;
     Ok(())
 }
 
@@ -283,9 +395,13 @@ fn clear_previous_run(runs_latest: &Path) -> std::io::Result<()> {
 /// # Errors
 ///
 /// Returns an error if the workspace is not initialized, if the platform key cannot be
-/// resolved, if manifests fail to load, if the previous run's cache cannot be cleared or
-/// recreated, if screenshots cannot be scanned, or if generating the HTML/JUnit reports fails.
-pub fn run_diff(context: &ResolvedContext) -> Result<DiffReportResult, DiffOpError> {
+/// resolved, if manifests fail to load, if the previous run's output cannot be cleared, if
+/// screenshots cannot be scanned or read, if a case report or its images cannot be written, or if
+/// reading the case reports back or rendering the reports fails.
+pub fn run_diff(
+    context: &ResolvedContext,
+    options: &DiffOptions,
+) -> Result<DiffReportResult, DiffOpError> {
     use rayon::prelude::*;
 
     let paths = ensure_initialized(&context.base_dir)?;
@@ -297,53 +413,63 @@ pub fn run_diff(context: &ResolvedContext) -> Result<DiffReportResult, DiffOpErr
         context.fallback_platform_key.as_deref(),
     )?;
 
-    let runs_dir = paths.runs_latest();
-    clear_previous_run(&runs_dir).map_err(CoreError::Io)?;
-    let diffs_dir = paths.runs_latest_diffs();
-    let actual_dir = paths.runs_actual();
-    std::fs::create_dir_all(&diffs_dir).map_err(CoreError::Io)?;
-    std::fs::create_dir_all(&actual_dir).map_err(CoreError::Io)?;
-    let blobs_root = paths.blobs_root();
-
+    // Scanned first: a workspace that cannot be scanned keeps the previous run (and its candidates
+    // for `gleon approve`).
     let test_cases = load_config_and_scan(context)?;
+    let runs_dir = paths.runs_latest();
+    clear_previous_run(&runs_dir)?;
+
+    let config = context.config.clone().unwrap_or_default();
+    let run = DiffRun {
+        root: &context.base_dir,
+        gleon_dir: paths.gleon_dir(),
+        index: &workspace_index,
+        blobs_root: paths.blobs_root(),
+        artifacts: config.artifacts_dir(options.artifacts_env.as_ref(), options.artifacts.as_ref()),
+        source: Source {
+            tool: CLI_TOOL.to_owned(),
+            tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+            renderer: context.platform.renderer.clone(),
+        },
+        platform: platform_of(&context.platform),
+        run_id: options
+            .run_id
+            .clone()
+            .unwrap_or_else(|| new_run_id(chrono::Utc::now())),
+    };
 
     let progress_bar = crate::ui::create_progress_bar(test_cases.len() as u64);
-
-    let case_results: Vec<TestCaseResult> = test_cases
-        .into_par_iter()
+    let recorded: Vec<Result<CaseReport, DiffOpError>> = test_cases
+        .par_iter()
         .map(|case| {
             progress_bar.set_message(case.image.relative_path.display().to_string());
-            let result = process_diff_case(
-                &case,
-                &workspace_index,
-                &actual_dir,
-                &diffs_dir,
-                &blobs_root,
-            );
+            let report = run.record(case);
             progress_bar.inc(1);
-            TestCaseResult {
-                name: case.name,
-                result,
-            }
+            report
         })
         .collect();
-
     progress_bar.finish_and_clear();
 
-    let total_tests = case_results.len();
-    let failed_tests = case_results
-        .iter()
-        .filter(|tc| !matches!(tc.result, TestImageResult::Success { .. }))
-        .count();
-    let passed = failed_tests == 0;
-
-    // Generate HTML and JUnit XML reports
-    ReportGenerator::generate_all(&runs_dir, &case_results).map_err(DiffOpError::Report)?;
-
+    // The reports cover what was recorded even when a screenshot could not be, so a broken run
+    // still explains itself; the first error decides the result.
+    let mut reports = Vec::with_capacity(recorded.len());
+    let mut first_error = None;
+    for report in recorded {
+        match report {
+            Ok(report) => reports.push(report),
+            Err(e) => {
+                let _ = first_error.get_or_insert(e);
+            }
+        }
+    }
+    let cases = Cases::new(&runs_dir, reports).with_run_id(run.run_id);
+    ReportGenerator::generate_all(&runs_dir, &cases)?;
+    if let Some(e) = first_error {
+        return Err(e);
+    }
     Ok(DiffReportResult {
-        total_tests,
-        failed_tests,
-        passed,
+        total_tests: cases.reports().len(),
+        failed_tests: cases.failures().count(),
         runs_dir,
     })
 }
@@ -360,6 +486,7 @@ pub fn run_diff(context: &ResolvedContext) -> Result<DiffReportResult, DiffOpErr
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
+    use gleon_model::platform::PlatformInfo;
     use sha2::Digest;
 
     use super::*;
@@ -367,25 +494,243 @@ mod tests {
         config::ConfigError, context::ContextError, manifest::ManifestError, scanner::ScannerError,
     };
 
-    #[test]
-    fn test_clearing_the_previous_run_keeps_the_case_reports() {
+    /// A workspace with one staged 4x4 screenshot `shots/a.png` (exact rule) and its context.
+    fn staged_workspace() -> (tempfile::TempDir, ResolvedContext) {
         let temp = tempfile::tempdir().unwrap();
-        let latest = temp.path().join("runs/latest");
-        std::fs::create_dir_all(latest.join("cases/test")).unwrap();
-        std::fs::write(latest.join("cases/test/a.json"), "{}").unwrap();
-        std::fs::create_dir_all(latest.join("artifacts/test/a")).unwrap();
-        std::fs::create_dir_all(latest.join("diffs/x")).unwrap();
-        std::fs::write(latest.join("gleon-report.json"), "{}").unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join(".gleon")).unwrap();
+        std::fs::write(
+            root.join(".gleon/gleon.yaml"),
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"shots/*.png\"\n    mode: pixel\n    diff: { threshold: 0.0 }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("shots")).unwrap();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]))
+            .save(root.join("shots/a.png"))
+            .unwrap();
+        let ctx = ResolvedContext::from_options(&crate::context::ContextOptions::default(), root)
+            .unwrap();
+        crate::ops::stage_workspace(&ctx, None).unwrap();
+        (temp, ctx)
+    }
 
-        clear_previous_run(&latest).unwrap();
-        let mut left: Vec<_> = std::fs::read_dir(&latest)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        left.sort();
-        assert_eq!(left, ["artifacts", "cases"]);
-        assert!(latest.join("cases/test/a.json").is_file());
-        clear_previous_run(&temp.path().join("missing")).unwrap();
+    fn case_report(root: &Path, name: &str) -> CaseReport {
+        let bytes = std::fs::read(CaseReport::path(&root.join(".gleon"), name)).unwrap();
+        CaseReport::parse(&bytes).unwrap()
+    }
+
+    #[test]
+    fn test_diff_records_a_case_report_per_screenshot() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        let options = DiffOptions {
+            run_id: Some(RunId::new("ci-7").unwrap()),
+            ..DiffOptions::default()
+        };
+
+        let identical = run_diff(&ctx, &options).unwrap();
+        assert_eq!(identical.failed_tests, 0);
+        let report = case_report(root, "shots/a");
+        assert_eq!(report.outcome, CaseOutcome::Identical);
+        assert_eq!(report.source.tool, CLI_TOOL);
+        assert_eq!(report.run_id.as_ref().unwrap().as_str(), "ci-7");
+        assert_eq!(report.golden.path, "shots/a.png");
+        assert_eq!(report.golden.sha256, Some(report.candidate.sha256.clone()));
+        assert!(report.golden.blob.is_some());
+        assert_eq!(
+            report.comparison.tolerance,
+            Tolerance::Pixel {
+                max_diff_ratio: 0.0
+            }
+        );
+        assert!(report.artifacts.is_none());
+
+        image::RgbaImage::from_fn(4, 4, |x, _| {
+            image::Rgba([if x == 0 { 255 } else { 0 }, 0, 255, 255])
+        })
+        .save(root.join("shots/a.png"))
+        .unwrap();
+        image::RgbaImage::new(2, 2)
+            .save(root.join("shots/new.png"))
+            .unwrap();
+        let failed = run_diff(&ctx, &options).unwrap();
+        assert_eq!((failed.total_tests, failed.failed_tests), (2, 2));
+        let mismatch = case_report(root, "shots/a");
+        assert_eq!(mismatch.outcome, CaseOutcome::Mismatch);
+        assert!(matches!(
+            mismatch.metrics,
+            Some(Metrics::Pixel {
+                diff_pixels: 4,
+                total_pixels: 16,
+                ..
+            })
+        ));
+        assert_eq!(mismatch.regions.len(), 1);
+        assert_eq!(
+            mismatch.message.as_deref(),
+            Some("25.00% (4 of 16px) differ"),
+            "the integrations' texts"
+        );
+        let artifacts = mismatch.artifacts.unwrap();
+        for path in [&artifacts.golden, &artifacts.candidate, &artifacts.diff] {
+            let path = path.as_deref().unwrap();
+            assert!(
+                path.starts_with(".gleon/runs/latest/artifacts/shots/a/"),
+                "{path}"
+            );
+            assert!(root.join(path).is_file(), "{path}");
+        }
+        let missing = case_report(root, "shots/new");
+        assert_eq!(missing.outcome, CaseOutcome::Missing);
+        assert_eq!(missing.golden.sha256, None);
+        assert!(missing.artifacts.unwrap().candidate.is_some());
+
+        let latest = root.join(".gleon/runs/latest");
+        let md = std::fs::read_to_string(latest.join("report.md")).unwrap();
+        assert!(
+            md.contains("| shots/a | shots/a.png | ❌ Mismatch |"),
+            "{md}"
+        );
+        assert!(latest.join("junit.xml").is_file() && latest.join("report.html").is_file());
+    }
+
+    #[test]
+    fn test_diff_starts_clean_but_keeps_the_reports_of_integrations() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        image::RgbaImage::new(2, 2)
+            .save(root.join("shots/gone.png"))
+            .unwrap();
+        run_diff(&ctx, &DiffOptions::default()).unwrap();
+        assert!(
+            root.join(".gleon/runs/latest/artifacts/shots/gone/candidate.png")
+                .is_file()
+        );
+
+        let mut flutter = crate::cases::fixtures::report("test/goldens/x", CaseOutcome::Match);
+        flutter.golden.path = "shots/a.png".to_owned();
+        flutter.write(&root.join(".gleon")).unwrap();
+        let run_file = root.join(".gleon/runs/latest/run.json");
+        crate::cases::RunInfo {
+            run_id: RunId::new("earlier").unwrap(),
+            started_at: chrono::Utc::now() - chrono::TimeDelta::hours(1),
+            command: vec!["flutter".to_owned(), "test".to_owned()],
+        }
+        .write(&root.join(".gleon/runs/latest"))
+        .unwrap();
+
+        std::fs::remove_file(root.join("shots/gone.png")).unwrap();
+        let result = run_diff(&ctx, &DiffOptions::default()).unwrap();
+        assert_eq!(result.total_tests, 1);
+        let cases = root.join(".gleon/runs/latest/cases");
+        assert!(
+            !cases.join("shots/gone.json").exists(),
+            "its screenshot is gone"
+        );
+        assert!(
+            !root
+                .join(".gleon/runs/latest/artifacts/shots/gone/candidate.png")
+                .exists()
+        );
+        assert!(cases.join("test/goldens/x.json").is_file(), "not ours");
+        assert!(run_file.is_file());
+    }
+
+    /// Without `GLEON_RUN_ID` a run still has its own id: its reports are read as one run, with no
+    /// warning, and reports of integrations without one do not leak into its reports.
+    #[test]
+    fn test_diff_names_its_own_run() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        let mut flutter = crate::cases::fixtures::report("test/goldens/x", CaseOutcome::Mismatch);
+        flutter.golden.path = "shots/a.png".to_owned();
+        flutter.write(&root.join(".gleon")).unwrap();
+
+        run_diff(&ctx, &DiffOptions::default()).unwrap();
+        let run_id = case_report(root, "shots/a").run_id.unwrap();
+        assert!(run_id.as_str().starts_with("run-"), "{run_id:?}");
+        let md = std::fs::read_to_string(root.join(".gleon/runs/latest/report.md")).unwrap();
+        assert!(md.contains("**Total Tests:** 1\n**Failed:** 0"), "{md}");
+        assert!(!md.contains("test/goldens/x"), "{md}");
+        assert!(!md.contains("⚠️"), "{md}");
+
+        // The next run is another one.
+        run_diff(&ctx, &DiffOptions::default()).unwrap();
+        assert_ne!(case_report(root, "shots/a").run_id.unwrap(), run_id);
+    }
+
+    /// Under a `GLEON_RUN_ID` an integration shares (CI), the reports of `gleon diff` still tell
+    /// exactly what it compared, like its exit code.
+    #[test]
+    fn test_diff_reports_only_its_cases_under_a_shared_run_id() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        let run_id = RunId::new("ci-1").unwrap();
+        let mut flutter = crate::cases::fixtures::report("test/goldens/x", CaseOutcome::Mismatch);
+        flutter.run_id = Some(run_id.clone());
+        flutter.write(&root.join(".gleon")).unwrap();
+
+        let options = DiffOptions {
+            run_id: Some(run_id),
+            ..DiffOptions::default()
+        };
+        let result = run_diff(&ctx, &options).unwrap();
+        assert_eq!((result.total_tests, result.failed_tests), (1, 0));
+        let md = std::fs::read_to_string(root.join(".gleon/runs/latest/report.md")).unwrap();
+        assert!(md.contains("**Total Tests:** 1\n**Failed:** 0"), "{md}");
+        assert!(
+            root.join(".gleon/runs/latest/cases/test/goldens/x.json")
+                .is_file(),
+            "the integration's report stays"
+        );
+    }
+
+    /// A workspace that cannot be scanned keeps the previous run: its reports and the candidates
+    /// `gleon approve` needs.
+    #[test]
+    fn test_diff_keeps_the_previous_run_when_the_scan_fails() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))
+            .save(root.join("shots/a.png"))
+            .unwrap();
+        let result = run_diff(&ctx, &DiffOptions::default()).unwrap();
+        assert_eq!(result.failed_tests, 1);
+        let candidate = root.join(".gleon/runs/latest/artifacts/shots/a/candidate.png");
+        assert!(candidate.is_file());
+
+        std::fs::write(root.join("shots/bad name.png"), b"x").unwrap();
+        let err = run_diff(&ctx, &DiffOptions::default()).unwrap_err();
+        assert!(
+            matches!(err, DiffOpError::Core(CoreError::Scanner(_))),
+            "{err:?}"
+        );
+        assert!(candidate.is_file());
+        assert_eq!(case_report(root, "shots/a").outcome, CaseOutcome::Mismatch);
+        assert!(root.join(".gleon/runs/latest/report.md").is_file());
+    }
+
+    /// Images in a custom artifacts directory outside `latest/` are approved from and cleaned up
+    /// like the default ones.
+    #[test]
+    fn test_diff_with_a_custom_artifacts_directory() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))
+            .save(root.join("shots/a.png"))
+            .unwrap();
+        let options = DiffOptions {
+            artifacts: Some(ArtifactsDir::new(".gleon/runs/ci").unwrap()),
+            ..DiffOptions::default()
+        };
+        assert_eq!(run_diff(&ctx, &options).unwrap().failed_tests, 1);
+        let candidate = root.join(".gleon/runs/ci/shots/a/candidate.png");
+        assert!(candidate.is_file());
+
+        let approved = crate::ops::approve_workspace(&ctx, &[], &[], None).unwrap();
+        assert_eq!(approved.approved_test_cases, ["shots/a"]);
+        assert_eq!(run_diff(&ctx, &options).unwrap().failed_tests, 0);
+        assert!(!candidate.exists(), "the next run removes the images");
     }
 
     #[test]
@@ -414,7 +759,7 @@ mod tests {
             CoreError::Manifest(ManifestError::Validation("bad manifest".to_string())).into();
         assert!(err5.to_string().contains("Manifest error"));
 
-        let err6: DiffOpError = CoreError::Io(std::io::Error::other("io test")).into();
+        let err6: DiffOpError = CoreError::Io(io::Error::other("io test")).into();
         assert!(err6.to_string().contains("IO error"));
     }
 
@@ -430,7 +775,7 @@ mod tests {
         };
         ctx.platform.os = "../invalid".to_string(); // Invalid segment
 
-        let err = run_diff(&ctx).unwrap_err();
+        let err = run_diff(&ctx, &DiffOptions::default()).unwrap_err();
         assert!(matches!(
             err,
             DiffOpError::Core(CoreError::Context(ContextError::Platform(_)))
@@ -454,7 +799,7 @@ mod tests {
         std::fs::create_dir_all(&manifests_dir).unwrap();
         std::fs::write(manifests_dir.join("test.json"), "invalid json").unwrap();
 
-        let res = run_diff(&ctx);
+        let res = run_diff(&ctx, &DiffOptions::default());
         assert!(matches!(
             res,
             Err(DiffOpError::Core(CoreError::Manifest(_)))
@@ -468,7 +813,7 @@ mod tests {
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(bad_dir.join("test.png"), "fake png").unwrap();
 
-        let res2 = run_diff(&ctx);
+        let res2 = run_diff(&ctx, &DiffOptions::default());
         assert!(matches!(
             res2,
             Err(DiffOpError::Core(CoreError::Scanner(_)))
@@ -496,7 +841,7 @@ mod tests {
         )
         .unwrap();
         let phash = crate::manifest::ImageHash::new("dhash", "0000000000000000").unwrap();
-        let manifest = crate::manifest::SingleTestManifest::new(hash, phash, 100, 100).unwrap();
+        let manifest = SingleTestManifest::new(hash, phash, 100, 100).unwrap();
         manifest.save(manifests_dir.join("login.json")).unwrap();
 
         // Create actual screenshot with non-matching hash
@@ -510,9 +855,8 @@ mod tests {
             .join("1111111111111111111111111111111111111111111111111111111111111111");
         std::fs::create_dir_all(&blob_dir).unwrap();
 
-        let res = run_diff(&ctx).unwrap();
+        let res = run_diff(&ctx, &DiffOptions::default()).unwrap();
         assert_eq!(res.failed_tests, 1);
-        assert!(!res.passed);
     }
 
     #[cfg(all(unix, not(miri)))]
@@ -537,7 +881,7 @@ mod tests {
         )
         .unwrap();
         let phash = crate::manifest::ImageHash::new("dhash", "0000000000000000").unwrap();
-        let manifest = crate::manifest::SingleTestManifest::new(hash, phash, 100, 100).unwrap();
+        let manifest = SingleTestManifest::new(hash, phash, 100, 100).unwrap();
         manifest.save(manifests_dir.join("login.json")).unwrap();
 
         let screenshot = temp.path().join("login.png");
@@ -548,217 +892,90 @@ mod tests {
         perms.set_mode(0o000);
         std::fs::set_permissions(&screenshot, perms.clone()).unwrap();
 
-        let res = run_diff(&ctx);
+        let res = run_diff(&ctx, &DiffOptions::default());
 
         // Restore permissions before assertions
         perms.set_mode(0o644);
         std::fs::set_permissions(&screenshot, perms).unwrap();
 
-        let report = res.unwrap();
-        assert_eq!(report.failed_tests, 1);
-        assert!(!report.passed);
+        // An unreadable screenshot breaks the workspace, not one test; the reports still explain
+        // the run.
+        assert!(
+            matches!(res, Err(DiffOpError::Screenshot { ref path, .. }) if path == "login.png"),
+            "{res:?}"
+        );
+        assert!(temp.path().join(".gleon/runs/latest/report.md").is_file());
     }
 
     #[test]
     #[cfg(all(unix, not(miri)))]
-    fn test_diff_write_io_errors_via_poisoning() {
+    fn test_diff_fails_when_it_cannot_record() {
         use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let gleon_dir = temp.path().join(".gleon");
-        std::fs::create_dir_all(&gleon_dir).unwrap();
 
-        let mut ctx = ResolvedContext {
-            base_dir: temp.path().to_path_buf(),
-            ..ResolvedContext::default()
-        };
-        ctx.platform.os = "linux".to_string();
-        let key = ctx.platform.to_key().unwrap();
-
-        let manifests_dir = gleon_dir.join("manifests").join(&key);
-        std::fs::create_dir_all(&manifests_dir).unwrap();
-        let hash = "1111111111111111111111111111111111111111111111111111111111111111";
-        let manifest = crate::manifest::SingleTestManifest::new(
-            crate::manifest::ImageHash::new("sha256", hash).unwrap(),
-            crate::manifest::ImageHash::new("dhash", "0000000000000000").unwrap(),
-            1,
-            1,
-        )
-        .unwrap();
-        manifest.save(manifests_dir.join("test.json")).unwrap();
-
-        let blobs_dir = gleon_dir.join("blobs").join("sha256");
-        std::fs::create_dir_all(&blobs_dir).unwrap();
-        let img = image::ImageBuffer::<image::Rgba<u8>, _>::new(1, 1);
-        img.save_with_format(blobs_dir.join(hash), image::ImageFormat::Png)
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        image::RgbaImage::new(4, 4)
+            .save(root.join("shots/a.png"))
             .unwrap();
+        let artifacts = root.join(".gleon/runs/latest/artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let is_writable = std::fs::create_dir(artifacts.join("probe")).is_ok(); // As root.
 
-        // Mismatching actual image (same dimensions, different color)
-        let mut bad_img = image::ImageBuffer::<image::Rgba<u8>, _>::new(1, 1);
-        bad_img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
-        bad_img.save(temp.path().join("test.png")).unwrap();
-
-        let runs_dir = gleon_dir.join("runs").join("latest");
-        let actual_dir = runs_dir.join("actuals");
-        let diffs_dir = runs_dir.join("diffs");
-        std::fs::create_dir_all(&actual_dir).unwrap();
-        std::fs::create_dir_all(&diffs_dir).unwrap();
-
-        // Put a file inside actual_dir and diffs_dir so they cannot be deleted if read-only
-        std::fs::write(actual_dir.join("dummy"), "").unwrap();
-        std::fs::write(diffs_dir.join("dummy"), "").unwrap();
-
-        // Make actual_dir and diffs_dir read-only.
-        // remove_dir_all(&runs_dir) will fail to delete them because it can't delete 'dummy'.
-        // They will survive, and then save_file_atomically will fail because they are read-only!
-        let mut perms = std::fs::metadata(&actual_dir).unwrap().permissions();
-        perms.set_mode(0o555);
-        std::fs::set_permissions(&actual_dir, perms.clone()).unwrap();
-        std::fs::set_permissions(&diffs_dir, perms.clone()).unwrap();
-
-        let result = run_diff(&ctx);
-        assert!(result.is_err());
-
-        // Restore permissions so tempdir can be cleaned up
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&actual_dir, perms.clone()).unwrap();
-        std::fs::set_permissions(&diffs_dir, perms).unwrap();
-    }
-
-    #[test]
-    fn test_diff_empty_fallback_platform() {
-        let temp = tempfile::tempdir().unwrap();
-        let gleon_dir = temp.path().join(".gleon");
-        std::fs::create_dir_all(&gleon_dir).unwrap();
-
-        let ctx = ResolvedContext {
-            base_dir: temp.path().to_path_buf(),
-            fallback_platform_key: Some("some-fallback-key".to_string()),
-            ..Default::default()
-        };
-
-        // No manifests created for primary or fallback platform, so fb_index will be empty.
-        // run_diff should run and return no test results because scanner finds nothing (no screenshots created).
-        let res = run_diff(&ctx).unwrap();
-        assert_eq!(res.total_tests, 0);
-    }
-
-    #[test]
-    #[cfg(all(unix, not(miri)))]
-    fn test_process_diff_case_io_errors() {
-        use std::os::unix::fs::PermissionsExt;
-        // SAFETY: `libc::geteuid()` is a side-effect-free POSIX syscall query that returns the process EUID.
-        #[expect(
-            unsafe_code,
-            reason = "`libc::geteuid()` is a side-effect-free POSIX query (see SAFETY comment)"
-        )]
-        if unsafe { libc::geteuid() } == 0 {
-            return;
+        let result = run_diff(&ctx, &DiffOptions::default());
+        std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !is_writable {
+            assert!(
+                matches!(result, Err(DiffOpError::Record { ref name, .. }) if name == "shots/a"),
+                "{result:?}"
+            );
         }
+    }
 
-        let temp = tempfile::tempdir().unwrap();
-        let gleon_dir = temp.path().join(".gleon");
-        let actual_dir = temp.path().join("actual");
-        let diffs_dir = temp.path().join("diffs");
+    #[test]
+    fn test_diff_reports_unusable_baselines_as_errors() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        let blobs = root.join(".gleon/blobs/sha256");
+        let blob = std::fs::read_dir(&blobs)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
 
-        std::fs::create_dir_all(&gleon_dir).unwrap();
-        std::fs::create_dir_all(&actual_dir).unwrap();
-        std::fs::create_dir_all(&diffs_dir).unwrap();
-
-        let case = crate::scanner::TestCase {
-            name: "test".to_string(),
-            image: crate::scanner::TestImage {
-                absolute_path: temp.path().join("test.png"),
-                relative_path: PathBuf::from("test.png"),
-            },
-            rule: std::sync::Arc::new(crate::config::ScreenshotRule {
-                include: vec![],
-                mode: gleon_engine::config::Mode::Pixel,
-                diff: gleon_engine::config::DiffConfig {
-                    threshold: 0.0,
-                    anti_alias: false,
-                    min_similarity: 1.0,
-                    color_tolerance: 8.0,
-                },
-                masks: vec![],
-            }),
-        };
-
-        // 1. Missing actual image
-        let res1 = process_diff_case(
-            &case,
-            &WorkspaceIndex::new(),
-            &actual_dir,
-            &diffs_dir,
-            &gleon_dir.join("blobs"),
+        std::fs::write(&blob, b"not a png").unwrap();
+        image::RgbaImage::new(4, 4)
+            .save(root.join("shots/a.png"))
+            .unwrap();
+        run_diff(&ctx, &DiffOptions::default()).unwrap();
+        let corrupt = case_report(root, "shots/a");
+        assert_eq!(
+            (corrupt.outcome, corrupt.error_kind),
+            (CaseOutcome::Error, Some(CaseErrorKind::Image))
         );
-        assert!(matches!(res1, TestImageResult::IoError { .. }));
+        assert!(corrupt.message.unwrap().starts_with("invalid baseline: "));
+        assert!(corrupt.golden.sha256.is_some(), "the blob was read");
 
-        // 2. Decode error on actual image (requires baseline to bypass MissingBaseline)
-        std::fs::write(&case.image.absolute_path, "fake png").unwrap();
-        let mut index = WorkspaceIndex::new();
-        let hash_val = "1111111111111111111111111111111111111111111111111111111111111111";
-        index.insert(
-            "test".to_string(),
-            crate::manifest::SingleTestManifest {
-                schema_version: 1,
-                hash: crate::manifest::ImageHash::new("sha256", hash_val).unwrap(),
-                phash: crate::manifest::ImageHash::new("dhash", "2222222222222222").unwrap(),
-                width: 1,
-                height: 1,
-            },
+        std::fs::remove_file(&blob).unwrap();
+        run_diff(&ctx, &DiffOptions::default()).unwrap();
+        let missing_blob = case_report(root, "shots/a");
+        assert_eq!(missing_blob.error_kind, Some(CaseErrorKind::Io));
+        assert!(missing_blob.message.unwrap().contains("gleon pull"));
+        assert_eq!(
+            missing_blob.golden.width,
+            Some(4),
+            "the size comes from the manifest"
         );
-        let blob_dir = gleon_dir.join("blobs").join("sha256");
-        std::fs::create_dir_all(&blob_dir).unwrap();
-        std::fs::write(blob_dir.join(hash_val), "fake png").unwrap();
-        let res2 = process_diff_case(
-            &case,
-            &index,
-            &actual_dir,
-            &diffs_dir,
-            &gleon_dir.join("blobs"),
-        );
-        assert!(matches!(res2, TestImageResult::DecodeError { .. }));
+        assert!(missing_blob.artifacts.is_none());
 
-        // Create valid image
-        let img = image::ImageBuffer::<image::Rgba<u8>, _>::new(1, 1);
-        img.save(&case.image.absolute_path).unwrap();
-
-        // 3. IoError on create actual dir (make actual_dir read-only)
-        let mut perms = std::fs::metadata(&actual_dir).unwrap().permissions();
-        perms.set_mode(0o555);
-        std::fs::set_permissions(&actual_dir, perms.clone()).unwrap();
-
-        let case2 = crate::scanner::TestCase {
-            name: "test".to_string(),
-            image: crate::scanner::TestImage {
-                absolute_path: case.image.absolute_path,
-                relative_path: PathBuf::from("subdir/test.png"), // Requires create_dir_all
-            },
-            rule: std::sync::Arc::new(crate::config::ScreenshotRule {
-                include: vec![],
-                mode: gleon_engine::config::Mode::Pixel,
-                diff: gleon_engine::config::DiffConfig {
-                    threshold: 0.0,
-                    anti_alias: false,
-                    min_similarity: 1.0,
-                    color_tolerance: 8.0,
-                },
-                masks: vec![],
-            }),
-        };
-        let res3 = process_diff_case(
-            &case2,
-            &WorkspaceIndex::new(),
-            &actual_dir,
-            &diffs_dir,
-            &gleon_dir.join("blobs"),
-        );
-
-        // Restore permissions before assertions
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&actual_dir, perms).unwrap();
-
-        assert!(matches!(res3, TestImageResult::IoError { .. }));
+        // The staged bytes themselves are identical without the blob: the manifest names them.
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]))
+            .save(root.join("shots/a.png"))
+            .unwrap();
+        let identical = run_diff(&ctx, &DiffOptions::default()).unwrap();
+        assert_eq!(identical.failed_tests, 0);
+        assert_eq!(case_report(root, "shots/a").outcome, CaseOutcome::Identical);
     }
 
     #[test]
@@ -773,7 +990,7 @@ mod tests {
 
         let mut ctx = ResolvedContext {
             base_dir: base_path.to_path_buf(),
-            platform: crate::platform::PlatformInfo {
+            platform: PlatformInfo {
                 os: "linux".to_string(),
                 arch: Some("x86_64".to_string()),
                 renderer: None,
@@ -816,7 +1033,7 @@ screenshots:
         let dhash = crate::manifest::ImageHash::new("dhash", "0000000000000000").unwrap();
 
         let dummy_sha = "0".repeat(64);
-        let macos_m1 = crate::manifest::SingleTestManifest::new(
+        let macos_m1 = SingleTestManifest::new(
             crate::manifest::ImageHash::new("sha256", &dummy_sha).unwrap(),
             dhash.clone(),
             10,
@@ -825,7 +1042,7 @@ screenshots:
         .unwrap();
         macos_m1.save(macos_manifests.join("test1.json")).unwrap();
 
-        let macos_m2 = crate::manifest::SingleTestManifest::new(
+        let macos_m2 = SingleTestManifest::new(
             crate::manifest::ImageHash::new("sha256", &img2_sha).unwrap(),
             dhash.clone(),
             20,
@@ -837,7 +1054,7 @@ screenshots:
         // 2. Linux manifests contains ONLY test1 (override)
         let linux_manifests = gleon_dir.join("manifests").join(linux_key);
         std::fs::create_dir_all(&linux_manifests).unwrap();
-        let linux_m1 = crate::manifest::SingleTestManifest::new(
+        let linux_m1 = SingleTestManifest::new(
             crate::manifest::ImageHash::new("sha256", &img1_sha).unwrap(),
             dhash,
             10,
@@ -847,9 +1064,8 @@ screenshots:
         linux_m1.save(linux_manifests.join("test1.json")).unwrap();
 
         // Run diff on linux
-        let diff_result = run_diff(&ctx).unwrap();
+        let diff_result = run_diff(&ctx, &DiffOptions::default()).unwrap();
         assert_eq!(diff_result.total_tests, 2);
         assert_eq!(diff_result.failed_tests, 0);
-        assert!(diff_result.passed);
     }
 }

@@ -1,10 +1,11 @@
-//! Generates HTML, `JUnit` XML, and Markdown reports from test results.
+//! Generates HTML, `JUnit` XML, and Markdown reports from the case reports of a run
+//! ([`crate::cases::Cases`]).
 //!
 //! Split by output format across private submodules: `html` (`report.html`), `xml`
 //! (`junit.xml`), and `markdown` (PR-comment/summary Markdown), plus `presign` (signing remote
-//! storage URLs for a Markdown PR comment's images), sharing the path-formatting helpers in
-//! `format` and the bundled-template registry defined here. Each submodule contributes its
-//! generator methods via its own `impl ReportGenerator` block.
+//! storage URLs for a Markdown PR comment's baselines), sharing the path and outcome formatting
+//! helpers in `format` and the bundled-template registry defined here. Each submodule contributes
+//! its generator methods via its own `impl ReportGenerator` block.
 
 mod format;
 mod html;
@@ -14,40 +15,29 @@ mod xml;
 
 use std::sync::LazyLock;
 
-use crate::results::TestCaseResult;
+use crate::{cases::Cases, manifest::ImageHash};
 
 pub(crate) static JINJA_ENV: LazyLock<minijinja::Environment<'static>> = LazyLock::new(|| {
     let mut env = minijinja::Environment::new();
-    // Bundled templates are compiled into the binary and validated by the test
-    // suite; a syntax error here would be a build-time bug caught immediately,
-    // not a runtime condition callers need to handle.
-    #[expect(
-        clippy::expect_used,
-        reason = "bundled templates are compile-time assets validated by the test suite"
-    )]
-    env.add_template("report.html", include_str!("../templates/report.html"))
-        .expect("bundled report.html template is valid minijinja syntax");
-    #[expect(
-        clippy::expect_used,
-        reason = "bundled templates are compile-time assets validated by the test suite"
-    )]
-    env.add_template("junit.xml", include_str!("../templates/junit.xml"))
-        .expect("bundled junit.xml template is valid minijinja syntax");
-    #[expect(
-        clippy::expect_used,
-        reason = "bundled templates are compile-time assets validated by the test suite"
-    )]
-    env.add_template("pr_comment.md", include_str!("../templates/pr_comment.md"))
-        .expect("bundled pr_comment.md template is valid minijinja syntax");
-    #[expect(
-        clippy::expect_used,
-        reason = "bundled templates are compile-time assets validated by the test suite"
-    )]
-    env.add_template(
-        "dashboard.html",
-        include_str!("../templates/dashboard.html"),
-    )
-    .expect("bundled dashboard.html template is valid minijinja syntax");
+    for (name, source) in [
+        ("report.html", include_str!("../templates/report.html")),
+        ("junit.xml", include_str!("../templates/junit.xml")),
+        ("pr_comment.md", include_str!("../templates/pr_comment.md")),
+        (
+            "dashboard.html",
+            include_str!("../templates/dashboard.html"),
+        ),
+    ] {
+        // Bundled templates are compiled into the binary and validated by the test suite; a
+        // syntax error here would be a build-time bug caught immediately, not a runtime
+        // condition callers need to handle.
+        #[expect(
+            clippy::expect_used,
+            reason = "bundled templates are compile-time assets validated by the test suite"
+        )]
+        env.add_template(name, source)
+            .expect("bundled templates are valid minijinja syntax");
+    }
     env
 });
 
@@ -64,29 +54,15 @@ pub enum ReportError {
         source: minijinja::Error,
     },
 
-    /// Error deserializing JSON.
-    #[error("JSON parse error: {0}")]
-    JsonParse(#[from] serde_json::Error),
-
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
 
-impl From<crate::io::IoError> for ReportError {
-    fn from(err: crate::io::IoError) -> Self {
-        match err {
-            crate::io::IoError::Io(e) => Self::Io(e),
-            crate::io::IoError::JsonParse(e) => Self::JsonParse(e),
-        }
-    }
-}
-
-/// Resolves a screenshot path to a signed/absolute URL for embedding in a PR comment.
+/// Resolves a baseline (a content-addressed blob) to a signed URL for embedding in a PR comment.
 ///
-/// Returns `None` to fall back to `base_image_url`-relative linking (or `N/A` if
-/// that is also unset).
-pub type ImageUrlResolver<'a> = dyn Fn(&std::path::Path) -> Option<String> + Sync + 'a;
+/// Returns `None` to fall back to a `base_image_url` link (or `N/A` if that is also unset).
+pub type ImageUrlResolver<'a> = dyn Fn(&ImageHash) -> Option<String> + Sync + 'a;
 
 /// Where the PR comment is being rendered, used to pick an appropriate footer.
 #[non_exhaustive]
@@ -103,11 +79,12 @@ pub enum RenderTarget {
 /// which footer it appends.
 #[derive(Default)]
 pub struct MarkdownReportOptions<'a> {
-    /// Base URL prepended to relative image paths when no `image_url_resolver` applies.
+    /// Public URL of the remote storage, under which baselines live at `blobs/<scheme>/<value>`;
+    /// used when no `image_url_resolver` applies.
     pub base_image_url: Option<&'a str>,
     /// URL of the full HTML report artifact, linked when rows are truncated.
     pub html_artifact_url: Option<&'a str>,
-    /// Optional per-path resolver for signed/absolute image URLs, tried before `base_image_url`.
+    /// Optional resolver of signed baseline URLs, tried before `base_image_url`.
     pub image_url_resolver: Option<&'a ImageUrlResolver<'a>>,
     /// Where the comment is being rendered, selecting the footer text.
     pub context: RenderTarget,
@@ -123,39 +100,38 @@ impl ReportGenerator {
     pub const FOOTER_LOCAL_TERMINAL: &'static str =
         "\n---\n*Run `gleon approve` to accept failed screenshots as new baselines locally.*\n";
 
-    /// Generates markdown, `JUnit` XML, HTML, and JSON report files inside `runs_dir`.
+    /// The files [`Self::generate_all`] writes into a runs directory.
+    pub const OUTPUT_FILES: [&'static str; 3] = ["report.md", "junit.xml", "report.html"];
+
+    /// Generates the markdown, `JUnit` XML and HTML reports of `cases` inside `runs_dir`
+    /// ([`Self::OUTPUT_FILES`]); without failures there is no HTML report.
     ///
     /// # Errors
     ///
     /// Returns `ReportError` if any of the underlying report generation steps
     /// fail (template rendering) or if writing a report file to `runs_dir`
-    /// fails (I/O or JSON serialization).
-    pub fn generate_all(
-        runs_dir: &std::path::Path,
-        test_cases: &[TestCaseResult],
-    ) -> Result<(), ReportError> {
-        let md = Self::generate_markdown(test_cases);
-        let md_path = runs_dir.join("report.md");
-        crate::io::save_file_atomically(&md_path, md.as_bytes())?;
-
-        let xml = Self::generate_junit_xml(test_cases)?;
-        let xml_path = runs_dir.join("junit.xml");
-        crate::io::save_file_atomically(&xml_path, xml.as_bytes())?;
-
-        let html_path = runs_dir.join("report.html");
-        if let Some(html) = Self::generate_html(test_cases, Some(runs_dir))? {
-            crate::io::save_file_atomically(&html_path, html.as_bytes())?;
+    /// fails.
+    pub fn generate_all(runs_dir: &std::path::Path, cases: &Cases) -> Result<(), ReportError> {
+        // Regenerated by every run: atomic, without the cost of a flush to disk.
+        let write = |name: &str, content: &str| {
+            gleon_model::fs::write_atomically(
+                &runs_dir.join(name),
+                content.as_bytes(),
+                gleon_model::fs::Durability::Atomic,
+            )
+        };
+        let [md_name, xml_name, html_name] = Self::OUTPUT_FILES;
+        write(md_name, &Self::generate_markdown(cases))?;
+        write(xml_name, &Self::generate_junit_xml(cases)?)?;
+        if let Some(html) = Self::generate_html(cases, runs_dir)? {
+            write(html_name, &html)?;
         } else {
-            match std::fs::remove_file(&html_path) {
+            match std::fs::remove_file(runs_dir.join(html_name)) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(ReportError::Io(e)),
             }
         }
-
-        let json_path = runs_dir.join("gleon-report.json");
-        crate::io::save_json_atomically(&json_path, test_cases).map_err(ReportError::from)?;
-
         Ok(())
     }
 }
@@ -175,16 +151,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_report_error_from_io_error() {
-        let io_err = crate::io::IoError::Io(std::io::Error::other("test io"));
-        let report_err: ReportError = io_err.into();
-        assert!(matches!(report_err, ReportError::Io(_)));
-
-        let json_err: serde_json::Error = serde_json::from_str::<String>("invalid").unwrap_err();
-        let io_json_err = crate::io::IoError::JsonParse(json_err);
-        let report_json_err: ReportError = io_json_err.into();
-        assert!(matches!(report_json_err, ReportError::JsonParse(_)));
-
+    fn test_report_error_display() {
+        let report_err = ReportError::Io(std::io::Error::other("test io"));
         assert_eq!(report_err.to_string(), "IO error: test io");
     }
 
@@ -196,8 +164,7 @@ mod tests {
         std::fs::write(&stale_html, b"<html>stale</html>").unwrap();
         assert!(stale_html.exists());
 
-        let test_cases = Vec::new();
-        ReportGenerator::generate_all(runs_dir, &test_cases).unwrap();
+        ReportGenerator::generate_all(runs_dir, &Cases::new(runs_dir, Vec::new())).unwrap();
         assert!(!stale_html.exists());
     }
 }

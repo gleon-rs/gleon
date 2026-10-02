@@ -11,289 +11,345 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 use gleon_core::{
-    dashboard::{RunHistoryEntry, TestHistoryStatus},
-    report::ReportGenerator,
-    results::{TestCaseResult, TestImageResult},
+    case::{CaseOutcome, Metrics},
+    cases::Cases,
+    context::{ContextOptions, ResolvedContext},
+    dashboard::RunHistoryEntry,
+    ops::{approve_workspace, diff::DiffOptions, init_workspace, run_diff, stage_workspace},
+    report::{MarkdownReportOptions, ReportGenerator},
 };
-use gleon_engine::{
-    ComparisonResult, Measurement, compare_images,
-    config::{DiffConfig, Mode},
-};
 
-#[test]
-fn test_report_generation_with_real_images_and_durability() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let fixtures_dir = manifest_dir.join("tests").join("fixtures");
-
-    // Work on copies in an isolated temp dir (never write into tracked fixtures); the report
-    // goes into a subdirectory so image links stay relative (`../dashboard_baseline.png`).
-    let work_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let baseline_path = work_dir.path().join("dashboard_baseline.png");
-    let actual_path = work_dir.path().join("dashboard_actual.png");
-    fs::copy(fixtures_dir.join("dashboard_baseline.png"), &baseline_path)
-        .expect("Failed to copy dashboard_baseline.png");
-    fs::copy(fixtures_dir.join("dashboard_actual.png"), &actual_path)
-        .expect("Failed to copy dashboard_actual.png");
-
-    let baseline_img = image::open(&baseline_path)
-        .expect("Failed to open dashboard_baseline.png")
-        .to_rgba8();
-    let actual_img = image::open(&actual_path)
-        .expect("Failed to open dashboard_actual.png")
-        .to_rgba8();
-
-    // 1. Perform image comparison for Pixel mode
-    let diff_config = DiffConfig {
-        threshold: 0.0,
-        ..Default::default()
-    };
-    let comp_pixel_res = compare_images(&baseline_img, &actual_img, Mode::Pixel, &diff_config);
-    let (pixel_detail, pixel_diff_img) = match comp_pixel_res {
-        ComparisonResult::Mismatch {
-            measurement,
-            diff_image,
-        } => (measurement, diff_image),
-        other => panic!("Expected ComparisonResult::Mismatch, got {other:?}"),
-    };
-
-    // 2. Perform image comparison for SSIM mode
-    let ssim_config = DiffConfig {
-        threshold: 1.0,
-        ..Default::default()
-    };
-    let comp_ssim_res = compare_images(&baseline_img, &actual_img, Mode::Ssim, &ssim_config);
-    let (ssim_detail, ssim_diff_img) = match comp_ssim_res {
-        ComparisonResult::Mismatch {
-            measurement,
-            diff_image,
-        } => (measurement, diff_image),
-        other => panic!("Expected ComparisonResult::Mismatch, got {other:?}"),
-    };
-
-    // 3. Report outputs next to the copied images.
-    let report_dir = work_dir.path().join("report_output");
-    fs::create_dir_all(&report_dir).expect("Failed to create report output dir");
-
-    let diff_pixel_name = "diff_dashboard_pixel.png";
-    let diff_ssim_name = "diff_dashboard_ssim.png";
-
-    let diff_pixel_path = report_dir.join(diff_pixel_name);
-    let diff_ssim_path = report_dir.join(diff_ssim_name);
-
-    pixel_diff_img
-        .save(&diff_pixel_path)
-        .expect("Failed to save pixel diff image");
-    ssim_diff_img
-        .save(&diff_ssim_path)
-        .expect("Failed to save ssim diff image");
-
-    // 4. Construct comprehensive TestCaseResult covering all 4 failure types
-    let tc_res1 = TestCaseResult {
-        name: "billing_dashboard_1".to_string(),
-        result: TestImageResult::Mismatch {
-            relative_path: PathBuf::from("overview_metrics.png"),
-            detail: pixel_detail,
-            diff_path: diff_pixel_path.clone(),
-            baseline_path: baseline_path.clone(),
-            actual_path: actual_path.clone(),
-        },
-    };
-    let tc_res2 = TestCaseResult {
-        name: "billing_dashboard_2".to_string(),
-        result: TestImageResult::Mismatch {
-            relative_path: PathBuf::from("revenue_performance.png"),
-            detail: ssim_detail,
-            diff_path: diff_ssim_path,
-            baseline_path: baseline_path.clone(),
-            actual_path: actual_path.clone(),
-        },
-    };
-    let tc_res3 = TestCaseResult {
-        name: "billing_dashboard_3".to_string(),
-        result: TestImageResult::Mismatch {
-            relative_path: PathBuf::from("security_alert_banner.png"),
-            detail: Measurement::Pixel { diff_count: 14205 },
-            diff_path: diff_pixel_path,
-            baseline_path: baseline_path.clone(),
-            actual_path: actual_path.clone(),
-        },
-    };
-    let tc_res4 = TestCaseResult {
-        name: "billing_dashboard_4".to_string(),
-        result: TestImageResult::DimensionMismatch {
-            relative_path: PathBuf::from("sidebar_navigation.png"),
-            baseline_size: (1920, 1080),
-            actual_size: (1920, 1200),
-            baseline_path,
-            actual_path,
-        },
-    };
-    let tc_res5 = TestCaseResult {
-        name: "billing_dashboard_5".to_string(),
-        result: TestImageResult::DecodeError {
-            relative_path: PathBuf::from("user_avatar.png"),
-            error: "PNG header corrupted or incomplete".to_string(),
-        },
-    };
-
-    let tc_res6 = TestCaseResult {
-        name: "billing_dashboard_6".to_string(),
-        result: TestImageResult::MissingBaseline {
-            relative_path: PathBuf::from("missing_base.png"),
-            reason: "Baseline missing".to_string(),
-        },
-    };
-
-    let tc_res7 = TestCaseResult {
-        name: "billing_dashboard_7".to_string(),
-        result: TestImageResult::EncodeError {
-            relative_path: PathBuf::from("encode_fail.png"),
-            actual_path: PathBuf::from("/tmp/actual.png"),
-            error: "Failed to write PNG chunk".to_string(),
-        },
-    };
-
-    let all_tc_res = vec![
-        tc_res1, tc_res2, tc_res3, tc_res4, tc_res5, tc_res6, tc_res7,
-    ];
-
-    // 5. Generate HTML report
-    let html_report = ReportGenerator::generate_html(&all_tc_res, Some(&report_dir));
-
-    let html = html_report
-        .expect("HTML render should succeed")
-        .expect("Expected Some(HTML), but got None");
-    assert!(!html.contains("data:image/png;base64,"));
-    assert!(html.contains("billing_dashboard_1 / overview_metrics.png"));
-    assert!(html.contains("billing_dashboard_2 / revenue_performance.png"));
-    assert!(html.contains("billing_dashboard_4 / sidebar_navigation.png"));
-    assert!(html.contains("billing_dashboard_5 / user_avatar.png"));
-    assert!(html.contains("billing_dashboard_6 / missing_base.png"));
-    assert!(html.contains("billing_dashboard_7 / encode_fail.png"));
-    assert!(html.contains("PNG header corrupted or incomplete"));
-    assert!(html.contains("Baseline missing"));
-    assert!(html.contains("Failed to write PNG chunk"));
-
-    let html_path = report_dir.join("report.html");
-    fs::write(&html_path, &html).expect("Failed to write HTML report");
-    assert!(html_path.exists());
-
-    // 6. Generate and write JUnit XML
-    let xml = ReportGenerator::generate_junit_xml(&all_tc_res).expect("XML render should succeed");
-    assert!(xml.contains("<testsuites name=\"gleon Tests\""));
-    assert!(xml.contains("<failure message=\"Visual mismatch detected ("));
-    assert!(xml.contains("<failure message=\"Visual mismatch detected (min local SSIM "));
-    assert!(html.contains("..&#x2f;dashboard_baseline.png"));
-    assert!(html.contains("..&#x2f;dashboard_actual.png"));
-    assert!(html.contains("diff_dashboard_pixel.png"));
-    assert!(xml.contains(
-        "<failure message=\"Dimension mismatch (Baseline: 1920x1080, Actual: 1920x1200)\""
-    ));
-    assert!(xml.contains("<failure message=\"Decode error: PNG header corrupted or incomplete\""));
-    assert!(xml.contains("<failure message=\"Missing baseline: Baseline missing\""));
-    assert!(xml.contains("<failure message=\"Encode error: Failed to write PNG chunk\""));
-
-    let xml_path = report_dir.join("junit.xml");
-    fs::write(&xml_path, &xml).expect("Failed to write XML report");
-    assert!(xml_path.exists());
-
-    // 7. Generate and write Markdown
-    let md = ReportGenerator::generate_markdown(&all_tc_res);
-    assert!(md.contains("# gleon Visual Regression Summary"));
-    assert!(md.contains("❌ Mismatch"));
-    assert!(md.contains("❌ Dimension Mismatch"));
-    assert!(md.contains("❌ Decode Error"));
-    assert!(md.contains("❌ Missing Baseline"));
-    assert!(md.contains("❌ Encode Error"));
-
-    let md_path = report_dir.join("report.md");
-    fs::write(&md_path, &md).expect("Failed to write MD report");
-    assert!(md_path.exists());
-
-    // 8. Verify fallback_demo.html fixture integrity
-    // Read-only tracked fixture (not generated by this test).
-    let fallback_demo_path = fixtures_dir
-        .join("report_output")
-        .join("fallback_demo.html");
-    assert!(
-        fallback_demo_path.exists(),
-        "fallback_demo.html fixture must exist"
-    );
-    let fallback_content =
-        fs::read_to_string(&fallback_demo_path).expect("Failed to read fallback_demo.html fixture");
-    assert!(fallback_content.contains("document.addEventListener('error'"));
-    assert!(!fallback_content.contains("onerror="));
+fn fixtures() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-/// `gleon diff` writes `gleon-report.json`; `gleon report`, the dashboard and `history.json` read
-/// it back. This real report pins the on-disk shape of both measurement variants (the SSIM one
-/// carries the match-time metrics) and what the history keeps of them.
-#[test]
-fn test_report_json_with_measurements_round_trips_into_history() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("report_measurements.json");
-    let raw: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&fixture).unwrap()).unwrap();
-    let cases: Vec<TestCaseResult> = serde_json::from_value(raw.clone()).unwrap();
-
-    // Byte-for-byte shape: nothing renamed, dropped or added on the way through the types.
-    assert_eq!(serde_json::to_value(&cases).unwrap(), raw);
-    let TestImageResult::Mismatch { detail, .. } = &cases[2].result else {
-        panic!("expected the SSIM mismatch, got {:?}", cases[2].result);
-    };
-    assert_eq!(
-        *detail,
-        Measurement::Ssim {
-            mean_ssim: 0.999,
-            min_ssim: 0.9955,
-            max_excess: 146.0,
-            peak_excess: 154.0,
-            changed_pixels: 412,
-            changed_region: Some(gleon_engine::Region {
-                x: 30,
-                y: 17,
-                width: 30,
-                height: 19,
-            }),
-            failing_pixels: 390,
-            failing_region: Some(gleon_engine::Region {
-                x: 32,
-                y: 19,
-                width: 26,
-                height: 15,
-            }),
+/// Copies the directory tree `from` into `to`.
+fn copy_tree(from: &Path, to: &Path) {
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            fs::create_dir_all(&target).unwrap();
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
         }
+    }
+}
+
+/// The case reports of a real `flutter test` run in CI (the `metrics-linux-x64` artifact of the
+/// gleon Flutter package's example, a copy of `.gleon/runs/latest`) render without `gleon diff`.
+#[test]
+fn test_reports_of_a_real_flutter_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let downloaded = temp.path().join("metrics-linux-x64");
+    fs::create_dir_all(&downloaded).unwrap();
+    copy_tree(&fixtures().join("cases/flutter-linux-x64"), &downloaded);
+
+    let cases = Cases::load(&downloaded, None).unwrap();
+    assert_eq!(cases.run_id().unwrap().as_str(), "36918116203-1");
+    assert!(cases.warnings().is_empty(), "{:?}", cases.warnings());
+    let names: Vec<_> = cases.reports().iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "test/goldens/counter_initial",
+            "test/goldens/counter_three_taps"
+        ]
+    );
+    let three_taps = &cases.reports()[1];
+    assert_eq!(three_taps.outcome, CaseOutcome::Match);
+    assert!(matches!(
+        three_taps.metrics,
+        Some(Metrics::Ssim { min_ssim, .. }) if (min_ssim - 0.754).abs() < 0.001
+    ));
+
+    ReportGenerator::generate_all(&downloaded, &cases).unwrap();
+    let md = fs::read_to_string(downloaded.join("report.md")).unwrap();
+    assert!(md.contains("**Total Tests:** 2\n**Failed:** 0"), "{md}");
+    assert!(md.contains(
+        "| test/goldens/counter_three_taps | test/goldens/counter_three_taps.png | ✅ Pass |"
+    ));
+    let xml = fs::read_to_string(downloaded.join("junit.xml")).unwrap();
+    assert!(
+        xml.contains(r#"tests="2" failures="0" errors="0""#),
+        "{xml}"
+    );
+    assert!(!downloaded.join("report.html").exists(), "nothing failed");
+    assert_eq!(
+        ReportGenerator::render_pr_comment(&cases, &MarkdownReportOptions::default()),
+        "### ✅ Gleon Visual Regression: All tests passed!\n"
     );
 
-    let run = RunHistoryEntry::from_test_results(
-        "run-1",
-        chrono::DateTime::UNIX_EPOCH,
+    let entry = RunHistoryEntry::from_cases(
+        "run",
+        cases.recorded_at().unwrap(),
         "main",
-        "macos-aarch64",
+        "linux-x86_64",
         None,
         &cases,
     );
-    assert_eq!((run.summary.total, run.summary.failed), (3, 2));
-    let ssim = &run.tests[2];
-    assert_eq!(ssim.status, TestHistoryStatus::Mismatch);
-    assert_eq!(
-        ssim.error.as_deref(),
-        Some("min local SSIM 0.9955, colors exceed tolerance by 146.0 at (32, 19) 26x15px")
+    assert_eq!((entry.summary.total, entry.summary.failed), (2, 0));
+    assert!(entry.failures.is_empty(), "passing tests are only counted");
+}
+
+/// The case report the gleon Flutter package wrote for a deleted golden of its example (macOS,
+/// metrics off), verbatim.
+const FLUTTER_MISSING_CASE: &str = r#"{
+  "schema_version": 2,
+  "name": "test/goldens/counter_three_taps",
+  "golden": {
+    "path": "test/goldens/counter_three_taps.png"
+  },
+  "candidate": {
+    "sha256": "f80a2bb819104e3624d4e9a154cf10fdbd62b59fc96886c296836400572692a4",
+    "width": 360,
+    "height": 640
+  },
+  "source": {
+    "tool": "gleon_flutter",
+    "tool_version": "0.1.0",
+    "renderer": "flutter-3.47.5"
+  },
+  "platform": {
+    "os": "macos",
+    "arch": "aarch64"
+  },
+  "test": {
+    "name": "matches the golden after three taps"
+  },
+  "comparison": {
+    "tolerance": {
+      "kind": "ssim",
+      "min_similarity": 0.73,
+      "color_tolerance": 46.0
+    },
+    "masks": [
+      {
+        "x": 280,
+        "y": 560,
+        "width": 80,
+        "height": 80
+      }
+    ],
+    "policy_version": 2
+  },
+  "outcome": "missing",
+  "regions": [],
+  "artifacts": {
+    "candidate": ".gleon/runs/latest/artifacts/test/goldens/counter_three_taps/candidate.png"
+  },
+  "timings_ms": {
+    "total": 0.3
+  },
+  "run_id": "flutter-missing-macos",
+  "recorded_at": "2026-10-02T06:48:23.128489Z"
+}"#;
+
+/// A real failing run of the Flutter example (a deleted golden, metrics off: the integration
+/// records failures anyway), downloaded like a CI artifact: the HTML report shows the new
+/// screenshot and `gleon approve` writes it as the golden.
+#[test]
+fn test_reports_and_approval_of_a_real_flutter_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = temp.path().join("download/latest");
+    fs::create_dir_all(&run).unwrap();
+    // The report as the integration wrote it, its candidate stored as `.png.bin` so the fixtures
+    // hold no stray screenshot.
+    let report = run.join("cases/test/goldens/counter_three_taps.json");
+    fs::create_dir_all(report.parent().unwrap()).unwrap();
+    fs::write(report, FLUTTER_MISSING_CASE).unwrap();
+    let candidate = run.join("artifacts/test/goldens/counter_three_taps/candidate.png");
+    fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+    fs::copy(
+        fixtures().join("flutter_missing_candidate.png.bin"),
+        &candidate,
+    )
+    .unwrap();
+    let root = temp.path().join("app");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
+    init_workspace(&ctx).unwrap();
+
+    let cases = Cases::load(&run, None).unwrap();
+    assert!(cases.warnings().is_empty(), "{:?}", cases.warnings());
+    let [missing] = cases.reports() else {
+        panic!("one case: {:?}", cases.reports());
+    };
+    assert_eq!(missing.outcome, CaseOutcome::Missing);
+    let html = ReportGenerator::generate_html(&cases, &run)
+        .unwrap()
+        .unwrap();
+    assert!(
+        html.contains("Missing Baseline: the golden does not exist yet"),
+        "{html}"
     );
-    assert_eq!(ssim.diff_count, None);
-    assert_eq!(run.tests[1].diff_count, Some(128));
-    // The history entry survives its own JSON round trip (`history.json`).
-    let history_json = serde_json::to_string(&run).unwrap();
+    assert!(html.contains("New screenshot (360x640)"));
+    assert!(html.contains(
+        "src=\"artifacts&#x2f;test&#x2f;goldens&#x2f;counter_three_taps&#x2f;candidate.png\""
+    ));
+
+    let approved = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
     assert_eq!(
-        serde_json::from_str::<RunHistoryEntry>(&history_json).unwrap(),
-        run
+        approved.approved_test_cases,
+        ["test/goldens/counter_three_taps"]
     );
+    assert_eq!(
+        fs::read(root.join("test/goldens/counter_three_taps.png")).unwrap(),
+        fs::read(run.join("artifacts/test/goldens/counter_three_taps/candidate.png")).unwrap()
+    );
+}
+
+/// A `gleon diff` run with every kind of failure: the HTML report next to the case reports links
+/// images that exist, the PR comment and `JUnit` tell failures from errors.
+#[test]
+fn test_reports_of_a_failing_diff_run_link_existing_images() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    init_workspace(&ctx).unwrap();
+    fs::write(
+        root.join(".gleon/gleon.yaml"),
+        r#"
+required_version: ">=0.1.0"
+screenshots:
+  - include: "ssim/*.png"
+    mode: ssim
+  - include: "shots/*.png"
+    mode: pixel
+    diff: { threshold: 0.0 }
+"#,
+    )
+    .unwrap();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    fs::create_dir_all(root.join("shots")).unwrap();
+    fs::create_dir_all(root.join("ssim")).unwrap();
+    for (file, fixture) in [
+        ("shots/pixel.png", "dashboard_baseline.png"),
+        ("ssim/dashboard.png", "dashboard_baseline.png"),
+        ("shots/size.png", "baseline_100x100.png"),
+        ("shots/broken.png", "baseline_100x100.png"),
+    ] {
+        fs::copy(fixtures().join(fixture), root.join(file)).unwrap();
+    }
+    stage_workspace(&ctx, None).unwrap();
+
+    for (file, fixture) in [
+        ("shots/pixel.png", "dashboard_actual.png"),
+        ("ssim/dashboard.png", "dashboard_actual.png"),
+        ("shots/size.png", "200x100.png"),
+        ("shots/broken.png", "corrupt.png"),
+        ("shots/new.png", "baseline_100x100.png"),
+    ] {
+        fs::copy(fixtures().join(fixture), root.join(file)).unwrap();
+    }
+    let result = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_eq!((result.total_tests, result.failed_tests), (5, 5));
+
+    let latest = root.join(".gleon/runs/latest");
+    let html = fs::read_to_string(latest.join("report.html")).unwrap();
+    let sources: Vec<_> = html
+        .split("src=\"")
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap().replace("&#x2f;", "/"))
+        .collect();
+    // Pixel and SSIM mismatches: golden, candidate and diff; the dimension mismatch: two; the new
+    // screenshot: its candidate.
+    assert_eq!(sources.len(), 9, "{sources:?}");
+    for source in &sources {
+        assert!(!source.starts_with('/'), "relative links only: {source}");
+        assert!(latest.join(source).is_file(), "{source} must exist");
+    }
+    // Images that fail to load are replaced by a script, never by inline handlers.
+    assert!(html.contains("document.addEventListener('error'"));
+    assert!(!html.contains("onerror="));
+
+    let cases = Cases::load(&latest, None).unwrap();
+    let md = ReportGenerator::render_pr_comment(&cases, &MarkdownReportOptions::default());
+    assert!(md.contains("(5 diffs)"), "{md}");
+    assert!(
+        md.contains("| `shots/broken` | Error (image): invalid screenshot:"),
+        "{md}"
+    );
+    assert!(md.contains("| `shots/new` | Missing Baseline: "), "{md}");
+    assert!(md.contains(
+        "| `shots/size` | Dimension Mismatch: golden is 100x100px, test image is 200x100px |"
+    ));
+    assert!(
+        md.contains("| `ssim/dashboard` | Mismatch: changed area at "),
+        "{md}"
+    );
+    let first_row = md.lines().find(|line| line.starts_with("| `")).unwrap();
+    assert!(first_row.contains("Mismatch: "), "mismatches first: {md}");
+    let xml = fs::read_to_string(latest.join("junit.xml")).unwrap();
+    assert!(
+        xml.contains(r#"tests="5" failures="4" errors="1""#),
+        "{xml}"
+    );
+}
+
+/// A demo page kept with the fixtures: images that fail to load are replaced by a script, never
+/// by inline handlers.
+#[test]
+fn test_fallback_demo_fixture_avoids_inline_handlers() {
+    let fallback = fs::read_to_string(fixtures().join("report_output/fallback_demo.html")).unwrap();
+    assert!(fallback.contains("document.addEventListener('error'"));
+    assert!(!fallback.contains("onerror="));
+}
+
+/// Every committed case report fixture is a valid report of this schema version.
+#[test]
+fn test_case_report_fixtures_are_valid() {
+    let mut files = vec![fixtures().join("cases")];
+    let mut reports = 0;
+    while let Some(path) = files.pop() {
+        if path.is_dir() {
+            files.extend(fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        } else if path.extension().is_some_and(|ext| ext == "json") {
+            let bytes = fs::read(&path).unwrap();
+            gleon_core::case::CaseReport::parse(&bytes)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            reports += 1;
+        }
+    }
+    assert!(reports > 0);
+}
+
+/// Load time of a large run (`Cases::load`), measured on demand:
+/// `cargo test --release -p gleon-core --test report_integration -- --ignored --nocapture`.
+///
+/// 50k case reports of the real Flutter fixture (~2 KB each) in 100 directories, M3 Max (14
+/// cores), macOS on APFS, 3 reader threads (`manifest::index::READ_THREADS`): 0.91 s (50k manifests: 0.6 s).
+#[test]
+#[ignore = "benchmark: writes 50k files, run with --ignored --nocapture"]
+fn test_loads_50k_case_reports() {
+    const REPORTS: usize = 50_000;
+    let temp = tempfile::tempdir().unwrap();
+    let runs_latest = temp.path().join(".gleon/runs/latest");
+    let template: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            fixtures().join("cases/flutter-linux-x64/cases/test/goldens/counter_three_taps.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for i in 0..REPORTS {
+        let name = format!("test/dir_{:03}/golden_{i:05}", i % 100);
+        let mut report = template.clone();
+        report["name"] = name.clone().into();
+        let file = runs_latest.join("cases").join(format!("{name}.json"));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, report.to_string()).unwrap();
+    }
+    let _warm_up = Cases::load(&runs_latest, None).unwrap();
+    let started = std::time::Instant::now();
+    let cases = Cases::load(&runs_latest, None).unwrap();
+    println!(
+        "loaded {} case reports in {:?}",
+        cases.reports().len(),
+        started.elapsed()
+    );
+    assert_eq!(cases.reports().len(), REPORTS);
 }

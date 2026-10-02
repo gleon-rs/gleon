@@ -1,200 +1,65 @@
 //! `JUnit` XML report generation.
 
-use gleon_engine::Measurement;
+use gleon_model::case::{CaseOutcome, CaseReport};
 use minijinja::context;
-use serde::{
-    Serialize, Serializer,
-    ser::{SerializeSeq, SerializeStruct},
-};
+use serde::Serialize;
 
-use super::{ReportError, format::FormattedPath};
-use crate::results::{TestCaseResult, TestImageResult};
+use super::{ReportError, format::CaseSummary};
+use crate::cases::Cases;
 
-/// Lazy view prepending a static prefix (`"Decode error: "`, `"IO error: "`, ...) to a failure
-/// message, shared by every `TestImageResult` variant whose XML `failure_message` is just
-/// `"{prefix}: {message}"`.
-struct XmlPrefixedMessage<'a>(&'static str, &'a str);
-
-impl Serialize for XmlPrefixedMessage<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_str(&format_args!("{}: {}", self.0, self.1))
-    }
+/// One case as a `JUnit` test case (all in one suite, named after the case, with its golden as
+/// `file`): `failure` for a failed comparison, `error` when the case could not be compared at all.
+#[derive(Serialize)]
+struct XmlCase<'a> {
+    name: &'a str,
+    image: &'a str,
+    status: &'static str,
+    message: Option<String>,
 }
 
-struct XmlDimensionMismatchView((u32, u32), (u32, u32));
-
-impl std::fmt::Display for XmlDimensionMismatchView {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Dimension mismatch (Baseline: {}x{}, Actual: {}x{})",
-            (self.0).0,
-            (self.0).1,
-            (self.1).0,
-            (self.1).1
-        )
-    }
-}
-
-impl Serialize for XmlDimensionMismatchView {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_str(self)
-    }
-}
-
-struct XmlMismatchMessageView<'a>(&'a Measurement);
-
-impl std::fmt::Display for XmlMismatchMessageView<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Visual mismatch detected ({})", self.0)
-    }
-}
-
-impl Serialize for XmlMismatchMessageView<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_str(self)
-    }
-}
-
-// Lazy view for XML image result
-struct XmlTestImageResultView<'a>(&'a TestImageResult);
-
-impl Serialize for XmlTestImageResultView<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("XmlTestImageResult", 3)?;
-        state.serialize_field(
-            "name",
-            &FormattedPath {
-                path: self.0.relative_path(),
-                report_dir: None,
-            },
-        )?;
-
-        match self.0 {
-            TestImageResult::Success { .. } => {
-                state.serialize_field("status", "Success")?;
-                state.serialize_field("failure_message", &None::<String>)?;
-            }
-            TestImageResult::DecodeError { error, .. } => {
-                state.serialize_field("status", "DecodeError")?;
-                state.serialize_field(
-                    "failure_message",
-                    &Some(XmlPrefixedMessage("Decode error", error)),
-                )?;
-            }
-            TestImageResult::IoError { error, .. } => {
-                state.serialize_field("status", "IoError")?;
-                state.serialize_field(
-                    "failure_message",
-                    &Some(XmlPrefixedMessage("IO error", error)),
-                )?;
-            }
-            TestImageResult::EncodeError { error, .. } => {
-                state.serialize_field("status", "EncodeError")?;
-                state.serialize_field(
-                    "failure_message",
-                    &Some(XmlPrefixedMessage("Encode error", error)),
-                )?;
-            }
-            TestImageResult::MissingBaseline { reason, .. } => {
-                state.serialize_field("status", "MissingBaseline")?;
-                state.serialize_field(
-                    "failure_message",
-                    &Some(XmlPrefixedMessage("Missing baseline", reason)),
-                )?;
-            }
-            TestImageResult::DimensionMismatch {
-                baseline_size,
-                actual_size,
-                ..
-            } => {
-                state.serialize_field("status", "DimensionMismatch")?;
-                state.serialize_field(
-                    "failure_message",
-                    &Some(XmlDimensionMismatchView(*baseline_size, *actual_size)),
-                )?;
-            }
-            TestImageResult::Mismatch { detail, .. } => {
-                state.serialize_field("status", "Mismatch")?;
-                state.serialize_field("failure_message", &Some(XmlMismatchMessageView(detail)))?;
-            }
+impl<'a> XmlCase<'a> {
+    fn of(report: &'a CaseReport) -> Self {
+        let status = match report.outcome {
+            CaseOutcome::Error => "error",
+            outcome if outcome.is_failure() => "failure",
+            _ => "passed",
+        };
+        Self {
+            name: &report.name,
+            image: &report.golden.path,
+            status,
+            message: report
+                .outcome
+                .is_failure()
+                .then(|| xml_text(CaseSummary(report).to_string())),
         }
-        state.end()
     }
 }
 
-// Lazy view for XML Test Case
-struct XmlTestCaseView<'a>(&'a TestCaseResult);
-
-impl Serialize for XmlTestCaseView<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // For JUnit compatibility, we serialize the single result as a 1-element list
-        struct ResultsSeq<'a>(&'a TestImageResult);
-        impl Serialize for ResultsSeq<'_> {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                let mut seq = serializer.serialize_seq(Some(1))?;
-                seq.serialize_element(&XmlTestImageResultView(self.0))?;
-                seq.end()
-            }
-        }
-
-        let mut state = serializer.serialize_struct("XmlTestCase", 3)?;
-        state.serialize_field("name", &self.0.name)?;
-        state.serialize_field("results", &ResultsSeq(&self.0.result))?;
-
-        let failures = i32::from(!matches!(self.0.result, TestImageResult::Success { .. }));
-        state.serialize_field("failures", &failures)?;
-
-        state.end()
-    }
-}
-
-// Lazy view for all test cases
-struct XmlTestCasesView<'a>(&'a [TestCaseResult]);
-
-impl Serialize for XmlTestCasesView<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for tc in self.0 {
-            seq.serialize_element(&XmlTestCaseView(tc))?;
-        }
-        seq.end()
+/// `text` without the control characters XML 1.0 forbids even as references (ANSI color codes
+/// of a tool's output, `\0`), which would make every reader reject the whole file. Names and
+/// paths cannot hold them; messages come from integrations and the OS.
+fn xml_text(text: String) -> String {
+    let is_forbidden = |c: char| c.is_control() && !matches!(c, '\t' | '\n' | '\r');
+    if text.contains(is_forbidden) {
+        text.chars().filter(|&c| !is_forbidden(c)).collect()
+    } else {
+        text
     }
 }
 
 impl super::ReportGenerator {
-    /// Generates raw junit.xml file bytes mapping failures and decode/dimension errors to
-    /// `<failure>` nodes.
+    /// Generates raw junit.xml file bytes: failed comparisons are `<failure>` nodes, cases that
+    /// could not be compared `<error>` nodes.
     ///
     /// # Panics
     /// Panics if the bundled template cannot be retrieved (impossible in normal builds).
     ///
     /// # Errors
     /// Returns [`ReportError::Render`] if template rendering fails.
-    pub fn generate_junit_xml(test_cases: &[TestCaseResult]) -> Result<String, ReportError> {
-        let total_tests = test_cases.len();
-        let failed_tests = test_cases.iter().filter(|tc| !tc.passed()).count();
+    pub fn generate_junit_xml(cases: &Cases) -> Result<String, ReportError> {
+        let test_cases: Vec<_> = cases.reports().iter().map(XmlCase::of).collect();
+        let count = |status| test_cases.iter().filter(|tc| tc.status == status).count();
 
         #[expect(
             clippy::expect_used,
@@ -205,9 +70,10 @@ impl super::ReportGenerator {
             .expect("bundled junit.xml template is registered");
 
         let ctx = context! {
-            total_tests => total_tests,
-            failed_tests => failed_tests,
-            test_cases => XmlTestCasesView(test_cases),
+            total_tests => test_cases.len(),
+            failed_tests => count("failure"),
+            error_tests => count("error"),
+            test_cases => test_cases,
         };
 
         tmpl.render(ctx).map_err(|e| ReportError::Render {
@@ -229,152 +95,66 @@ impl super::ReportGenerator {
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::report::ReportGenerator;
+    use crate::{
+        cases::fixtures::{every_outcome, report},
+        report::ReportGenerator,
+    };
+
+    /// The whole document for every outcome: failures and errors apart.
+    #[test]
+    fn test_generate_junit_xml_tells_failures_from_errors() {
+        let cases = Cases::new("runs/latest", every_outcome());
+        let xml = ReportGenerator::generate_junit_xml(&cases).unwrap();
+        let lines: Vec<_> = xml
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+                r#"<testsuites name="gleon Tests" tests="7" failures="3" errors="1">"#,
+                r#"<testsuite name="gleon" tests="7" failures="3" errors="1">"#,
+                r#"<testcase name="test&#x2f;dimension_mismatch" classname="gleon" file="test&#x2f;dimension_mismatch.png">"#,
+                r#"<failure message="Dimension Mismatch: golden is 10x10px, test image is 20x10px">Dimension Mismatch: golden is 10x10px, test image is 20x10px</failure>"#,
+                "</testcase>",
+                r#"<testcase name="test&#x2f;error" classname="gleon" file="test&#x2f;error.png">"#,
+                r#"<error message="Error (image): candidate image: corrupt">Error (image): candidate image: corrupt</error>"#,
+                "</testcase>",
+                r#"<testcase name="test&#x2f;identical" classname="gleon" file="test&#x2f;identical.png">"#,
+                "</testcase>",
+                r#"<testcase name="test&#x2f;match" classname="gleon" file="test&#x2f;match.png">"#,
+                "</testcase>",
+                r#"<testcase name="test&#x2f;mismatch" classname="gleon" file="test&#x2f;mismatch.png">"#,
+                r#"<failure message="Mismatch: 5.00% (5 of 100px) differ">Mismatch: 5.00% (5 of 100px) differ</failure>"#,
+                "</testcase>",
+                r#"<testcase name="test&#x2f;missing" classname="gleon" file="test&#x2f;missing.png">"#,
+                r#"<failure message="Missing Baseline: no golden yet">Missing Baseline: no golden yet</failure>"#,
+                "</testcase>",
+                r#"<testcase name="test&#x2f;updated" classname="gleon" file="test&#x2f;updated.png">"#,
+                "</testcase>",
+                "</testsuite>",
+                "</testsuites>",
+            ]
+        );
+    }
 
     #[test]
-    fn test_generate_junit_xml() {
-        let tc1 = TestCaseResult {
-            name: "billing".to_string(),
-            result: TestImageResult::Mismatch {
-                relative_path: PathBuf::from("form.png"),
-                detail: Measurement::Pixel { diff_count: 5 },
-                diff_path: PathBuf::from("diff.png"),
-                baseline_path: PathBuf::from("baseline.png"),
-                actual_path: PathBuf::from("actual.png"),
-            },
-        };
-        let tc2 = TestCaseResult {
-            name: "billing".to_string(),
-            result: TestImageResult::Mismatch {
-                relative_path: PathBuf::from("ssim_form.png"),
-                detail: Measurement::Ssim {
-                    mean_ssim: 0.9412,
-                    min_ssim: 0.9412,
-                    max_excess: 0.0,
-                    peak_excess: 0.0,
-                    changed_pixels: 1,
-                    changed_region: None,
-                    failing_pixels: 1,
-                    failing_region: None,
-                },
-                diff_path: PathBuf::from("diff.png"),
-                baseline_path: PathBuf::from("baseline.png"),
-                actual_path: PathBuf::from("actual.png"),
-            },
-        };
-        let tc3 = TestCaseResult {
-            name: "billing".to_string(),
-            result: TestImageResult::EncodeError {
-                relative_path: PathBuf::from("encode_form.png"),
-                actual_path: PathBuf::from("act.png"),
-                error: "io error".to_string(),
-            },
-        };
+    fn test_generate_junit_xml_escapes_messages() {
+        let mut error = report("a", CaseOutcome::Error);
+        error.message = Some("<boom> & \"quotes\" \u{1b}[31mred\u{1b}[0m\0".to_owned());
         let xml =
-            ReportGenerator::generate_junit_xml(&[tc1, tc2, tc3]).expect("Render should succeed");
-        assert!(xml.contains("<failure message=\"Visual mismatch detected (5 pixels)\">Visual mismatch detected (5 pixels)</failure>"));
-        assert!(xml.contains("<failure message=\"Visual mismatch detected (min local SSIM 0.9412)\">Visual mismatch detected (min local SSIM 0.9412)</failure>"));
-        assert!(xml.contains(
-            "<failure message=\"Encode error: io error\">Encode error: io error</failure>"
-        ));
-        assert!(xml.contains("classname=\"billing\""));
-        assert!(xml.contains("name=\"form.png\""));
-        assert!(xml.contains("name=\"encode_form.png\""));
-    }
-
-    #[test]
-    fn test_generate_junit_xml_io_and_encode_errors() {
-        let tests = vec![
-            TestCaseResult {
-                name: "io_fail".to_string(),
-                result: TestImageResult::IoError {
-                    relative_path: PathBuf::from("io.png"),
-                    error: "disk error".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "encode_fail".to_string(),
-                result: TestImageResult::EncodeError {
-                    relative_path: PathBuf::from("enc.png"),
-                    error: "bad data".to_string(),
-                    actual_path: PathBuf::from("actual.png"),
-                },
-            },
-        ];
-        let xml = ReportGenerator::generate_junit_xml(&tests).unwrap();
-        assert!(xml.contains("io_fail"));
-        assert!(xml.contains("encode_fail"));
-    }
-
-    #[test]
-    fn test_generate_junit_xml_all_variants() {
-        let tests = vec![
-            TestCaseResult {
-                name: "mismatch".to_string(),
-                result: TestImageResult::Mismatch {
-                    relative_path: PathBuf::from("rel.png"),
-                    actual_path: PathBuf::from("actual.png"),
-                    baseline_path: PathBuf::from("baseline.png"),
-                    diff_path: PathBuf::from("diff.png"),
-                    detail: Measurement::Pixel { diff_count: 5 },
-                },
-            },
-            TestCaseResult {
-                name: "dim_mismatch".to_string(),
-                result: TestImageResult::DimensionMismatch {
-                    relative_path: PathBuf::from("rel.png"),
-                    actual_path: PathBuf::from("actual.png"),
-                    baseline_path: PathBuf::from("baseline.png"),
-                    actual_size: (10, 10),
-                    baseline_size: (20, 20),
-                },
-            },
-            TestCaseResult {
-                name: "missing".to_string(),
-                result: TestImageResult::MissingBaseline {
-                    relative_path: PathBuf::from("rel.png"),
-                    reason: "missing baseline".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "decode".to_string(),
-                result: TestImageResult::DecodeError {
-                    relative_path: PathBuf::from("rel.png"),
-                    error: "corrupt".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "io".to_string(),
-                result: TestImageResult::IoError {
-                    relative_path: PathBuf::from("rel.png"),
-                    error: "disk error".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "encode".to_string(),
-                result: TestImageResult::EncodeError {
-                    relative_path: PathBuf::from("rel.png"),
-                    actual_path: PathBuf::from("actual.png"),
-                    error: "encode fail".to_string(),
-                },
-            },
-            TestCaseResult {
-                name: "pass".to_string(),
-                result: TestImageResult::Success {
-                    relative_path: PathBuf::from("rel.png"),
-                },
-            },
-        ];
-
-        let xml = ReportGenerator::generate_junit_xml(&tests).unwrap();
-        assert!(xml.contains("mismatch"));
-        assert!(xml.contains("dim_mismatch"));
-        assert!(xml.contains("missing"));
-        assert!(xml.contains("decode"));
-        assert!(xml.contains("io"));
-        assert!(xml.contains("encode"));
+            ReportGenerator::generate_junit_xml(&Cases::new("runs/latest", vec![error])).unwrap();
+        assert!(
+            xml.contains("&lt;boom&gt; &amp; &quot;quotes&quot; [31mred[0m<"),
+            "{xml}"
+        );
+        assert!(!xml.contains("<boom>"));
+        assert!(
+            !xml.chars().any(|c| c.is_control() && !c.is_whitespace()),
+            "XML 1.0 forbids control characters: {xml:?}"
+        );
     }
 }

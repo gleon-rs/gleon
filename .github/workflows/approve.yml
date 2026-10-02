@@ -41,7 +41,7 @@ permissions: {}
 jobs:
   approve:
     if: github.event.issue.pull_request && contains(github.event.comment.body, '/gleon approve')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       actions: write
       contents: write
@@ -128,27 +128,43 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+      # Only the runs of the PR's head commit: an artifact of an earlier commit (a job that has
+      # passed since and uploads nothing) must never be approved.
       - name: Download Artifacts
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
+          set -eo pipefail
           mkdir -p .gleon-downloads
-          gh run download -p "gleon-artifacts-${{ github.event.issue.number }}-*" -D .gleon-downloads/
+          for run_id in $(gh run list --commit "$HEAD_SHA" --limit 100 --json databaseId -q '.[].databaseId'); do
+            # A run without gleon artifacts has nothing to download.
+            gh run download "$run_id" -p "gleon-artifacts-$PR_NUMBER-*" -D ".gleon-downloads/$run_id" || true
+          done
 
-      - name: Reconstruct Runs Directory
+      # Each artifact is the `.gleon/runs/` of one CI job: approved as its own run, so the cases of
+      # different platforms never overwrite each other (each goes to its platform's manifests).
+      # Passed as a JSON array, so paths with spaces (matrix job names) stay whole.
+      - name: Collect Runs
+        id: runs
         shell: bash
         env:
-          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
-          mkdir -p "$WORKING_DIRECTORY/.gleon/runs/latest"
-          if [ -d .gleon-downloads ] && [ "$(ls -A .gleon-downloads 2>/dev/null)" ]; then
-            find .gleon-downloads -mindepth 1 -maxdepth 1 -type d -exec cp -r {}/. "$WORKING_DIRECTORY/.gleon/runs/latest/" \;
-            find .gleon-downloads -mindepth 1 -maxdepth 1 -type f -exec cp {} "$WORKING_DIRECTORY/.gleon/runs/latest/" \;
-          else
-            echo "::error::No verification artifacts found in .gleon-downloads for PR #${{ github.event.issue.number }}."
+          set -eo pipefail
+          FROM=()
+          for run in "$GITHUB_WORKSPACE"/.gleon-downloads/*/*/latest; do
+            if [ -d "$run" ]; then FROM+=(--from "$run"); fi
+          done
+          if [ "${#FROM[@]}" -eq 0 ]; then
+            echo "::error::No verification artifacts (.gleon/runs/latest) found for PR #$PR_NUMBER."
             exit 1
           fi
+          echo "args=$(jq -cn '$ARGS.positional' --args "${FROM[@]}")" >> "$GITHUB_OUTPUT"
+          # Goldens written after this are the approved ones (see Commit and Push).
+          touch "$RUNNER_TEMP/gleon-approve.stamp"
 
       - name: Run Gleon Approve
         uses: gleon-rs/gleon@main
@@ -156,6 +172,7 @@ jobs:
           version: ${{ inputs.version }}
           checksum: ${{ inputs.checksum }}
           command: "approve"
+          args: ${{ steps.runs.outputs.args }}
           working-directory: ${{ inputs.working-directory }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
@@ -189,11 +206,19 @@ jobs:
           PUSH_TOKEN: ${{ inputs.pat-token || github.token }}
         run: |
           set -eo pipefail
+          # PNG goldens of integrations that approve wrote: every one, even one equal to the base
+          # branch's (the checkout) that the PR had changed.
+          mapfile -t GOLDENS < <(find "$WORKING_DIRECTORY" -type f -iname '*.png' \
+            -newer "$RUNNER_TEMP/gleon-approve.stamp" \
+            -not -path '*/.git/*' -not -path '*/.gleon/*' -not -path '*/.gleon-downloads/*')
           export GIT_INDEX_FILE=.git/tmp_index
           rm -f "$GIT_INDEX_FILE"
 
           # 1. Load PR branch tree into temporary index
           git read-tree "$HEAD_SHA"
+          if [ "${#GOLDENS[@]}" -gt 0 ]; then
+            git add -- "${GOLDENS[@]}"
+          fi
 
           # 2. Stage updated manifests into the temporary index
           if [ -d "$WORKING_DIRECTORY/.gleon/manifests" ]; then

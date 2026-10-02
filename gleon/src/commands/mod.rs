@@ -13,6 +13,7 @@ pub mod report;
 pub mod resolve;
 pub mod stage;
 pub mod status;
+pub mod test;
 
 use crate::exit_code::ExitCode;
 
@@ -80,6 +81,86 @@ fn format_failure(context: &str, err: &dyn std::error::Error) -> String {
 pub fn report_failure(context: &str, err: &dyn std::error::Error) -> ExitCode {
     tracing::error!("{}", format_failure(context, err));
     ExitCode::Failure
+}
+
+/// The run a command reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunSource {
+    /// The workspace's own `.gleon/runs/latest`, picked with `GLEON_RUN_ID` when it is set.
+    Own(std::path::PathBuf),
+    /// A copy of `.gleon/runs/latest` given with `--from` (a downloaded CI artifact), read as it
+    /// is: the caller's `GLEON_RUN_ID` names the caller's run, not that one.
+    Copy(std::path::PathBuf),
+}
+
+impl RunSource {
+    /// The directory standing in for `.gleon/runs/latest`.
+    #[must_use]
+    pub fn dir(&self) -> &std::path::Path {
+        match self {
+            Self::Own(dir) | Self::Copy(dir) => dir,
+        }
+    }
+}
+
+/// The `GLEON_RUN_ID` of the process, if set. Only the process environment names a run (CI,
+/// `gleon test`), like for the integrations: a value in `.gleon/.env` would stamp every local run
+/// with one id.
+///
+/// # Errors
+/// Returns an error if it is not a valid run id.
+pub fn env_run_id() -> anyhow::Result<Option<gleon_core::case::RunId>> {
+    use anyhow::Context as _;
+    use gleon_core::{
+        case::{RUN_ID_ENV, RunId},
+        env::{EnvProvider as _, OsEnv},
+    };
+
+    RunId::from_env(OsEnv.get_var(RUN_ID_ENV).as_deref())
+        .with_context(|| format!("invalid {RUN_ID_ENV}"))
+}
+
+/// The case reports of the run of `source`, with its warnings logged; an error when there are
+/// none, so a run that recorded nothing never reads as a passing one.
+///
+/// # Errors
+/// Returns an error if `GLEON_RUN_ID` is invalid, a copied run is no run directory, the reports
+/// cannot be read, or there are none.
+pub fn load_cases(source: &RunSource) -> anyhow::Result<gleon_core::cases::Cases> {
+    use anyhow::Context as _;
+    use gleon_core::{
+        case::RUN_ID_ENV,
+        cases::{Cases, RUN_FILE, check_run_dir},
+    };
+
+    let run_id = match source {
+        RunSource::Own(_) => env_run_id()?,
+        RunSource::Copy(dir) => {
+            check_run_dir(dir)?;
+            None
+        }
+    };
+    let dir = source.dir();
+    let cases = Cases::load(dir, run_id.as_ref())
+        .with_context(|| format!("Failed to read the case reports in '{}'", dir.display()))?;
+    for warning in cases.warnings() {
+        tracing::warn!("{warning}");
+    }
+    if cases.reports().is_empty() {
+        let run = match (source, cases.run_id()) {
+            (RunSource::Own(_), Some(run_id)) => {
+                format!(" of run '{}' ({RUN_FILE} or {RUN_ID_ENV})", run_id.as_str())
+            }
+            (_, Some(run_id)) => format!(" of run '{}'", run_id.as_str()),
+            (_, None) => String::new(),
+        };
+        anyhow::bail!(
+            "No case reports{run} found in '{}': run the tests with `gleon test -- <command>`, \
+             or run `gleon diff`",
+            dir.join("cases").display()
+        );
+    }
+    Ok(cases)
 }
 
 #[cfg(test)]

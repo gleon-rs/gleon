@@ -1,6 +1,20 @@
 //! CLI Argument parser definition for gleon.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// The formats of `gleon report`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReportFormat {
+    /// The PR comment (Markdown)
+    Markdown,
+    /// The HTML report of the failures
+    Html,
+    /// `JUnit` XML
+    #[value(alias = "junit.xml", alias = "xml")]
+    Junit,
+    /// The case reports of the run (JSON)
+    Json,
+}
 
 /// The main CLI structure for gleon.
 #[derive(Parser, Debug)]
@@ -120,6 +134,10 @@ impl From<&Cli> for gleon_core::context::ContextOptions {
     }
 }
 
+fn parse_artifacts_dir(s: &str) -> Result<gleon_core::config::ArtifactsDir, String> {
+    gleon_core::config::ArtifactsDir::new(s).map_err(|e| e.to_string())
+}
+
 fn parse_label(s: &str) -> Result<(String, String), String> {
     s.split_once('=')
         .ok_or_else(|| format!("invalid label: no '=' found in '{s}'"))
@@ -153,11 +171,16 @@ pub enum Commands {
         #[arg(value_name = "PATHS")]
         paths: Vec<std::path::PathBuf>,
     },
-    /// Run visual diff comparison against baseline images
+    /// Run visual diff comparison against baseline images; writes a case report per screenshot
     Diff {
         /// Automatically pull the latest remote baselines before diffing
         #[arg(long = "auto-pull")]
         auto_pull: bool,
+        /// Directory for the images of failed screenshots, relative to the workspace root:
+        /// `.gleon/runs/latest/artifacts` (the default) or a directory under `.gleon/runs/`
+        /// outside `latest/`; beats `GLEON_ARTIFACTS_DIR` and the config's `artifacts:`
+        #[arg(long, value_name = "DIR", value_parser = parse_artifacts_dir)]
+        artifacts: Option<gleon_core::config::ArtifactsDir>,
     },
     /// Lint baseline JSON manifests for schema validity and Git conflict markers (only the
     /// global `--platform`'s when it is given)
@@ -172,8 +195,22 @@ pub enum Commands {
         #[arg(long)]
         fetch: bool,
     },
-    /// Execute tests and run diff comparison
-    Test,
+    /// Run a test command as one run: `gleon test -- flutter test`
+    ///
+    /// Gives the command a run id (`GLEON_RUN_ID`, kept when already set) and metrics
+    /// (`GLEON_METRICS=1`), records the run in `.gleon/runs/latest/run.json` for `gleon report`,
+    /// `gleon dashboard` and `gleon approve`, and exits with the command's exit code. Runs of one
+    /// workspace go one after another: a concurrent run replaces the run file.
+    Test {
+        /// The test command and its arguments
+        #[arg(
+            value_name = "COMMAND",
+            required = true,
+            last = true,
+            num_args = 1..
+        )]
+        command: Vec<String>,
+    },
     /// Pull latest baselines from remote storage
     Pull {
         /// Pull blobs for all platforms under .gleon/manifests/ instead of only the active platform
@@ -214,17 +251,15 @@ pub enum Commands {
         #[arg(long)]
         keep_runs: bool,
     },
-    /// Generate a PR comment from a JSON report
+    /// Render the case reports of the latest run (a PR comment, HTML, `JUnit` or JSON)
     Report {
-        /// Format of the report (e.g., markdown, html, junit, json)
-        #[arg(value_name = "FORMAT", value_parser = ["markdown", "html", "junit", "junit.xml", "xml", "json"])]
-        format: String,
-        /// Path to the JSON report file
-        ///
-        /// Defaults to where `gleon diff` just wrote it, so `gleon report <format>` works out of
-        /// the box right after a run without repeating the path back.
-        #[arg(long, default_value = ".gleon/runs/latest/gleon-report.json")]
-        report: std::path::PathBuf,
+        /// Format of the report
+        #[arg(value_name = "FORMAT", value_enum)]
+        format: ReportFormat,
+        /// A copy of `.gleon/runs/latest` (with `cases/`), e.g. a downloaded CI artifact, read as
+        /// it is (default: the workspace's latest run, picked with `GLEON_RUN_ID`)
+        #[arg(long, value_name = "DIR")]
+        from: Option<std::path::PathBuf>,
         /// Pull Request number
         #[arg(long)]
         pr_number: Option<u64>,
@@ -232,21 +267,24 @@ pub enum Commands {
         #[arg(short = 'o', long)]
         out: Option<std::path::PathBuf>,
     },
-    /// Approve failed visual diffs and update baseline snapshots
+    /// Approve the candidates of failed cases as new baselines
     Approve {
-        /// Optional specific test paths to approve (filters by prefix)
+        /// Optional test names or golden paths to approve (filters by prefix)
         #[arg(value_name = "PATHS")]
         paths: Vec<std::path::PathBuf>,
 
-        /// Optional path to directory containing actual screenshots (e.g. CI artifacts)
-        #[arg(long = "from")]
-        from: Option<std::path::PathBuf>,
+        /// Copies of `.gleon/runs/latest` (`cases/` and `artifacts/`) to approve from, e.g. the
+        /// downloaded artifacts of CI runs, each read as it is (repeatable; default: the
+        /// workspace's latest run, picked with `GLEON_RUN_ID`)
+        #[arg(long = "from", value_name = "DIR")]
+        from: Vec<std::path::PathBuf>,
     },
-    /// Compile static visual regression history dashboard
+    /// Add the latest run to the history and compile the static dashboard
     Dashboard {
-        /// Path to the JSON report file (defaults to latest test run report in .gleon)
-        #[arg(long)]
-        report: Option<std::path::PathBuf>,
+        /// A copy of `.gleon/runs/latest` (with `cases/`), read as it is (default: the
+        /// workspace's latest run, picked with `GLEON_RUN_ID`)
+        #[arg(long, value_name = "DIR")]
+        from: Option<std::path::PathBuf>,
 
         /// Output file path for compiled dashboard HTML
         #[arg(short = 'o', long)]
@@ -300,29 +338,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_defaults_report_path_to_the_diff_output() -> Result<(), clap::Error> {
-        // `gleon diff` always writes its JSON report to this exact path; requiring users/CI to
-        // repeat it back via `--report` on every `gleon report` call is a footgun.
-        let args = ["gleon", "report", "markdown"];
-        let cli = Cli::try_parse_from(args)?;
+    fn test_parse_report_reads_the_latest_run_by_default() -> Result<(), clap::Error> {
+        let cli = Cli::try_parse_from(["gleon", "report", "markdown"])?;
         assert_eq!(
             cli.command,
             Commands::Report {
-                format: "markdown".to_string(),
-                report: std::path::PathBuf::from(".gleon/runs/latest/gleon-report.json"),
+                format: ReportFormat::Markdown,
+                from: None,
                 pr_number: None,
                 out: None,
             }
         );
 
-        // Still overridable.
-        let args_override = ["gleon", "report", "html", "--report", "custom/report.json"];
-        let cli_override = Cli::try_parse_from(args_override)?;
+        let cli_override = Cli::try_parse_from(["gleon", "report", "html", "--from", "dl/latest"])?;
         assert_eq!(
             cli_override.command,
             Commands::Report {
-                format: "html".to_string(),
-                report: std::path::PathBuf::from("custom/report.json"),
+                format: ReportFormat::Html,
+                from: Some(std::path::PathBuf::from("dl/latest")),
                 pr_number: None,
                 out: None,
             }
@@ -331,11 +364,58 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_test_command() -> Result<(), clap::Error> {
+        let cli = Cli::try_parse_from([
+            "gleon",
+            "test",
+            "--",
+            "flutter",
+            "test",
+            "--plain-name",
+            "x",
+        ])?;
+        assert_eq!(
+            cli.command,
+            Commands::Test {
+                command: ["flutter", "test", "--plain-name", "x"]
+                    .map(String::from)
+                    .to_vec(),
+            }
+        );
+        assert!(Cli::try_parse_from(["gleon", "test"]).is_err());
+        assert!(
+            Cli::try_parse_from(["gleon", "test", "flutter"]).is_err(),
+            "the command follows `--`"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_diff_artifacts() -> Result<(), clap::Error> {
+        let cli = Cli::try_parse_from(["gleon", "diff", "--artifacts", ".gleon/runs/ci"])?;
+        assert_eq!(
+            cli.command,
+            Commands::Diff {
+                auto_pull: false,
+                artifacts: Some(gleon_core::config::ArtifactsDir::new(".gleon/runs/ci").unwrap()),
+            }
+        );
+        assert!(Cli::try_parse_from(["gleon", "diff", "--artifacts", "/tmp/out"]).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_branch_flag_long() -> Result<(), clap::Error> {
         let args = ["gleon", "--branch", "another-branch", "diff"];
         let cli = Cli::try_parse_from(args)?;
         assert_eq!(cli.branch, Some("another-branch".to_string()));
-        assert_eq!(cli.command, Commands::Diff { auto_pull: false });
+        assert_eq!(
+            cli.command,
+            Commands::Diff {
+                auto_pull: false,
+                artifacts: None
+            }
+        );
         assert_eq!(cli.target_branch, "main"); // Default value
         Ok(())
     }
@@ -497,9 +577,11 @@ mod tests {
             cli.command,
             Commands::Approve {
                 paths: vec![std::path::PathBuf::from("auth/login")],
-                from: Some(std::path::PathBuf::from(".gleon/diffs")),
+                from: vec![std::path::PathBuf::from(".gleon/diffs")],
             }
         );
+        let several = Cli::try_parse_from(["gleon", "approve", "--from", "a", "--from", "b"])?;
+        assert!(matches!(several.command, Commands::Approve { from, .. } if from.len() == 2));
 
         let args_no_from = ["gleon", "approve"];
         let cli_no_from = Cli::try_parse_from(args_no_from)?;
@@ -507,7 +589,7 @@ mod tests {
             cli_no_from.command,
             Commands::Approve {
                 paths: vec![],
-                from: None,
+                from: vec![],
             }
         );
         Ok(())
@@ -520,7 +602,7 @@ mod tests {
         assert_eq!(
             cli.command,
             Commands::Dashboard {
-                report: None,
+                from: None,
                 out: None,
                 truncate_history: std::num::NonZeroUsize::new(5).unwrap(),
                 push: true,

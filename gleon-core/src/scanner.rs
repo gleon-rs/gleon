@@ -226,10 +226,7 @@ mod tests {
             ..GleonConfig::default()
         }
     }
-    use gleon_engine::Measurement;
-
     use super::*;
-    use crate::results::{TestCaseResult, TestImageResult};
 
     // Tiny 1x1 valid PNG bytes
     const VALID_PNG_BYTES: &[u8] = &[
@@ -663,34 +660,6 @@ screenshots:
 
         let pattern_err = ScannerError::Pattern(globset::Glob::new("[").unwrap_err());
         assert!(!format!("{pattern_err:?}").is_empty());
-
-        let mismatch_detail = Measurement::Pixel { diff_count: 42 };
-        assert!(!format!("{mismatch_detail:?}").is_empty());
-        assert_eq!(mismatch_detail, Measurement::Pixel { diff_count: 42 });
-
-        let ssim_detail = Measurement::Ssim {
-            mean_ssim: 0.99,
-            min_ssim: 0.99,
-            max_excess: 0.0,
-            peak_excess: 0.0,
-            changed_pixels: 1,
-            changed_region: None,
-            failing_pixels: 1,
-            failing_region: None,
-        };
-        assert!(!format!("{ssim_detail:?}").is_empty());
-
-        let image_res = TestImageResult::DecodeError {
-            relative_path: PathBuf::from("a.png"),
-            error: "bad data".to_string(),
-        };
-        assert!(!format!("{image_res:?}").is_empty());
-
-        let tc_res = TestCaseResult {
-            name: "test".to_string(),
-            result: image_res,
-        };
-        assert!(!format!("{tc_res:?}").is_empty());
     }
 
     #[test]

@@ -16,7 +16,8 @@ use std::{fs, path::Path};
 use gleon_core::{
     context::{ContextOptions, ResolvedContext},
     ops::{
-        ApproveError, approve_workspace, check_status, init_workspace, run_diff, stage_workspace,
+        ApproveError, approve_workspace, check_status, diff::DiffOptions, init_workspace, run_diff,
+        stage_workspace,
     },
 };
 
@@ -26,7 +27,7 @@ fn test_approve_uninitialized_fails() {
     let base_path = temp_dir.path();
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    let result = approve_workspace(&ctx, &[], None);
+    let result = approve_workspace(&ctx, &[], &[], None);
 
     assert!(result.is_err());
     assert!(matches!(
@@ -65,152 +66,97 @@ fn test_approve_full_flow_with_diff_failures() {
     stage_workspace(&ctx, None).unwrap();
     assert!(check_status(&ctx).unwrap().is_clean());
 
-    // 2. Change actual screenshot to updated_png and run diff -> fails & writes to .gleon/runs/latest/actual/
+    // 2. Change the screenshot and run diff -> fails and keeps the candidate as an artifact
     fs::copy(
         fixtures_dir.join("diff_16px_corners_100x100.png"),
         &screenshot_file,
     )
     .unwrap();
-    let diff_res = run_diff(&ctx).unwrap();
+    let diff_res = run_diff(&ctx, &DiffOptions::default()).unwrap();
     assert_eq!(diff_res.failed_tests, 1);
-    assert!(!diff_res.passed);
     assert!(
         base_path
-            .join(".gleon")
-            .join("runs")
-            .join("latest")
-            .join("actual")
-            .join("login")
-            .join("button.png")
-            .exists()
+            .join(".gleon/runs/latest/artifacts/login/button/candidate.png")
+            .is_file()
     );
 
-    // 3. Run approve without --from (defaults to .gleon/runs/latest/actual/)
-    let approve_res = approve_workspace(&ctx, &[], None).unwrap();
-    assert_eq!(approve_res.total_approved, 1);
-    assert_eq!(
-        approve_res.approved_test_cases,
-        vec!["login/button".to_string()]
-    );
+    // 3. Run approve without --from (the case reports of the latest run)
+    let approve_res = approve_workspace(&ctx, &[], &[], None).unwrap();
+    assert_eq!(approve_res.approved_test_cases, ["login/button"]);
 
     // 4. Verify status is clean and diff passes!
     assert!(check_status(&ctx).unwrap().is_clean());
-    let diff_res_after = run_diff(&ctx).unwrap();
-    assert!(diff_res_after.passed);
+    let diff_res_after = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_eq!(diff_res_after.failed_tests, 0);
 }
 
+/// Approve files baselines under the test names `gleon diff` recorded, which are the scanner's
+/// (extension stripped, separators normalized, case folded), so `diff` and `status` find them.
 #[test]
-fn test_approve_mixed_case_path_normalization() {
+fn test_approve_uses_the_test_names_of_the_scanner() {
     let temp_dir = tempfile::tempdir().unwrap();
     let base_path = temp_dir.path();
-
-    let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
-
-    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures");
-
-    // Custom directory with mixed casing
-    let custom_dir = base_path.join("CustomSource").join("Auth");
-    fs::create_dir_all(&custom_dir).unwrap();
-    let file = custom_dir.join("LoginButton.png");
-    fs::copy(fixtures_dir.join("baseline_100x100.png"), &file).unwrap();
-
-    let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-
-    let res = approve_workspace(&ctx, &[], Some(&base_path.join("CustomSource"))).unwrap();
-    assert_eq!(res.total_approved, 1);
-    assert_eq!(
-        res.approved_test_cases,
-        vec!["auth/loginbutton".to_string()]
-    );
-
-    let platform_key = ctx.platform.to_key().unwrap();
-    let manifest_file = base_path
-        .join(".gleon")
-        .join("manifests")
-        .join(platform_key)
-        .join("auth/loginbutton.json");
-    assert!(
-        manifest_file.is_file(),
-        "Manifest must be saved with canonical lowercase path"
-    );
-}
-
-#[test]
-fn test_approve_with_corrupt_image() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let base_path = temp_dir.path();
-
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
     init_workspace(&ctx_init).unwrap();
-
-    let screenshot_dir = base_path.join(".gleon/runs/latest/actual/billing");
-    fs::create_dir_all(&screenshot_dir).unwrap();
-    let screenshot_file = screenshot_dir.join("form.png");
-
-    // Write corrupt image
-    fs::write(&screenshot_file, "this is not a valid png file").unwrap();
-
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
-
-    let options_approve = ContextOptions {
-        branch: Some("main".to_string()),
-        ..Default::default()
-    };
-    let ctx_approve = ResolvedContext::from_options(&options_approve, base_path).unwrap();
-
-    let result = approve_workspace(&ctx_approve, &[], None);
-    assert!(result.is_err());
-
-    assert!(matches!(result, Err(ApproveError::ImageDecode { .. })));
-}
-
-/// Characterization test for the path -> test-name derivation used by `approve`, pinning it to
-/// the same result `FileScanner` produces for the same file. The two used to derive names
-/// independently (approve hand-rolled a `".png"`/byte-slice strip), so this guards against them
-/// drifting apart — a drift would silently file approved baselines under a name that `diff`
-/// and `status` never look up.
-#[test]
-fn test_approve_derives_same_test_name_as_scanner_for_nested_uppercase_extension() {
-    let temp = tempfile::tempdir().unwrap();
-    let base = temp.path();
-    fs::create_dir_all(base.join(".gleon")).unwrap();
-
-    // Nested path, uppercase extension, dots inside the stem.
-    let rel = Path::new("auth").join("Login.Screen.PNG");
-    let source_dir = base.join("artifacts");
-    fs::create_dir_all(source_dir.join("auth")).unwrap();
     fs::write(
-        source_dir.join(&rel),
+        base_path.join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"Auth/**\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(base_path.join("Auth")).unwrap();
+    fs::write(
+        base_path.join("Auth/Login.Screen.PNG"),
         include_bytes!("fixtures/baseline_100x100.png"),
     )
     .unwrap();
 
-    let ctx = ResolvedContext::from_options(&ContextOptions::default(), base).unwrap();
-    let res = approve_workspace(&ctx, &[], Some(&source_dir)).unwrap();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
+    let missing = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_eq!(missing.failed_tests, 1);
 
-    assert_eq!(res.total_approved, 1);
-    assert_eq!(
-        res.approved_test_cases,
-        vec!["auth/login.screen".to_string()],
-        "extension stripped, separators normalized, case folded"
-    );
-
-    // And the manifest really lands at that path on disk.
-    let platform = ctx.platform.to_key().unwrap();
-    let manifest = base
-        .join(".gleon")
-        .join("manifests")
-        .join(platform)
-        .join("auth")
-        .join("login.screen.json");
+    let res = approve_workspace(&ctx, &[], &[], None).unwrap();
+    assert_eq!(res.approved_test_cases, ["auth/login.screen"]);
+    let manifest = base_path
+        .join(".gleon/manifests")
+        .join(ctx.platform.to_key().unwrap())
+        .join("auth/login.screen.json");
     assert!(manifest.is_file(), "expected manifest at {manifest:?}");
+    assert_eq!(
+        run_diff(&ctx, &DiffOptions::default())
+            .unwrap()
+            .failed_tests,
+        0
+    );
+}
+
+/// A screenshot that is no PNG keeps no candidate, so there is nothing to approve.
+#[test]
+fn test_approve_skips_candidates_that_are_no_png() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let base_path = temp_dir.path();
+    let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
+    init_workspace(&ctx_init).unwrap();
+    fs::write(
+        base_path.join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"billing/**/*.png\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(base_path.join("billing")).unwrap();
+    fs::write(
+        base_path.join("billing/form.png"),
+        "this is not a valid png file",
+    )
+    .unwrap();
+
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
+    assert_ne!(
+        run_diff(&ctx, &DiffOptions::default())
+            .unwrap()
+            .failed_tests,
+        0
+    );
+    assert!(matches!(
+        approve_workspace(&ctx, &[], &[], None),
+        Err(ApproveError::NothingToApprove { .. })
+    ));
 }

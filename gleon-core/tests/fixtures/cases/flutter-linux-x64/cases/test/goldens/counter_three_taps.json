@@ -1,0 +1,93 @@
+{
+  "schema_version": 2,
+  "name": "test/goldens/counter_three_taps",
+  "golden": {
+    "path": "test/goldens/counter_three_taps.png",
+    "sha256": "f80a2bb819104e3624d4e9a154cf10fdbd62b59fc96886c296836400572692a4",
+    "width": 360,
+    "height": 640
+  },
+  "candidate": {
+    "sha256": "07b1ea37fe635364be2dc495952df7ae52e66906d51dff620e0357d711b18268",
+    "width": 360,
+    "height": 640
+  },
+  "source": {
+    "tool": "gleon_flutter",
+    "tool_version": "0.1.0",
+    "renderer": "flutter-3.47.5"
+  },
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64"
+  },
+  "test": {
+    "name": "matches the golden after three taps"
+  },
+  "comparison": {
+    "tolerance": {
+      "kind": "ssim",
+      "min_similarity": 0.73,
+      "color_tolerance": 46.0
+    },
+    "masks": [
+      {
+        "x": 280,
+        "y": 560,
+        "width": 80,
+        "height": 80
+      }
+    ],
+    "policy_version": 2
+  },
+  "outcome": "match",
+  "metrics": {
+    "kind": "ssim",
+    "min_ssim": 0.7540090084075928,
+    "mean_ssim": 0.9956658850744781,
+    "max_excess": 0.0,
+    "peak_excess": 40.5,
+    "changed_pixels": 2304,
+    "changed_region": {
+      "x": 0,
+      "y": 16,
+      "width": 328,
+      "height": 330
+    },
+    "failing_pixels": 0,
+    "headroom": {
+      "similarity": 0.02400900840759279,
+      "color": 5.5
+    }
+  },
+  "regions": [
+    {
+      "kind": "image",
+      "metrics": {
+        "kind": "ssim",
+        "min_ssim": 0.7540090084075928,
+        "mean_ssim": 0.9956658850744781,
+        "max_excess": 0.0,
+        "peak_excess": 40.5,
+        "changed_pixels": 2304,
+        "changed_region": {
+          "x": 0,
+          "y": 16,
+          "width": 328,
+          "height": 330
+        },
+        "failing_pixels": 0,
+        "headroom": {
+          "similarity": 0.02400900840759279,
+          "color": 5.5
+        }
+      }
+    }
+  ],
+  "timings_ms": {
+    "total": 17.0,
+    "native": 16.841
+  },
+  "run_id": "36918116203-1",
+  "recorded_at": "2026-10-01T20:00:32.111489108Z"
+}

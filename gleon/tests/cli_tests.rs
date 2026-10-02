@@ -15,9 +15,27 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+/// Variables of the environment that select runs or outputs; CI exports `GLEON_RUN_ID` job-wide.
+const GLEON_ENV: [&str; 5] = [
+    "GLEON_RUN_ID",
+    "GLEON_ARTIFACTS_DIR",
+    "GLEON_METRICS",
+    "GLEON_STORAGE_URL",
+    "GLEON_HTML_ARTIFACT_URL",
+];
+
+/// The `gleon` binary without [`GLEON_ENV`], so each test sees only what it sets.
+fn gleon() -> Command {
+    let mut cmd = Command::cargo_bin("gleon").unwrap();
+    for var in GLEON_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 fn init_temp_dir() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let mut cmd = Command::cargo_bin("gleon").unwrap();
+    let mut cmd = gleon();
     cmd.current_dir(dir.path()).arg("init").assert().success();
     dir
 }
@@ -58,7 +76,7 @@ fn copy_dir_all(
 
 #[test]
 fn test_help() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.arg("--help")
         .assert()
         .success()
@@ -70,7 +88,7 @@ fn test_help() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_no_arguments_shows_help() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.assert()
         .failure() // clap exits with 2 when required subcommand is missing
         .stderr(predicates::str::contains("Usage:"))
@@ -80,7 +98,7 @@ fn test_no_arguments_shows_help() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_version() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.arg("--version")
         .assert()
         .success()
@@ -91,7 +109,7 @@ fn test_version() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_init_command() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("init")
         .assert()
@@ -109,7 +127,7 @@ fn test_status_linux_chrome() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_config = manifest_dir.join("tests/fixtures/platform/linux-chrome.yaml");
     let dir = init_with_config(&fixture_config);
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("status")
         .assert()
@@ -126,7 +144,7 @@ fn test_status_macos_opaque() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_config = manifest_dir.join("tests/fixtures/platform/macos-opaque.yaml");
     let dir = init_with_config(&fixture_config);
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path()).arg("status").assert().success();
     Ok(())
 }
@@ -137,7 +155,7 @@ fn test_status_minimal_with_overrides() -> Result<(), Box<dyn std::error::Error>
     let fixture_config = manifest_dir.join("tests/fixtures/platform/minimal.yaml");
     let dir = init_with_config(&fixture_config);
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("--os")
         .arg("windows")
@@ -155,7 +173,7 @@ fn test_status_opaque_conflict_error() -> Result<(), Box<dyn std::error::Error>>
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_config = manifest_dir.join("tests/fixtures/platform/macos-opaque.yaml");
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("--config")
         .arg(&fixture_config)
@@ -171,7 +189,7 @@ fn test_status_opaque_conflict_error() -> Result<(), Box<dyn std::error::Error>>
 #[test]
 fn test_status_invalid_segment_error() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("--os")
         .arg("mac os")
@@ -187,7 +205,7 @@ fn test_status_invalid_segment_error() -> Result<(), Box<dyn std::error::Error>>
 #[test]
 fn test_status_reserved_label_key_error() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("--label")
         .arg("os=linux")
@@ -201,7 +219,7 @@ fn test_status_reserved_label_key_error() -> Result<(), Box<dyn std::error::Erro
 #[test]
 fn test_stage_command() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("stage")
         .assert()
@@ -213,7 +231,7 @@ fn test_stage_command() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_diff_command() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("diff")
         .assert()
@@ -225,21 +243,9 @@ fn test_diff_command() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_test_placeholder() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("gleon")?;
-    cmd.arg("test")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "Subcommand 'test' is not implemented yet",
-        ));
-    Ok(())
-}
-
-#[test]
 fn test_pull_placeholder() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .env_remove("GLEON_STORAGE_URL")
         .arg("pull")
@@ -254,7 +260,7 @@ fn test_pull_placeholder() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_push_placeholder() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .env_remove("GLEON_STORAGE_URL")
         .arg("push")
@@ -269,7 +275,7 @@ fn test_push_placeholder() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_gc_local_mode() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .env_remove("GLEON_STORAGE_URL")
         .arg("gc")
@@ -290,7 +296,7 @@ fn test_gc_cli_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
 
     // 1. Run gc in dry-run mode (default 24h grace period)
-    let mut cmd_dry = Command::cargo_bin("gleon")?;
+    let mut cmd_dry = gleon();
     cmd_dry
         .current_dir(dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -300,7 +306,7 @@ fn test_gc_cli_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
         .stderr(predicates::str::contains("[DRY RUN]"));
 
     // 2. Run gc with grace-period < 24 without force -> fails with GracePeriodTooShort
-    let mut cmd_zero_grace = Command::cargo_bin("gleon")?;
+    let mut cmd_zero_grace = gleon();
     cmd_zero_grace
         .current_dir(dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -312,7 +318,7 @@ fn test_gc_cli_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
         ));
 
     // Also fails with force when grace-period < 24
-    let mut cmd_force_short_grace = Command::cargo_bin("gleon")?;
+    let mut cmd_force_short_grace = gleon();
     cmd_force_short_grace
         .current_dir(dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -324,7 +330,7 @@ fn test_gc_cli_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
         ));
 
     // 3. Run gc without force in non-git directory -> fails with GitRequired
-    let mut cmd_fail = Command::cargo_bin("gleon")?;
+    let mut cmd_fail = gleon();
     cmd_fail
         .current_dir(dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -334,7 +340,7 @@ fn test_gc_cli_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
         .stderr(predicates::str::contains("requires a Git repository"));
 
     // 4. Run gc with --force and valid grace period (24 hours)
-    let mut cmd_run = Command::cargo_bin("gleon")?;
+    let mut cmd_run = gleon();
     cmd_run
         .current_dir(dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -351,7 +357,7 @@ fn test_gc_cli_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_gc_uninitialized_with_storage_fails() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .env("GLEON_STORAGE_URL", "memory://")
         .arg("gc")
@@ -365,7 +371,7 @@ fn test_gc_uninitialized_with_storage_fails() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn test_invalid_subcommand() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.arg("invalid-command").assert().failure();
     Ok(())
 }
@@ -376,7 +382,7 @@ fn test_verbose_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_config = manifest_dir.join("tests/fixtures/platform/minimal.yaml");
     let dir = init_with_config(&fixture_config);
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("-v")
         .arg("status")
@@ -393,7 +399,7 @@ fn test_quiet_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_config = manifest_dir.join("tests/fixtures/platform/minimal.yaml");
     let dir = init_with_config(&fixture_config);
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("-q")
         .arg("status")
@@ -405,7 +411,7 @@ fn test_quiet_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_conflicting_verbose_and_quiet() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.arg("-v").arg("-q").arg("status").assert().failure();
     Ok(())
 }
@@ -413,7 +419,7 @@ fn test_conflicting_verbose_and_quiet() -> Result<(), Box<dyn std::error::Error>
 #[test]
 fn test_status_with_env_vars() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .env("GLEON_OS", "linux")
         .env("GLEON_ARCH", "x86_64")
@@ -428,7 +434,7 @@ fn test_status_with_env_vars() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_status_cli_platform_success() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("--platform")
         .arg("custom-opaque")
@@ -441,7 +447,7 @@ fn test_status_cli_platform_success() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn test_status_cli_platform_conflict() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("--platform")
         .arg("custom-opaque")
@@ -457,7 +463,7 @@ fn test_status_cli_platform_conflict() -> Result<(), Box<dyn std::error::Error>>
 #[test]
 fn test_status_cli_platform_conflict_with_env_platform() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .env("GLEON_PLATFORM", "os=linux,arch=x86_64")
         .arg("--platform")
@@ -479,7 +485,7 @@ fn test_cli_diff_exit_code_on_match_and_mismatch() -> Result<(), Box<dyn std::er
         .join("gleon-core/tests/fixtures");
 
     // 1. gleon init
-    let mut cmd_init = Command::cargo_bin("gleon")?;
+    let mut cmd_init = gleon();
     cmd_init
         .current_dir(dir.path())
         .arg("init")
@@ -503,7 +509,7 @@ screenshots:
     std::fs::write(dir.path().join(".gleon").join("gleon.yaml"), config_yaml)?;
 
     // 3. gleon stage
-    let mut cmd_stage = Command::cargo_bin("gleon")?;
+    let mut cmd_stage = gleon();
     cmd_stage
         .current_dir(dir.path())
         .arg("stage")
@@ -511,7 +517,7 @@ screenshots:
         .success();
 
     // 4. gleon diff -> exit code 0 (match)
-    let mut cmd_diff_match = Command::cargo_bin("gleon")?;
+    let mut cmd_diff_match = gleon();
     cmd_diff_match
         .current_dir(dir.path())
         .arg("diff")
@@ -522,7 +528,7 @@ screenshots:
     std::fs::write(billing_dir.join("form.png"), &img_100)?;
 
     // 6. gleon diff on mismatch -> returns exit code 1
-    let mut cmd_diff_mismatch = Command::cargo_bin("gleon")?;
+    let mut cmd_diff_mismatch = gleon();
     cmd_diff_mismatch
         .current_dir(dir.path())
         .arg("diff")
@@ -541,7 +547,7 @@ fn test_stage_already_up_to_date_message() -> Result<(), Box<dyn std::error::Err
         .ok_or("No parent dir")?
         .join("gleon-core/tests/fixtures");
 
-    let mut cmd_init = Command::cargo_bin("gleon")?;
+    let mut cmd_init = gleon();
     cmd_init
         .current_dir(dir.path())
         .arg("init")
@@ -562,7 +568,7 @@ screenshots:
     std::fs::write(dir.path().join(".gleon").join("gleon.yaml"), config_yaml)?;
 
     // First stage
-    let mut cmd_stage1 = Command::cargo_bin("gleon")?;
+    let mut cmd_stage1 = gleon();
     cmd_stage1
         .current_dir(dir.path())
         .arg("stage")
@@ -573,7 +579,7 @@ screenshots:
         ));
 
     // Second stage on unchanged screenshots: outputs Already up to date.
-    let mut cmd_stage2 = Command::cargo_bin("gleon")?;
+    let mut cmd_stage2 = gleon();
     cmd_stage2
         .current_dir(dir.path())
         .arg("stage")
@@ -589,7 +595,7 @@ fn test_pull_and_push_no_storage_configured() -> Result<(), Box<dyn std::error::
     let dir = init_temp_dir();
 
     // Pull without GLEON_STORAGE_URL
-    let mut cmd_pull = Command::cargo_bin("gleon")?;
+    let mut cmd_pull = gleon();
     cmd_pull
         .current_dir(dir.path())
         .env_remove("GLEON_STORAGE_URL")
@@ -601,7 +607,7 @@ fn test_pull_and_push_no_storage_configured() -> Result<(), Box<dyn std::error::
         ));
 
     // Push without GLEON_STORAGE_URL
-    let mut cmd_push = Command::cargo_bin("gleon")?;
+    let mut cmd_push = gleon();
     cmd_push
         .current_dir(dir.path())
         .env_remove("GLEON_STORAGE_URL")
@@ -613,7 +619,7 @@ fn test_pull_and_push_no_storage_configured() -> Result<(), Box<dyn std::error::
         ));
 
     // Diff --auto-pull without GLEON_STORAGE_URL
-    let mut cmd_diff = Command::cargo_bin("gleon")?;
+    let mut cmd_diff = gleon();
     cmd_diff
         .current_dir(dir.path())
         .env_remove("GLEON_STORAGE_URL")
@@ -631,7 +637,7 @@ fn test_pull_and_push_no_storage_configured() -> Result<(), Box<dyn std::error::
 #[test]
 fn test_sync_fails_and_clears_spinner() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
 
     cmd.current_dir(dir.path())
         .env("GLEON_STORAGE_URL", "s3://non-existent-bucket-123456/gleon")
@@ -673,7 +679,7 @@ screenshots:
     std::fs::create_dir_all(dir.path().join(".gleon")).unwrap();
     std::fs::write(dir.path().join(".gleon").join("gleon.yaml"), config_yaml)?;
 
-    let mut cmd_stage = Command::cargo_bin("gleon")?;
+    let mut cmd_stage = gleon();
     cmd_stage
         .current_dir(dir.path())
         .arg("stage")
@@ -681,7 +687,7 @@ screenshots:
         .success();
 
     // 2. Push with storage URL
-    let mut cmd_push = Command::cargo_bin("gleon")?;
+    let mut cmd_push = gleon();
     cmd_push
         .current_dir(dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -694,7 +700,7 @@ screenshots:
 
     // 3. Pull in fresh workspace with copied manifests (simulating git pull)
     let fresh_dir = tempfile::tempdir()?;
-    let mut cmd_init2 = Command::cargo_bin("gleon")?;
+    let mut cmd_init2 = gleon();
     cmd_init2
         .current_dir(fresh_dir.path())
         .arg("init")
@@ -707,7 +713,7 @@ screenshots:
         copy_dir_all(&manifests_src, &manifests_dst)?;
     }
 
-    let mut cmd_pull = Command::cargo_bin("gleon")?;
+    let mut cmd_pull = gleon();
     cmd_pull
         .current_dir(fresh_dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -719,7 +725,7 @@ screenshots:
         ));
 
     // 4. Pull again, should be up to date
-    let mut cmd_pull2 = Command::cargo_bin("gleon")?;
+    let mut cmd_pull2 = gleon();
     cmd_pull2
         .current_dir(fresh_dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -731,7 +737,7 @@ screenshots:
         ));
 
     // 5. Push again, should be up to date
-    let mut cmd_push2 = Command::cargo_bin("gleon")?;
+    let mut cmd_push2 = gleon();
     cmd_push2
         .current_dir(dir.path())
         .env("GLEON_STORAGE_URL", &remote_url)
@@ -799,7 +805,7 @@ fn test_dotenv_loading_integration() -> Result<(), Box<dyn std::error::Error>> {
         dir.path().join(".gleon").join(".env.local"),
     )?;
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("--verbose")
         .arg("diff")
@@ -812,11 +818,62 @@ fn test_dotenv_loading_integration() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `gleon diff` always writes its JSON report to `.gleon/runs/latest/gleon-report.json`;
-/// `gleon report <format>` must default `--report` to that exact path so it works right after a
-/// `diff` run without the caller repeating the path back.
+/// A case report of the Flutter integration for the golden `<name>.png` with `outcome` and
+/// `extra` fields, in run `run-1`.
+fn case(name: &str, outcome: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut report = serde_json::json!({
+        "schema_version": 2,
+        "name": name,
+        "golden": {"path": format!("{name}.png"), "sha256": "1".repeat(64)},
+        "candidate": {"sha256": "0".repeat(64)},
+        "source": {"tool": "gleon_flutter", "tool_version": "0.1.0"},
+        "platform": {"os": "linux", "arch": "x86_64"},
+        "comparison": {"tolerance": {"kind": "exact"}, "masks": [], "policy_version": 2},
+        "outcome": outcome,
+        "regions": [],
+        "timings_ms": {"total": 1.0},
+        "run_id": "run-1",
+        "recorded_at": "2026-10-01T12:00:00Z"
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        report[key] = value.clone();
+    }
+    if outcome == "missing" {
+        report["golden"]["sha256"] = serde_json::Value::Null;
+    }
+    report
+}
+
+/// Writes `reports` into `<dir>/.gleon/runs/latest/cases/` and returns that directory.
+fn write_cases(dir: &std::path::Path, reports: &[serde_json::Value]) -> std::path::PathBuf {
+    let cases = dir.join(".gleon/runs/latest/cases");
+    for report in reports {
+        let file = cases.join(format!("{}.json", report["name"].as_str().unwrap()));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, report.to_string()).unwrap();
+    }
+    cases
+}
+
+fn mismatch(name: &str, diff_pixels: u64) -> serde_json::Value {
+    case(
+        name,
+        "mismatch",
+        serde_json::json!({
+            "metrics": {"kind": "pixel", "total_pixels": 1000, "diff_pixels": diff_pixels,
+                        "diff_ratio": diff_pixels as f64 / 1000.0, "headroom": -1.0},
+        }),
+    )
+}
+
+fn with_blob(mut report: serde_json::Value, digit: char) -> serde_json::Value {
+    report["golden"]["blob"] = format!("sha256:{}", digit.to_string().repeat(64)).into();
+    report
+}
+
+/// `gleon report <format>` reads the case reports `gleon diff` just wrote without arguments.
 #[test]
-fn test_cli_report_defaults_to_the_diff_output_path() -> Result<(), Box<dyn std::error::Error>> {
+fn test_cli_report_defaults_to_the_latest_run() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let core_fixtures = manifest_dir
@@ -837,30 +894,25 @@ screenshots:
 "#;
     std::fs::write(dir.path().join(".gleon").join("gleon.yaml"), config_yaml)?;
 
-    Command::cargo_bin("gleon")?
+    gleon()
         .current_dir(dir.path())
         .arg("stage")
         .assert()
         .success();
 
-    // Change the screenshot after staging so `diff` reports a failure, not a no-op pass — a
-    // passing report renders no per-test rows and couldn't tell "found the default path" apart
-    // from "silently found nothing".
+    // Change the screenshot after staging so `diff` reports a failure, not a no-op pass.
     std::fs::write(billing_dir.join("form.png"), &img_100)?;
 
-    Command::cargo_bin("gleon")?
-        .current_dir(dir.path())
-        .arg("diff")
-        .assert()
-        .code(1);
+    gleon().current_dir(dir.path()).arg("diff").assert().code(1);
 
-    // No `--report` passed: must find `.gleon/runs/latest/gleon-report.json` on its own.
-    Command::cargo_bin("gleon")?
-        .current_dir(dir.path())
+    // From a subdirectory too: the workspace is resolved like for every command.
+    gleon()
+        .current_dir(&billing_dir)
         .args(["report", "markdown"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("form"));
+        .stdout(predicates::str::contains("billing/form"))
+        .stdout(predicates::str::contains("Dimension Mismatch"));
 
     Ok(())
 }
@@ -868,114 +920,96 @@ screenshots:
 #[test]
 fn test_cli_report_markdown_stdout_and_file() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let json_report_path = dir.path().join("gleon-report.json");
+    let cases = write_cases(
+        dir.path(),
+        &[
+            mismatch("login_button", 42),
+            case(
+                "missing_test",
+                "missing",
+                serde_json::json!({"message": "no golden yet"}),
+            ),
+            case(
+                "corrupt_test",
+                "error",
+                serde_json::json!({"error_kind": "image", "message": "corrupt png file"}),
+            ),
+        ],
+    );
     let out_report_path = dir.path().join("out-report.md");
 
-    // Write sample json report
-    let sample_json = r#"[
-        {
-            "name": "login_button",
-            "result": {
-                "Mismatch": {
-                    "relative_path": "login.png",
-                    "detail": { "Pixel": { "diff_count": 42 } },
-                    "diff_path": "diffs/login.png",
-                    "baseline_path": "goldens/login.png",
-                    "actual_path": "actual/login.png"
-                }
-            }
-        },
-        {
-            "name": "missing_test",
-            "result": {
-                "MissingBaseline": {
-                    "relative_path": "footer.png",
-                    "reason": "Missing baseline blob"
-                }
-            }
-        },
-        {
-            "name": "corrupt_test",
-            "result": {
-                "DecodeError": {
-                    "relative_path": "sidebar.png",
-                    "error": "corrupt png file"
-                }
-            }
-        }
-    ]"#;
-    std::fs::write(&json_report_path, sample_json)?;
-
-    // Test stdout output
-    let mut cmd_stdout = Command::cargo_bin("gleon")?;
-    cmd_stdout
+    gleon()
         .current_dir(dir.path())
-        .arg("report")
-        .arg("markdown")
-        .arg("--report")
-        .arg(&json_report_path)
+        .args(["report", "markdown", "--from"])
+        .arg(cases.parent().unwrap())
         .assert()
         .success()
         .stdout(predicates::str::contains("login_button"))
-        .stdout(predicates::str::contains("42 px"))
-        .stdout(predicates::str::contains("Missing baseline blob"))
-        .stdout(predicates::str::contains("corrupt png file"));
+        .stdout(predicates::str::contains("(42 of 1000px) differ"))
+        .stdout(predicates::str::contains("Missing Baseline: no golden yet"))
+        .stdout(predicates::str::contains("Error (image): corrupt png file"));
 
-    // Test --out file output
-    let mut cmd_out = Command::cargo_bin("gleon")?;
-    cmd_out
+    gleon()
         .current_dir(dir.path())
-        .arg("report")
-        .arg("markdown")
-        .arg("--report")
-        .arg(&json_report_path)
-        .arg("--out")
+        .args(["report", "markdown", "--out"])
         .arg(&out_report_path)
         .assert()
         .success();
-
     let out_content = std::fs::read_to_string(out_report_path)?;
     assert!(out_content.contains("login_button"));
-    assert!(out_content.contains("42 px"));
-    assert!(out_content.contains("Missing baseline blob"));
     assert!(out_content.contains("corrupt png file"));
 
+    gleon()
+        .current_dir(dir.path())
+        .args(["report", "junit"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            r#"tests="3" failures="2" errors="1""#,
+        ));
     Ok(())
 }
 
 #[test]
-fn test_cli_report_invalid_json() -> Result<(), Box<dyn std::error::Error>> {
+fn test_cli_report_without_or_with_broken_case_reports() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let json_report_path = dir.path().join("invalid.json");
-    std::fs::write(&json_report_path, "{}")?; // Empty object, not an array
-
-    let mut cmd = Command::cargo_bin("gleon")?;
-    cmd.current_dir(dir.path())
-        .arg("report")
-        .arg("markdown")
-        .arg("--report")
-        .arg(&json_report_path)
+    gleon()
+        .current_dir(dir.path())
+        .args(["report", "markdown"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "Failed to parse report JSON from",
+        .stderr(predicates::str::contains("No case reports found"));
+
+    // A broken report is skipped with a warning; the others still make the report.
+    let cases = write_cases(dir.path(), &[mismatch("a", 1)]);
+    std::fs::write(cases.join("broken.json"), "{}")?;
+    gleon()
+        .current_dir(dir.path())
+        .args(["report", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("`a`"))
+        .stdout(predicates::str::contains(
+            "skipped 1 invalid case report(s), e.g. broken.json",
         ));
 
+    gleon()
+        .current_dir(dir.path())
+        .env("GLEON_RUN_ID", "a:b")
+        .args(["report", "markdown"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid GLEON_RUN_ID"));
     Ok(())
 }
 
 #[test]
 fn test_cli_report_unsupported_format() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let json_report_path = dir.path().join("valid.json");
-    std::fs::write(&json_report_path, "[]")?;
-
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("report")
         .arg("unsupported-format")
-        .arg("--report")
-        .arg(&json_report_path)
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -988,35 +1022,19 @@ fn test_cli_report_unsupported_format() -> Result<(), Box<dyn std::error::Error>
 #[test]
 fn test_cli_report_with_base_url() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let json_report_path = dir.path().join("gleon-report.json");
-    let sample_json = r#"[
-        {
-            "name": "login_button",
-            "result": {
-                "Mismatch": {
-                    "relative_path": "login.png",
-                    "detail": { "Pixel": { "diff_count": 42 } },
-                    "diff_path": "diffs/login.png",
-                    "baseline_path": "goldens/login.png",
-                    "actual_path": "actual/login.png"
-                }
-            }
-        }
-    ]"#;
-    std::fs::write(&json_report_path, sample_json)?;
+    write_cases(dir.path(), &[with_blob(mismatch("login_button", 42), 'a')]);
 
-    let mut cmd_stdout = Command::cargo_bin("gleon")?;
-    cmd_stdout
+    gleon()
         .current_dir(dir.path())
         .env("GLEON_STORAGE_URL", "https://example.com/bucket")
-        .arg("report")
-        .arg("markdown")
-        .arg("--report")
-        .arg(&json_report_path)
+        .args(["report", "markdown"])
         .assert()
         .success()
         .stdout(predicates::str::contains("login_button"))
-        .stdout(predicates::str::contains("https://example.com"));
+        .stdout(predicates::str::contains(format!(
+            "[Image](https://example.com/bucket/blobs/sha256/{})",
+            "a".repeat(64)
+        )));
 
     Ok(())
 }
@@ -1024,17 +1042,9 @@ fn test_cli_report_with_base_url() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_cli_report_invalid_pr_number() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let json_report_path = dir.path().join("gleon-report.json");
-    std::fs::write(&json_report_path, "[]")?;
-
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
-        .arg("report")
-        .arg("markdown")
-        .arg("--report")
-        .arg(&json_report_path)
-        .arg("--pr-number")
-        .arg("0")
+        .args(["report", "markdown", "--pr-number", "0"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -1047,42 +1057,25 @@ fn test_cli_report_invalid_pr_number() -> Result<(), Box<dyn std::error::Error>>
 #[test]
 fn test_cli_report_valid_pr_number_and_html_url() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let json_report_path = dir.path().join("gleon-report.json");
-    let mut items = Vec::new();
-    for i in 0..11 {
-        items.push(format!(
-            r#"{{
-                "name": "test_{i}",
-                "result": {{
-                    "DecodeError": {{
-                        "relative_path": "test_{i}.png",
-                        "error": "corrupt"
-                    }}
-                }}
-            }}"#
-        ));
-    }
-    let sample_json = format!("[{}]", items.join(","));
-    std::fs::write(&json_report_path, sample_json)?;
+    let reports: Vec<_> = (0..11)
+        .map(|i| mismatch(&format!("test_{i:02}"), i + 1))
+        .collect();
+    write_cases(dir.path(), &reports);
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .env(
             "GLEON_HTML_ARTIFACT_URL",
             "https://github.com/actions/artifact",
         )
-        .arg("report")
-        .arg("markdown")
-        .arg("--report")
-        .arg(&json_report_path)
-        .arg("--pr-number")
-        .arg("42")
+        .args(["report", "markdown", "--pr-number", "42"])
         .assert()
         .success()
         .stdout(predicates::str::contains(
             "https://github.com/actions/artifact",
         ))
-        .stdout(predicates::str::contains("Truncated 1 additional diffs"));
+        .stdout(predicates::str::contains("Truncated 1 additional diffs"))
+        .stdout(predicates::str::contains("/gleon approve"));
 
     Ok(())
 }
@@ -1091,75 +1084,43 @@ fn test_cli_report_valid_pr_number_and_html_url() -> Result<(), Box<dyn std::err
 #[cfg(not(miri))]
 fn test_cli_report_with_s3_storage_pre_signed_urls() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
-    let json_report_path = dir.path().join("gleon-report.json");
-    let sample_json = r#"[
-        {
-            "name": "mismatch_test",
-            "result": {
-                "Mismatch": {
-                    "relative_path": "login.png",
-                    "detail": { "Pixel": { "diff_count": 42 } },
-                    "diff_path": "diffs/login.png",
-                    "baseline_path": ".gleon/blobs/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "actual_path": "actual/login.png"
-                }
-            }
-        },
-        {
-            "name": "dimension_test",
-            "result": {
-                "DimensionMismatch": {
-                    "relative_path": "header.png",
-                    "actual_size": [100, 200],
-                    "baseline_size": [100, 201],
-                    "baseline_path": ".gleon/blobs/sha256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "actual_path": "actual/header.png"
-                }
-            }
-        },
-        {
-            "name": "missing_test",
-            "result": {
-                "MissingBaseline": {
-                    "relative_path": "footer.png",
-                    "reason": "Missing baseline blob"
-                }
-            }
-        },
-        {
-            "name": "corrupt_test",
-            "result": {
-                "DecodeError": {
-                    "relative_path": "sidebar.png",
-                    "error": "corrupt png file"
-                }
-            }
-        }
-    ]"#;
-    std::fs::write(&json_report_path, sample_json)?;
+    let mut dimension = case(
+        "dimension_test",
+        "dimension_mismatch",
+        serde_json::json!({"message": "golden is 100x201px, test image is 100x200px"}),
+    );
+    dimension = with_blob(dimension, 'b');
+    write_cases(
+        dir.path(),
+        &[
+            with_blob(mismatch("mismatch_test", 42), 'a'),
+            dimension,
+            case("missing_test", "missing", serde_json::json!({})),
+        ],
+    );
 
-    let mut cmd = Command::cargo_bin("gleon")?;
+    let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .env("GLEON_STORAGE_URL", "s3://my-test-bucket/gleon")
         .env("GLEON_AWS_ACCESS_KEY_ID", "key")
         .env("GLEON_AWS_SECRET_ACCESS_KEY", "secret")
         .env("GLEON_AWS_REGION", "us-east-1")
-        .arg("report")
-        .arg("markdown")
-        .arg("--report")
-        .arg(&json_report_path)
+        .args(["report", "markdown"])
         .assert()
         .success()
         // Baselines are signed by their content-addressed key, the same one `push` uploads to.
         .stdout(predicates::str::contains("my-test-bucket"))
         .stdout(predicates::str::contains("X-Amz-Signature"))
-        .stdout(predicates::str::contains(
-            "blobs/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ))
-        // `actual`/`diff` only ever exist on the runner, so they must not be signed into
-        // dead links pointing at keys that were never uploaded.
-        .stdout(predicates::str::contains("actual/login.png?X-Amz").not())
-        .stdout(predicates::str::contains("diffs/login.png?X-Amz").not());
+        .stdout(predicates::str::contains(format!(
+            "blobs/sha256/{}",
+            "a".repeat(64)
+        )))
+        .stdout(predicates::str::contains(format!(
+            "blobs/sha256/{}",
+            "b".repeat(64)
+        )))
+        // Candidates and diffs only ever exist on the runner.
+        .stdout(predicates::str::contains("runs/latest").not());
 
     Ok(())
 }
@@ -1175,61 +1136,211 @@ fn test_approve_command() {
         .join("tests")
         .join("fixtures");
 
-    // Create actual screenshots to approve
-    let actual_dir = base_path
-        .join(".gleon")
-        .join("runs")
-        .join("latest")
-        .join("actual");
-    let login_dir = actual_dir.join("login");
+    // A screenshot without a baseline: `gleon diff` keeps it as the candidate.
+    let login_dir = base_path.join("login");
     std::fs::create_dir_all(&login_dir).expect("create_dir_all login");
     std::fs::copy(
         fixtures_dir.join("baseline_100x100.png"),
         login_dir.join("button.png"),
     )
-    .expect("copy baseline screenshot");
+    .expect("copy screenshot");
+    std::fs::write(
+        base_path.join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"login/*.png\"\n",
+    )
+    .unwrap();
+    gleon().current_dir(base_path).arg("diff").assert().code(1);
 
-    // Run approve command
-    let mut cmd = Command::cargo_bin("gleon").expect("cargo_bin gleon");
+    let mut cmd = gleon();
     cmd.current_dir(base_path)
         .arg("approve")
         .assert()
         .success()
         .stderr(predicates::str::contains("Approved 1 screenshot(s)"));
 
-    // Check that manifest and blob are created
-    let manifests_dir = base_path.join(".gleon").join("manifests");
-    let mut found_button_json = false;
-    if let Ok(entries) = std::fs::read_dir(&manifests_dir) {
-        for entry in entries.flatten() {
-            if entry.file_type().unwrap().is_dir() {
-                let button_json = entry.path().join("login").join("button.json");
-                if button_json.exists() {
-                    found_button_json = true;
-                    let manifest_content =
-                        std::fs::read_to_string(&button_json).expect("read_to_string button.json");
-                    assert!(manifest_content.contains("sha256:"));
-                }
-            }
-        }
-    }
-    assert!(
-        found_button_json,
-        "Expected to find login/button.json manifest"
-    );
+    gleon()
+        .current_dir(base_path)
+        .arg("diff")
+        .assert()
+        .success();
 }
 
-/// Subcommand 'test' must not report success: a green pipeline for a command that did
-/// nothing is worse than a red one, because CI treats it as a passing visual-regression gate.
+/// `gleon test` runs the command as one run: it records the run, hands the command its run id
+/// and exits with the command's code. The command here is `gleon diff` itself, so the test runs
+/// without a shell on every OS.
 #[test]
-fn test_test_subcommand_unimplemented() {
+fn test_test_runs_the_command_as_one_run() {
     let dir = init_temp_dir();
-    let mut cmd = Command::cargo_bin("gleon").unwrap();
-    cmd.current_dir(dir.path())
+    let gleon_bin = assert_cmd::cargo::cargo_bin("gleon");
+    copy_fixture("baseline_100x100.png", &dir.path().join("shots/new.png"));
+    std::fs::write(
+        dir.path().join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"shots/*.png\"\n",
+    )
+    .unwrap();
+
+    gleon()
+        .current_dir(dir.path())
         .arg("test")
+        .arg("--")
+        .arg(&gleon_bin)
+        .arg("diff")
+        .assert()
+        .code(1);
+    let latest = dir.path().join(".gleon/runs/latest");
+    let run: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(latest.join("run.json")).unwrap()).unwrap();
+    let run_id = run["run_id"].as_str().unwrap();
+    assert!(run_id.starts_with("run-"), "{run}");
+    assert_eq!(run["command"][1], "diff");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(latest.join("cases/shots/new.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["run_id"], run_id);
+
+    // A run id given by CI is kept.
+    gleon()
+        .current_dir(dir.path())
+        .env("GLEON_RUN_ID", "ci-42")
+        .args(["test", "--"])
+        .arg(&gleon_bin)
+        .arg("status")
+        .assert()
+        .success();
+    let run: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(latest.join("run.json")).unwrap()).unwrap();
+    assert_eq!(run["run_id"], "ci-42");
+
+    // The command's own exit code (a usage error of clap), and 127 for none, like a shell.
+    gleon()
+        .current_dir(dir.path())
+        .args(["test", "--"])
+        .arg(&gleon_bin)
+        .arg("--no-such-flag")
+        .assert()
+        .code(2);
+    gleon()
+        .current_dir(dir.path())
+        .args(["test", "--", "gleon-no-such-program"])
+        .assert()
+        .code(127)
+        .stderr(predicate::str::contains(
+            "`gleon-no-such-program` was not found",
+        ));
+
+    // Only the process names a run: a `GLEON_RUN_ID` in `.gleon/.env` would stamp every run.
+    std::fs::write(dir.path().join(".gleon/.env"), "GLEON_RUN_ID=from-dotenv\n").unwrap();
+    gleon()
+        .current_dir(dir.path())
+        .args(["test", "--"])
+        .arg(&gleon_bin)
+        .arg("--version")
+        .assert()
+        .success();
+    let run: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(latest.join("run.json")).unwrap()).unwrap();
+    assert_ne!(run["run_id"], "from-dotenv");
+}
+
+/// `--from` paths are relative to where the command runs, like every path argument; `approve`
+/// takes several runs (one per CI job).
+#[test]
+fn test_from_paths_are_relative_to_the_working_directory() {
+    let dir = init_temp_dir();
+    let sub = dir.path().join("packages/app");
+    std::fs::create_dir_all(&sub).unwrap();
+    let run = sub.join("dl/linux/latest");
+    let case = mismatch("a", 1);
+    let file = run.join("cases/a.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, case.to_string()).unwrap();
+
+    for command in [["report", "markdown"], ["dashboard", "--push"]] {
+        let assert = gleon()
+            .current_dir(&sub)
+            .args(command)
+            .args(["--from", "dl/linux/latest"])
+            .assert();
+        if command[0] == "report" {
+            assert.success().stdout(predicates::str::contains("`a`"));
+        } else {
+            // Read from the copy; only the missing storage stops it.
+            assert
+                .failure()
+                .stderr(predicates::str::contains("Storage not configured"));
+        }
+    }
+    // A run directory that does not exist is no empty run, and the caller's `GLEON_RUN_ID`
+    // (invalid here) does not apply to copies.
+    gleon()
+        .current_dir(&sub)
+        .env("GLEON_RUN_ID", "a:b")
+        .args([
+            "approve",
+            "--from",
+            "dl/linux/latest",
+            "--from",
+            "dl/macso/latest",
+        ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not implemented"));
+        .stderr(predicates::str::contains("'dl/macso/latest' is no run"));
+    gleon()
+        .current_dir(&sub)
+        .env("GLEON_RUN_ID", "a:b")
+        .args(["approve", "--from", "dl/linux/latest"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("candidate"));
+    gleon()
+        .current_dir(&sub)
+        .args(["report", "markdown", "--from", "dl/linux"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("pass the `latest` directory"));
+}
+
+/// Outside a workspace (a monorepo root) the command runs with its run id, without a run file;
+/// a command killed by a signal ends `gleon test` by the same signal (gleon became the command).
+#[test]
+fn test_test_outside_a_workspace_and_signals() {
+    let dir = tempfile::tempdir().unwrap();
+    let gleon_bin = assert_cmd::cargo::cargo_bin("gleon");
+    gleon()
+        .current_dir(dir.path())
+        .arg("test")
+        .arg("--")
+        .arg(&gleon_bin)
+        .arg("--version")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("No gleon workspace"));
+    assert!(!dir.path().join(".gleon").exists());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let output = gleon()
+            .current_dir(dir.path())
+            .args(["test", "--", "sh", "-c", "kill -TERM $$"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.signal(), Some(15), "{output:?}");
+    }
+}
+
+/// A PNG fixture of gleon-core (`tests/fixtures/<name>`).
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../gleon-core/tests/fixtures")
+        .join(name)
+}
+
+/// Copies the PNG fixture `name` to `path`, creating its folder.
+fn copy_fixture(name: &str, path: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::copy(fixture(name), path).unwrap();
 }
 
 /// `--auto-pull` is advertised by the CLI, so it must actually run a pull before diffing
@@ -1238,12 +1349,90 @@ fn test_test_subcommand_unimplemented() {
 fn test_diff_auto_pull_runs_pull_first() {
     let dir = init_temp_dir();
 
-    let mut cmd = Command::cargo_bin("gleon").unwrap();
+    let mut cmd = gleon();
     let assert = cmd
         .current_dir(dir.path())
         .args(["diff", "--auto-pull"])
         .assert();
 
     // No storage configured -> pull reports local mode, then the diff itself proceeds.
-    assert.stderr(predicate::str::contains("Running blob pull..."));
+    assert
+        .success()
+        .stderr(predicate::str::contains("Running blob pull..."));
+}
+
+/// The whole loop a developer runs, through the binary: a test run fails, its reports show the
+/// failures, approving them makes the next run pass. `gleon diff` is the test command, so it runs
+/// without a shell on every OS.
+#[test]
+fn test_test_report_approve_end_to_end() {
+    let dir = init_temp_dir();
+    let root = dir.path();
+    let gleon_bin = assert_cmd::cargo::cargo_bin("gleon");
+    std::fs::write(
+        root.join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"shots/*.png\"\n    mode: pixel\n    diff: { threshold: 0.0 }\n",
+    )
+    .unwrap();
+    copy_fixture("baseline_100x100.png", &root.join("shots/changed.png"));
+    gleon().current_dir(root).arg("stage").assert().success();
+    copy_fixture(
+        "diff_16px_corners_100x100.png",
+        &root.join("shots/changed.png"),
+    );
+    copy_fixture("200x100.png", &root.join("shots/new.png"));
+    let run = || {
+        let mut test = gleon();
+        test.current_dir(root)
+            .args(["test", "--"])
+            .arg(&gleon_bin)
+            .arg("diff");
+        test
+    };
+
+    run().assert().code(1);
+    let out = root.join("out");
+    gleon()
+        .current_dir(root)
+        .args(["report", "junit", "--out", "out/junit.xml"])
+        .assert()
+        .success();
+    let junit = std::fs::read_to_string(out.join("junit.xml")).unwrap();
+    assert!(
+        junit.contains(r#"tests="2" failures="2" errors="0""#),
+        "{junit}"
+    );
+    gleon()
+        .current_dir(root)
+        .args(["report", "html", "--out", "out/report.html"])
+        .assert()
+        .success();
+    let html = std::fs::read_to_string(out.join("report.html")).unwrap();
+    let sources: Vec<_> = html
+        .split("src=\"")
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap().replace("&#x2f;", "/"))
+        .collect();
+    // The mismatch: golden, candidate and diff; the new screenshot: its candidate.
+    assert_eq!(sources.len(), 4, "{sources:?}");
+    for source in &sources {
+        assert!(out.join(source).is_file(), "{source} must exist");
+    }
+    gleon()
+        .current_dir(root)
+        .args(["report", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("| `shots/changed` | Mismatch: "))
+        .stdout(predicate::str::contains(
+            "| `shots/new` | Missing Baseline: ",
+        ));
+
+    gleon()
+        .current_dir(root)
+        .arg("approve")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Approved 2 screenshot(s)"));
+    run().assert().success();
 }

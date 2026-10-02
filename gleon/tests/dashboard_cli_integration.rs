@@ -11,9 +11,45 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+use std::path::{Path, PathBuf};
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
+
+fn core_fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../gleon-core/tests/fixtures")
+}
+
+/// Puts the case reports of the real Flutter run of the fixtures into the workspace as the run
+/// `run_id`.
+fn record_run(workspace: &Path, run_id: &str) {
+    let from = core_fixtures().join("cases/flutter-linux-x64/cases/test/goldens");
+    let to = workspace.join(".gleon/runs/latest/cases/test/goldens");
+    std::fs::create_dir_all(&to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let mut report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
+        report["run_id"] = run_id.into();
+        std::fs::write(to.join(entry.file_name()), report.to_string()).unwrap();
+    }
+}
+
+fn dashboard(workspace: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("gleon").unwrap();
+    cmd.current_dir(workspace)
+        .env_remove("GLEON_RUN_ID")
+        .env_remove("GLEON_STORAGE_URL")
+        .env_remove("GLEON_ARTIFACTS_DIR")
+        .arg("dashboard");
+    cmd
+}
+
+fn history(workspace: &Path) -> gleon_core::dashboard::DashboardHistory {
+    let raw = std::fs::read_to_string(workspace.join(".gleon/history.json")).unwrap();
+    gleon_core::dashboard::DashboardHistory::parse_or_empty(&raw, "test").unwrap()
+}
 
 #[test]
 fn test_cli_dashboard_end_to_end() {
@@ -21,87 +57,62 @@ fn test_cli_dashboard_end_to_end() {
     let workspace = temp.path();
 
     // 1. Uninitialized workspace fails
-    let mut cmd_uninit = Command::cargo_bin("gleon").unwrap();
-    cmd_uninit
-        .current_dir(workspace)
-        .arg("dashboard")
+    dashboard(workspace)
         .assert()
         .failure()
         .stderr(predicate::str::contains("Workspace not initialized"));
 
-    // 2. Initialize workspace
-    let mut cmd_init = Command::cargo_bin("gleon").unwrap();
-    cmd_init
+    // 2. Initialize the workspace; without case reports there is no run to add.
+    Command::cargo_bin("gleon")
+        .unwrap()
         .current_dir(workspace)
         .arg("init")
         .assert()
         .success();
+    dashboard(workspace)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No case reports found"));
 
-    // Copy static fixture report
-    let runs_dir = workspace.join(".gleon").join("runs").join("latest");
-    std::fs::create_dir_all(&runs_dir).unwrap();
-    let report_path = runs_dir.join("gleon-report.json");
-
-    let fixture_report = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("gleon-core")
-        .join("tests")
-        .join("fixtures")
-        .join("sample_report.json");
-    std::fs::copy(&fixture_report, &report_path).unwrap();
-
-    // 3. Run dashboard command locally and verify stdout has path and stderr has diagnostic
-    let mut cmd_dash = Command::cargo_bin("gleon").unwrap();
-    cmd_dash
-        .current_dir(workspace)
-        .arg("dashboard")
+    // 3. The run of a Flutter test run, without `gleon diff`
+    record_run(workspace, "r1");
+    dashboard(workspace)
         .assert()
         .success()
         .stdout(predicate::str::contains("dashboard.html"))
         .stderr(predicate::str::contains("Dashboard compiled successfully"));
-
-    let history_file = workspace.join(".gleon").join("history.json");
-    let dashboard_file = workspace.join(".gleon").join("dashboard.html");
-    assert!(history_file.is_file());
-    assert!(dashboard_file.is_file());
-
-    let html_content = std::fs::read_to_string(&dashboard_file).unwrap();
+    let html_content = std::fs::read_to_string(workspace.join(".gleon/dashboard.html")).unwrap();
     assert!(html_content.contains("Gleon Regression History"));
-    assert!(html_content.contains("auth&#x2f;login"));
+    assert!(html_content.contains("2</strong> / 2 passed"));
+    let first = history(workspace);
+    assert_eq!(first.runs.len(), 1);
+    assert_eq!(first.runs[0].platform, "linux-x86_64");
 
     // 4. Test --truncate-history 0 fails validation
-    let mut cmd_zero = Command::cargo_bin("gleon").unwrap();
-    cmd_zero
-        .current_dir(workspace)
-        .arg("dashboard")
-        .arg("--truncate-history")
-        .arg("0")
+    dashboard(workspace)
+        .args(["--truncate-history", "0"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("zero"));
 
-    // 5. Test --truncate-history 2 with multiple runs
-    for _ in 0..3 {
-        let mut cmd = Command::cargo_bin("gleon").unwrap();
-        cmd.current_dir(workspace)
-            .arg("dashboard")
-            .arg("--truncate-history")
-            .arg("2")
+    // 5. Every run is recorded once; --truncate-history 2 keeps the newest two
+    for run_id in ["r2", "r3", "r4", "r4"] {
+        record_run(workspace, run_id);
+        dashboard(workspace)
+            .args(["--truncate-history", "2"])
             .assert()
             .success();
     }
-
-    let history_data: gleon_core::dashboard::DashboardHistory =
-        gleon_core::io::load_json(&history_file).unwrap();
-    assert_eq!(history_data.runs.len(), 2);
+    let ids: Vec<_> = history(workspace)
+        .runs
+        .into_iter()
+        .map(|run| run.id)
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"r4/linux-x86_64".to_owned()), "{ids:?}");
 
     // 6. Test --push fails fast without storage configuration
-    let mut cmd_push_fail = Command::cargo_bin("gleon").unwrap();
-    cmd_push_fail
-        .current_dir(workspace)
-        .env_remove("GLEON_STORAGE_URL")
-        .arg("dashboard")
+    dashboard(workspace)
         .arg("--push")
         .assert()
         .failure()
@@ -110,98 +121,72 @@ fn test_cli_dashboard_end_to_end() {
     // 7. Test --push with remote storage
     let remote_dir = temp.path().join("remote_bucket");
     std::fs::create_dir_all(&remote_dir).unwrap();
-
-    let mut cmd_push = Command::cargo_bin("gleon").unwrap();
-    cmd_push
-        .current_dir(workspace)
+    dashboard(workspace)
         .env(
             "GLEON_STORAGE_URL",
             format!("file://{}", remote_dir.display()),
         )
-        .arg("dashboard")
         .arg("--push")
         .assert()
         .success()
         .stderr(predicate::str::contains(
             "Successfully uploaded history.json and dashboard.html",
         ));
-
     assert!(remote_dir.join("history.json").is_file());
     assert!(remote_dir.join("dashboard.html").is_file());
 
-    // 8. Test --report pointing to non-existent file fails fast
-    let mut cmd_bad_report = Command::cargo_bin("gleon").unwrap();
-    cmd_bad_report
-        .current_dir(workspace)
-        .arg("dashboard")
-        .arg("--report")
-        .arg("non_existent_report.json")
+    // 8. --from pointing to no run, or to a run without reports, fails fast
+    dashboard(workspace)
+        .args(["--from", "no_such_dir/latest"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Report file not found"));
+        .stderr(predicate::str::contains("'no_such_dir/latest' is no run"));
+    std::fs::create_dir_all(workspace.join("empty/latest/cases")).unwrap();
+    dashboard(workspace)
+        .args(["--from", "empty/latest"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No case reports found"));
 
-    // 9. Test running dashboard from a nested subdirectory resolves workspace report correctly
+    // 9. A nested subdirectory resolves the workspace's run
     let subfolder = workspace.join("packages").join("app");
     std::fs::create_dir_all(&subfolder).unwrap();
-
-    let mut cmd_sub = Command::cargo_bin("gleon").unwrap();
-    cmd_sub
-        .current_dir(&subfolder)
-        .arg("dashboard")
+    dashboard(&subfolder)
         .assert()
         .success()
-        .stdout(predicate::str::contains("dashboard.html"))
-        .stderr(predicate::str::contains("Dashboard compiled successfully"));
+        .stdout(predicate::str::contains("dashboard.html"));
 }
 
 #[test]
 fn test_cli_dashboard_large_history_merge_and_truncate() {
     let temp = tempdir().unwrap();
     let workspace = temp.path();
-
-    let mut cmd_init = Command::cargo_bin("gleon").unwrap();
-    cmd_init
+    Command::cargo_bin("gleon")
+        .unwrap()
         .current_dir(workspace)
         .arg("init")
         .assert()
         .success();
-
-    // Setup history and report
-    let runs_dir = workspace.join(".gleon").join("runs").join("latest");
-    std::fs::create_dir_all(&runs_dir).unwrap();
-
-    let base_fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("gleon-core")
-        .join("tests")
-        .join("fixtures");
-
+    record_run(workspace, "ci-201");
     std::fs::copy(
-        base_fixtures.join("sample_report.json"),
-        runs_dir.join("gleon-report.json"),
+        core_fixtures().join("sample_history.json"),
+        workspace.join(".gleon/history.json"),
     )
     .unwrap();
+    assert_eq!(history(workspace).runs.len(), 200);
 
-    let history_file = workspace.join(".gleon").join("history.json");
-    std::fs::copy(base_fixtures.join("sample_history.json"), &history_file).unwrap();
-
-    // Verify initial count is 150 from fixture
-    let initial_data: gleon_core::dashboard::DashboardHistory =
-        gleon_core::io::load_json(&history_file).unwrap();
-    assert_eq!(initial_data.runs.len(), 150);
-
-    // Run dashboard with truncate to 50
-    let mut cmd = Command::cargo_bin("gleon").unwrap();
-    cmd.current_dir(workspace)
-        .arg("dashboard")
-        .arg("--truncate-history")
-        .arg("50")
+    dashboard(workspace)
+        .args(["--truncate-history", "50"])
         .assert()
         .success();
 
-    let truncated_data: gleon_core::dashboard::DashboardHistory =
-        gleon_core::io::load_json(&history_file).unwrap();
-    // It should have exactly 50 runs: it merged the 150, appended 1 new run (151 total), then truncated down to 50.
-    assert_eq!(truncated_data.runs.len(), 50);
+    // The 200 runs plus the new one, truncated to the newest 50.
+    let truncated = history(workspace);
+    assert_eq!(truncated.runs.len(), 50);
+    assert!(
+        truncated
+            .runs
+            .iter()
+            .any(|run| run.id == "ci-201/linux-x86_64")
+    );
 }
