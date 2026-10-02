@@ -181,8 +181,8 @@ impl Cases {
         Self { warnings, ..self }
     }
 
-    /// Reads the case reports in `runs_latest/cases/` (`runs_latest` is a workspace's
-    /// `.gleon/runs/latest`, or a copy of it such as a downloaded CI artifact) and keeps one run:
+    /// Reads the case reports in `runs_latest/cases/` (`runs_latest` is the `.gleon/runs/latest`
+    /// of a workspace, or a copy of it such as a downloaded CI artifact) and keeps one run:
     /// - `run_id` when given (the caller's [`RUN_ID_ENV`]);
     /// - else the run of [`RUN_FILE`], unless a newer report belongs to another run (the tests
     ///   ran again without `gleon test`);
@@ -320,7 +320,7 @@ pub fn check_run_dir(dir: &Path) -> Result<(), CasesError> {
     }
 }
 
-/// The workspace root of `runs_latest` when it is a workspace's `.gleon/runs/latest`.
+/// The workspace root of `runs_latest` when it is the `.gleon/runs/latest` of a workspace.
 fn workspace_root(runs_latest: &Path) -> Option<&Path> {
     let runs = runs_latest.parent()?;
     let gleon = runs.parent()?;

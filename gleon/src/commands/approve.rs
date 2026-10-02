@@ -11,9 +11,9 @@ use crate::{
 };
 
 /// Runs the `approve` command on the runs `from` (copies of `.gleon/runs/latest`, read as they
-/// are), or on the workspace's latest run picked with `GLEON_RUN_ID`.
+/// are), or on the latest run of the workspace, picked with `GLEON_RUN_ID`.
 pub fn run_approve(ctx: &ResolvedContext, paths: &[PathBuf], from: &[PathBuf]) -> ExitCode {
-    // The caller's run id names the workspace's own run, never a copied one.
+    // The caller's run id names a run of this workspace, never a copied one.
     let run_id = match from.is_empty().then(env_run_id).transpose() {
         Ok(run_id) => run_id.flatten(),
         Err(e) => return report_failure("Error approving screenshots", &*e),

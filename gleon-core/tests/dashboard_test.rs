@@ -33,6 +33,11 @@ fn fixtures() -> std::path::PathBuf {
 /// The real Flutter run of the fixtures as the run `run_id`, its second case (SSIM) turned into
 /// a mismatch below its similarity threshold: one passing and one failing test.
 fn run_with_a_failure(run_id: &str) -> Cases {
+    run_with_a_failure_at(run_id, chrono::TimeDelta::zero())
+}
+
+/// [`run_with_a_failure`] recorded `offset` after the fixture run, so runs can be ordered in time.
+fn run_with_a_failure_at(run_id: &str, offset: chrono::TimeDelta) -> Cases {
     let mut reports = Cases::load(&fixtures().join("cases/flutter-linux-x64"), None)
         .unwrap()
         .reports()
@@ -49,6 +54,7 @@ fn run_with_a_failure(run_id: &str) -> Cases {
     let temp = tempfile::tempdir().unwrap();
     for report in &mut reports {
         report.run_id = Some(gleon_core::case::RunId::new(run_id).unwrap());
+        report.recorded_at += offset;
         let file = temp
             .path()
             .join("cases")
@@ -144,11 +150,12 @@ async fn test_dashboard_compilation_and_history_lifecycle() {
         base_dir,
     )
     .unwrap();
-    for (run_id, total_runs) in [("ci-2", 2), ("ci-3", 2)] {
+    // Later runs, so truncation keeps the newest by time (not by id).
+    for (run_id, minutes, total_runs) in [("ci-3", 1, 2), ("ci-2", 2, 2)] {
         let res = DashboardCompiler::execute(
             &paths,
             &ctx_main,
-            &run_with_a_failure(run_id),
+            &run_with_a_failure_at(run_id, chrono::TimeDelta::minutes(minutes)),
             &dash_opts,
             Some(&storage_cfg),
         )
@@ -162,8 +169,11 @@ async fn test_dashboard_compilation_and_history_lifecycle() {
     )
     .unwrap();
     let ids: Vec<_> = history3.runs.iter().map(|r| r.id.as_str()).collect();
-    assert!(ids.contains(&"ci-3/linux-x86_64"), "{ids:?}");
-    assert_eq!(ids.len(), 2);
+    assert_eq!(
+        ids,
+        ["ci-3/linux-x86_64", "ci-2/linux-x86_64"],
+        "oldest first"
+    );
 }
 
 /// The history of `tests/fixtures/sample_history.json`: 200 runs on two branches and three

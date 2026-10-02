@@ -1,6 +1,6 @@
 //! Every text an integration shows: failure messages, warnings and the console line. Metric
 //! summaries and tolerance descriptions are the model's (`gleon_model::case::text`), shared with
-//! the CLI's reports.
+//! the reports of the CLI.
 //!
 //! The missing-golden message is Flutter's own; other integrations can show their own from the
 //! `missing` verdict.

@@ -912,7 +912,7 @@ fn checked_workspace_path<E: serde::de::Error>(path: String) -> Result<String, E
 }
 
 /// The texts of metrics, shared by every writer and reader of case reports (the integrations'
-/// failure messages, the CLI's reports), so one comparison reads the same everywhere.
+/// failure messages, the reports of the CLI), so one comparison reads the same everywhere.
 ///
 /// Numbers are rounded to what a developer acts on: percentages to 2-4 decimals (`6.25%`,
 /// `0.0167%`), similarities to 3-4 (`0.931`), colors to 1 (`5.2`).

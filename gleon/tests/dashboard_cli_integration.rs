@@ -22,8 +22,8 @@ fn core_fixtures() -> PathBuf {
 }
 
 /// Puts the case reports of the real Flutter run of the fixtures into the workspace as the run
-/// `run_id`.
-fn record_run(workspace: &Path, run_id: &str) {
+/// `run_id`, recorded `offset_secs` after the fixture run (later runs get later offsets).
+fn record_run(workspace: &Path, run_id: &str, offset_secs: i64) {
     let from = core_fixtures().join("cases/flutter-linux-x64/cases/test/goldens");
     let to = workspace.join(".gleon/runs/latest/cases/test/goldens");
     std::fs::create_dir_all(&to).unwrap();
@@ -32,6 +32,10 @@ fn record_run(workspace: &Path, run_id: &str) {
         let mut report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
         report["run_id"] = run_id.into();
+        let recorded_at =
+            chrono::DateTime::parse_from_rfc3339(report["recorded_at"].as_str().unwrap()).unwrap()
+                + chrono::TimeDelta::seconds(offset_secs);
+        report["recorded_at"] = recorded_at.to_rfc3339().into();
         std::fs::write(to.join(entry.file_name()), report.to_string()).unwrap();
     }
 }
@@ -75,7 +79,7 @@ fn test_cli_dashboard_end_to_end() {
         .stderr(predicate::str::contains("No case reports found"));
 
     // 3. The run of a Flutter test run, without `gleon diff`
-    record_run(workspace, "r1");
+    record_run(workspace, "r1", 0);
     dashboard(workspace)
         .assert()
         .success()
@@ -95,9 +99,10 @@ fn test_cli_dashboard_end_to_end() {
         .failure()
         .stderr(predicate::str::contains("zero"));
 
-    // 5. Every run is recorded once; --truncate-history 2 keeps the newest two
-    for run_id in ["r2", "r3", "r4", "r4"] {
-        record_run(workspace, run_id);
+    // 5. Every run is recorded once; --truncate-history 2 keeps the newest two by time (the ids
+    //    sort the other way)
+    for (run_id, offset_secs) in [("r4", 1), ("r3", 2), ("r2", 3), ("r2", 3)] {
+        record_run(workspace, run_id, offset_secs);
         dashboard(workspace)
             .args(["--truncate-history", "2"])
             .assert()
@@ -108,8 +113,7 @@ fn test_cli_dashboard_end_to_end() {
         .into_iter()
         .map(|run| run.id)
         .collect();
-    assert_eq!(ids.len(), 2);
-    assert!(ids.contains(&"r4/linux-x86_64".to_owned()), "{ids:?}");
+    assert_eq!(ids, ["r3/linux-x86_64", "r2/linux-x86_64"]);
 
     // 6. Test --push fails fast without storage configuration
     dashboard(workspace)
@@ -148,7 +152,7 @@ fn test_cli_dashboard_end_to_end() {
         .failure()
         .stderr(predicate::str::contains("No case reports found"));
 
-    // 9. A nested subdirectory resolves the workspace's run
+    // 9. A nested subdirectory resolves the run of the workspace
     let subfolder = workspace.join("packages").join("app");
     std::fs::create_dir_all(&subfolder).unwrap();
     dashboard(&subfolder)
@@ -167,7 +171,7 @@ fn test_cli_dashboard_large_history_merge_and_truncate() {
         .arg("init")
         .assert()
         .success();
-    record_run(workspace, "ci-201");
+    record_run(workspace, "ci-201", 1);
     std::fs::copy(
         core_fixtures().join("sample_history.json"),
         workspace.join(".gleon/history.json"),

@@ -46,7 +46,7 @@ pub enum DiffOpError {
     #[error(transparent)]
     Cases(#[from] CasesError),
 
-    /// A screenshot cannot be read: the workspace is broken, not the screenshot's test.
+    /// A screenshot cannot be read: the workspace is broken, not the test of the screenshot.
     #[error("cannot read the screenshot '{path}': {source}")]
     Screenshot {
         /// The screenshot, relative to the workspace root.
@@ -77,7 +77,7 @@ pub enum DiffOpError {
 pub struct DiffOptions {
     /// `gleon diff --artifacts`, which beats [`Self::artifacts_env`].
     pub artifacts: Option<ArtifactsDir>,
-    /// The value of `GLEON_ARTIFACTS_DIR`, which beats the config's `artifacts:`.
+    /// The value of `GLEON_ARTIFACTS_DIR`, which beats `artifacts:` of the config.
     pub artifacts_env: Option<ArtifactsDir>,
     /// The value of `GLEON_RUN_ID`, stamped on every case report; without it `gleon diff` names
     /// its own run.

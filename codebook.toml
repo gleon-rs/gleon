@@ -112,6 +112,7 @@ words = [
     "norepo",
     "oninput",
     "oob",
+    "pathext",
     "phash",
     "pipefail",
     "pixelmatch",

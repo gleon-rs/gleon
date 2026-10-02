@@ -144,11 +144,11 @@ mod tests {
     #[test]
     fn test_generate_junit_xml_escapes_messages() {
         let mut error = report("a", CaseOutcome::Error);
-        error.message = Some("<boom> & \"quotes\" \u{1b}[31mred\u{1b}[0m\0".to_owned());
+        error.message = Some("<boom> & \"quotes\" \u{1b}[31m red \u{1b}[0m\0".to_owned());
         let xml =
             ReportGenerator::generate_junit_xml(&Cases::new("runs/latest", vec![error])).unwrap();
         assert!(
-            xml.contains("&lt;boom&gt; &amp; &quot;quotes&quot; [31mred[0m<"),
+            xml.contains("&lt;boom&gt; &amp; &quot;quotes&quot; [31m red [0m<"),
             "{xml}"
         );
         assert!(!xml.contains("<boom>"));

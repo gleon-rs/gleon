@@ -213,6 +213,9 @@ mod tests {
             assert!(content.contains(expected), "{format:?}: {content}");
         }
 
+        // To stdout, the HTML links its images from the working directory.
+        let res = run_report(&DummyEnv, None, ReportFormat::Html, &cases, None, None).await;
+        assert_eq!(res, ExitCode::Success);
         let res = run_report(
             &DummyEnv,
             None,

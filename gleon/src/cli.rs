@@ -178,7 +178,7 @@ pub enum Commands {
         auto_pull: bool,
         /// Directory for the images of failed screenshots, relative to the workspace root:
         /// `.gleon/runs/latest/artifacts` (the default) or a directory under `.gleon/runs/`
-        /// outside `latest/`; beats `GLEON_ARTIFACTS_DIR` and the config's `artifacts:`
+        /// outside `latest/`; beats `GLEON_ARTIFACTS_DIR` and `artifacts:` of the config
         #[arg(long, value_name = "DIR", value_parser = parse_artifacts_dir)]
         artifacts: Option<gleon_core::config::ArtifactsDir>,
     },
@@ -257,7 +257,7 @@ pub enum Commands {
         #[arg(value_name = "FORMAT", value_enum)]
         format: ReportFormat,
         /// A copy of `.gleon/runs/latest` (with `cases/`), e.g. a downloaded CI artifact, read as
-        /// it is (default: the workspace's latest run, picked with `GLEON_RUN_ID`)
+        /// it is (default: the latest run of the workspace, picked with `GLEON_RUN_ID`)
         #[arg(long, value_name = "DIR")]
         from: Option<std::path::PathBuf>,
         /// Pull Request number
@@ -274,15 +274,15 @@ pub enum Commands {
         paths: Vec<std::path::PathBuf>,
 
         /// Copies of `.gleon/runs/latest` (`cases/` and `artifacts/`) to approve from, e.g. the
-        /// downloaded artifacts of CI runs, each read as it is (repeatable; default: the
-        /// workspace's latest run, picked with `GLEON_RUN_ID`)
+        /// downloaded artifacts of CI runs, each read as it is (repeatable; default: the latest
+        /// run of the workspace, picked with `GLEON_RUN_ID`)
         #[arg(long = "from", value_name = "DIR")]
         from: Vec<std::path::PathBuf>,
     },
     /// Add the latest run to the history and compile the static dashboard
     Dashboard {
-        /// A copy of `.gleon/runs/latest` (with `cases/`), read as it is (default: the
-        /// workspace's latest run, picked with `GLEON_RUN_ID`)
+        /// A copy of `.gleon/runs/latest` (with `cases/`), read as it is (default: the latest run
+        /// of the workspace, picked with `GLEON_RUN_ID`)
         #[arg(long, value_name = "DIR")]
         from: Option<std::path::PathBuf>,
 

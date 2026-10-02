@@ -1,0 +1,26 @@
+[
+  {
+    "name": "auth/login_screen",
+    "result": {
+      "Success": {
+        "relative_path": "auth/login_screen.png"
+      }
+    }
+  },
+  {
+    "name": "checkout/payment_modal",
+    "result": {
+      "Mismatch": {
+        "relative_path": "checkout/payment_modal.png",
+        "detail": {
+          "Pixel": {
+            "diff_count": 128
+          }
+        },
+        "diff_path": "diffs/checkout/payment_modal.png",
+        "baseline_path": "blobs/sha256/baseline.png",
+        "actual_path": "actual/checkout/payment_modal.png"
+      }
+    }
+  }
+]

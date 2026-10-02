@@ -1194,6 +1194,46 @@ mod tests {
         assert!(!html.contains("Last 45 runs"));
     }
 
+    #[test]
+    fn test_platform_label_of_every_form() {
+        use gleon_model::platform::PlatformFields;
+
+        assert_eq!(
+            platform_label(&PlatformConfig::Opaque("ci-box".to_owned())),
+            "ci-box"
+        );
+        let labeled = PlatformConfig::Structured(PlatformFields {
+            os: Some("linux".to_owned()),
+            arch: Some("x86_64".to_owned()),
+            renderer: Some("chrome-126".to_owned()),
+            labels: Some([("theme".to_owned(), "dark".to_owned())].into()),
+        });
+        assert_eq!(
+            platform_label(&labeled),
+            "linux-x86_64-chrome-126-theme=dark"
+        );
+    }
+
+    /// A run without a run id or reports is named after the branch, the platform of the context
+    /// and its time.
+    #[tokio::test]
+    async fn test_dashboard_names_a_run_without_an_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = GleonPaths::new(temp.path());
+        let ctx = ResolvedContext {
+            base_dir: temp.path().to_path_buf(),
+            ..ResolvedContext::default()
+        };
+        let cases = Cases::new("runs/latest", Vec::new());
+        DashboardCompiler::execute(&paths, &ctx, &cases, &DashboardOptions::default(), None)
+            .await
+            .unwrap();
+        let history = load_local_history_or_default(&paths).unwrap();
+        let run = &history.runs[0];
+        assert!(run.id.starts_with("run-"), "{}", run.id);
+        assert_eq!(run.platform, "unknown");
+    }
+
     #[tokio::test]
     #[cfg(not(miri))]
     async fn test_dashboard_compiler_execute_local_and_remote() {

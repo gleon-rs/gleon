@@ -1150,13 +1150,25 @@ fn test_approve_command() {
     )
     .unwrap();
     gleon().current_dir(base_path).arg("diff").assert().code(1);
+    std::fs::write(base_path.join(".gleon/runs/latest/cases/broken.json"), "{").unwrap();
 
+    // The run id names the workspace run, so an invalid one is an error.
+    gleon()
+        .current_dir(base_path)
+        .env("GLEON_RUN_ID", "a:b")
+        .arg("approve")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid GLEON_RUN_ID"));
     let mut cmd = gleon();
     cmd.current_dir(base_path)
         .arg("approve")
         .assert()
         .success()
-        .stderr(predicates::str::contains("Approved 1 screenshot(s)"));
+        .stderr(predicates::str::contains("Approved 1 screenshot(s)"))
+        .stderr(predicates::str::contains(
+            "skipped 1 invalid case report(s)",
+        ));
 
     gleon()
         .current_dir(base_path)

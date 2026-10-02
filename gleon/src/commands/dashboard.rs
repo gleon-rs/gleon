@@ -17,8 +17,8 @@ use crate::{
 
 /// Runs the `gleon dashboard` subcommand.
 ///
-/// Adds the run of `from` (a copy of `.gleon/runs/latest`; default: the workspace's latest run) to
-/// `history.json`, compiles `dashboard.html` from it and optionally pushes both to remote
+/// Adds the run of `from` (a copy of `.gleon/runs/latest`; default: the latest run of the
+/// workspace) to `history.json`, compiles `dashboard.html` from it and optionally pushes both to remote
 /// storage. Returns [`ExitCode::Success`] on success or [`ExitCode::Failure`] on error.
 pub async fn run_dashboard(
     ctx: &ResolvedContext,

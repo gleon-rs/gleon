@@ -38,6 +38,17 @@ pub fn run_test(ctx: &ResolvedContext, env: &dyn EnvProvider, command: &[String]
 }
 
 fn run_test_inner(ctx: &ResolvedContext, env: &dyn EnvProvider, command: &[String]) -> Result<i32> {
+    let (program, child) = prepare(ctx, env, command)?;
+    run(child).or_else(|error| not_started(error, program))
+}
+
+/// Records the run in the run file (inside a workspace) and returns the program and the command
+/// to start: with the run id, metrics and `GLEON_ARTIFACTS_DIR`.
+fn prepare<'a>(
+    ctx: &ResolvedContext,
+    env: &dyn EnvProvider,
+    command: &'a [String],
+) -> Result<(&'a str, std::process::Command)> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| anyhow!("no test command given: `gleon test -- <command>`"))?;
@@ -94,13 +105,17 @@ fn run_test_inner(ctx: &ResolvedContext, env: &dyn EnvProvider, command: &[Strin
     if let Some(artifacts) = env.get_var(ARTIFACTS_ENV) {
         child.env(ARTIFACTS_ENV, artifacts);
     }
-    run(child).or_else(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            tracing::error!("Error running the tests: `{program}` was not found");
-            return Ok(COMMAND_NOT_FOUND);
-        }
-        Err(anyhow::Error::new(error).context(format!("Failed to start `{program}`")))
-    })
+    Ok((program, child))
+}
+
+/// The exit code of `program` that cannot start because it is not found (127, like a shell);
+/// the error for any other reason.
+fn not_started(error: io::Error, program: &str) -> Result<i32> {
+    if error.kind() == io::ErrorKind::NotFound {
+        tracing::error!("Error running the tests: `{program}` was not found");
+        return Ok(COMMAND_NOT_FOUND);
+    }
+    Err(anyhow::Error::new(error).context(format!("Failed to start `{program}`")))
 }
 
 /// Becomes `command`; returns only when it cannot start.
@@ -161,9 +176,64 @@ mod tests {
 
     struct Env;
     impl EnvProvider for Env {
-        fn get_var(&self, _: &str) -> Option<String> {
-            None
+        fn get_var(&self, key: &str) -> Option<String> {
+            (key == ARTIFACTS_ENV).then(|| ".gleon/runs/ci".to_owned())
         }
+    }
+
+    /// The env of `child` named `key`, as a string.
+    fn env_of(child: &std::process::Command, key: &str) -> Option<String> {
+        child
+            .get_envs()
+            .find(|(name, _)| *name == key)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+    }
+
+    /// The command starts with the run of the run file, metrics on and the artifacts directory;
+    /// outside a workspace without a run file.
+    #[test]
+    fn test_prepare_records_the_run_and_hands_it_to_the_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = ResolvedContext::from_options(
+            &gleon_core::context::ContextOptions::default(),
+            temp.path(),
+        )
+        .unwrap();
+        let command = ["flutter".to_owned(), "test".to_owned()];
+        let (_, outside) = prepare(&ctx, &Env, &command).unwrap();
+        assert!(env_of(&outside, RUN_ID_ENV).is_some());
+        assert!(!temp.path().join(".gleon").exists());
+
+        gleon_core::ops::init_workspace(&ctx).unwrap();
+        let (program, child) = prepare(&ctx, &Env, &command).unwrap();
+        assert_eq!(program, "flutter");
+        assert_eq!(child.get_args().collect::<Vec<_>>(), ["test"]);
+        let run = RunInfo::read(&temp.path().join(".gleon/runs/latest"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.command, command);
+        assert_eq!(
+            env_of(&child, RUN_ID_ENV).as_deref(),
+            Some(run.run_id.as_str())
+        );
+        assert_eq!(env_of(&child, METRICS_ENV).as_deref(), Some("1"));
+        assert_eq!(
+            env_of(&child, ARTIFACTS_ENV).as_deref(),
+            Some(".gleon/runs/ci")
+        );
+    }
+
+    #[test]
+    fn test_a_command_that_cannot_start() {
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(not_started(missing, "flutter").unwrap(), COMMAND_NOT_FOUND);
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        let err = not_started(denied, "flutter").unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to start `flutter`"),
+            "{err}"
+        );
     }
 
     #[test]

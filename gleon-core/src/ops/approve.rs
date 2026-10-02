@@ -329,7 +329,7 @@ fn target(base_dir: &Path, report: &CaseReport) -> Result<Target, ApproveError> 
     golden_file(base_dir, report).map(Target::File)
 }
 
-/// The candidates of the approvable cases of the `loaded` runs that match `filters`, one per
+/// The candidates of the failed cases of the `loaded` runs that match `filters`, one per
 /// baseline.
 fn candidates_of<'a>(
     base_dir: &Path,
@@ -340,7 +340,7 @@ fn candidates_of<'a>(
     let mut by_target = HashMap::<Target, (&Sha256Hex, &Path)>::new();
     for (run, cases) in loaded {
         for report in cases.reports() {
-            let is_approvable = matches!(
+            let can_approve = matches!(
                 report.outcome,
                 CaseOutcome::Mismatch | CaseOutcome::DimensionMismatch | CaseOutcome::Missing
             ) && (filters.is_empty()
@@ -349,7 +349,7 @@ fn candidates_of<'a>(
                 .artifacts
                 .as_ref()
                 .and_then(|artifacts| artifacts.candidate.as_ref());
-            let Some(candidate) = candidate.filter(|_| is_approvable) else {
+            let Some(candidate) = candidate.filter(|_| can_approve) else {
                 continue;
             };
             let file = cases.artifact_path(candidate).ok_or_else(|| {
@@ -409,8 +409,8 @@ fn nothing_to_approve(runs: &[PathBuf], filters: &[PathBuf]) -> ApproveError {
 /// overwrite their golden PNG file. Every candidate is checked before the first write.
 ///
 /// `runs` are directories standing in for `.gleon/runs/latest` (the downloaded runs of CI jobs,
-/// with `cases/` and `artifacts/`), each read as it is; without them the workspace's latest run
-/// is read, picked with `run_id` (`GLEON_RUN_ID`). `paths` keeps only the cases whose test name or
+/// with `cases/` and `artifacts/`), each read as it is; without them the latest run of the
+/// workspace is read, picked with `run_id` (`GLEON_RUN_ID`). `paths` keeps only the cases whose test name or
 /// golden path starts with one of them (`./` ignored).
 ///
 /// # Errors
@@ -464,7 +464,7 @@ pub fn approve_workspace(
         .collect::<Result<Vec<_>, _>>()?;
 
     let blobs_dir = gleon_paths.blob_scheme_dir("sha256");
-    // The manifests of each platform, with the fallback's, loaded once.
+    // The manifests of each platform, with those of the fallback platform, loaded once.
     let mut indexes = HashMap::<&str, (WorkspaceIndex, Option<WorkspaceIndex>)>::new();
     let mut approved_test_cases = Vec::with_capacity(approvals.len());
     for approval in approvals {
@@ -755,6 +755,20 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("candidate.png"), "{err}");
+    }
+
+    /// A golden that cannot be written fails with its path, after the checks passed.
+    #[test]
+    fn test_approve_names_the_golden_it_cannot_write() {
+        let (temp, ctx) = workspace();
+        let latest = runs_latest(&ctx);
+        failed_case(&latest, "g", "gleon_flutter", CaseOutcome::Missing, &png(1));
+        std::fs::create_dir_all(temp.path().join("goldens/g.png/inside")).unwrap();
+        let err = approve_workspace(&ctx, &[], &[], None).unwrap_err();
+        assert!(
+            matches!(err, ApproveError::Io { ref path, .. } if path.ends_with("goldens/g.png")),
+            "{err}"
+        );
     }
 
     /// A golden that is a symlink, or lies behind one leading out of the workspace, is never

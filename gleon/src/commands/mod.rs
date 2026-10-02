@@ -86,7 +86,7 @@ pub fn report_failure(context: &str, err: &dyn std::error::Error) -> ExitCode {
 /// The run a command reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunSource {
-    /// The workspace's own `.gleon/runs/latest`, picked with `GLEON_RUN_ID` when it is set.
+    /// The `.gleon/runs/latest` of the workspace, picked with `GLEON_RUN_ID` when it is set.
     Own(std::path::PathBuf),
     /// A copy of `.gleon/runs/latest` given with `--from` (a downloaded CI artifact), read as it
     /// is: the caller's `GLEON_RUN_ID` names the caller's run, not that one.
@@ -338,6 +338,46 @@ mod tests {
 
         let msg = format_failure("Context", &ParentWithSubstring(SubstringCause));
         assert_eq!(msg, "Context: failed to render report template: report");
+    }
+
+    /// Without reports the error names the run the reports were looked for, and a broken run
+    /// file is an error with the directory.
+    #[test]
+    fn test_load_cases_explains_a_run_without_reports() {
+        use gleon_core::{case::RunId, cases::RunInfo};
+
+        let temp = tempfile::tempdir().unwrap();
+        let latest = temp.path().join("latest");
+        std::fs::create_dir_all(latest.join("cases")).unwrap();
+        RunInfo {
+            run_id: RunId::new("started").unwrap(),
+            started_at: chrono::Utc::now(),
+            command: vec!["flutter".to_owned()],
+        }
+        .write(&latest)
+        .unwrap();
+        let copy = load_cases(&RunSource::Copy(latest.clone())).unwrap_err();
+        assert!(
+            copy.to_string()
+                .starts_with("No case reports of run 'started' found"),
+            "{copy}"
+        );
+        if std::env::var_os(gleon_core::case::RUN_ID_ENV).is_none() {
+            let own = load_cases(&RunSource::Own(latest.clone())).unwrap_err();
+            assert!(
+                own.to_string().contains("(run.json or GLEON_RUN_ID)"),
+                "{own}"
+            );
+        }
+
+        std::fs::write(latest.join("run.json"), "{").unwrap();
+        let broken = load_cases(&RunSource::Copy(latest)).unwrap_err();
+        assert!(
+            broken
+                .to_string()
+                .starts_with("Failed to read the case reports in"),
+            "{broken}"
+        );
     }
 
     #[test]
