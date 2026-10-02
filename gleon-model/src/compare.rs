@@ -652,6 +652,21 @@ mod tests {
         assert!(matches!(masked, CompareError::Candidate(_)));
     }
 
+    /// Masks mean the same pixels only on images of the same size: others stay unmasked.
+    #[test]
+    fn test_decode_masked_leaves_images_of_other_sizes_alone() {
+        let (a, b) = (png(4, 4, |_, _| RED), png(5, 4, |_, _| RED));
+        let mask = Zone {
+            x: 0,
+            y: 0,
+            width: Dimension::Pixels(10),
+            height: Dimension::Pixels(1),
+        };
+        let decoded = decode_masked(&a, &b, &[mask]).unwrap();
+        assert_eq!(decoded.clamped_masks, 0);
+        assert_eq!(*decoded.golden.get_pixel(0, 0), RED);
+    }
+
     #[test]
     fn test_a_measurement_of_another_mode_is_an_internal_error() {
         let pixel = Measurement::Pixel {

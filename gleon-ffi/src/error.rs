@@ -110,6 +110,7 @@ mod tests {
             (ErrorKind::Internal, "internal"),
         ] {
             assert_eq!(kind.case_kind().unwrap().as_str(), name);
+            assert_eq!(ErrorKind::from(kind.case_kind().unwrap()), kind);
         }
     }
 }

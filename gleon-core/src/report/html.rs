@@ -56,7 +56,7 @@ fn html_failure_dto<'a>(
         diff_count: match report.metrics {
             Some(Metrics::Pixel {
                 diff_pixels, text, ..
-            }) => Some(diff_pixels + text.map_or(0, |text| text.diff_pixels)),
+            }) => Some(diff_pixels.saturating_add(text.map_or(0, |text| text.diff_pixels))),
             _ => None,
         },
         actual_size: size(report.candidate.width, report.candidate.height),

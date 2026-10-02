@@ -345,6 +345,11 @@ mod tests {
                     == "0 pixels, text 16 of 256 pixels in the tile at (0, 0) 16x16px"),
             "{result:?}"
         );
+        // Text without differing pixels says nothing about it.
+        assert!(matches!(
+            compare(&baseline, Mode::Pixel),
+            ComparisonResult::Match { measurement } if measurement.to_string() == "0 pixels"
+        ));
 
         // SSIM: the masked change is painted over, text regions do not apply.
         let mut masked = baseline.clone();
