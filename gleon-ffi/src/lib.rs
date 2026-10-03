@@ -60,7 +60,7 @@ use session::{ArtifactNames, Integration, Session, SessionOptions};
 
 /// Version of the C contract. Bumped on any breaking change so the caller can refuse a
 /// mismatched native library instead of misreading it.
-pub const ABI_VERSION: u32 = 8;
+pub const ABI_VERSION: u32 = 9;
 
 /// Session flag: goldens belong to workspaces, each golden to the nearest directory above it with
 /// `.gleon/gleon.yaml` (without, every golden compares exactly and nothing is recorded).
@@ -357,19 +357,12 @@ fn call_tolerance(
         .map_err(|e| format!("invalid tolerance: {e}"))
 }
 
-/// The call's tolerance of text: both NaN use the `.gleon/gleon.yaml` rule's.
-fn call_text_tolerance(
-    color_tolerance: f64,
-    max_diff_ratio: f64,
-) -> Result<Option<TextTolerance>, String> {
-    if color_tolerance.is_nan() && max_diff_ratio.is_nan() {
+/// The call's tolerance of text; NaN uses the `.gleon/gleon.yaml` rule's.
+fn call_text_tolerance(share: f64) -> Result<Option<TextTolerance>, String> {
+    if share.is_nan() {
         return Ok(None);
     }
-    let text = TextTolerance {
-        color_tolerance,
-        max_diff_ratio,
-    }
-    .without_negative_zero();
+    let text = TextTolerance(share).without_negative_zero();
     text.validate()
         .map(|()| Some(text))
         .map_err(|e| format!("invalid text tolerance: {e}"))
@@ -445,8 +438,9 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 ///
 /// The call's tolerance is described at `call_tolerance`; `mask_count` pixel masks
 /// `[x, y, width, height]` are at `masks`. `text_region_count` text regions `[x, y, width,
-/// height]` (candidate pixels) are at `text_regions`, compared under `text_color_tolerance` and
-/// `text_max_diff_ratio` (both NaN: the rule's `text:`) in pixel and exact mode.
+/// height]` (candidate pixels) are at `text_regions`, compared in pixel and exact mode under
+/// `text_tolerance`: the largest share of differing pixels in any tile of text, `[0, 1]` (NaN:
+/// the rule's `text_tolerance`, else 1, so text never fails).
 ///
 /// # Safety
 /// Each `(ptr, len)` pair must describe a readable buffer of `len` elements (bytes for
@@ -475,8 +469,7 @@ pub unsafe fn gleon_golden(
     mask_count: usize,
     text_regions: *const u32,
     text_region_count: usize,
-    text_color_tolerance: f64,
-    text_max_diff_ratio: f64,
+    text_tolerance: f64,
 ) -> repr_c::Box<GleonResult> {
     guarded(|| {
         let Some(GleonSession(session)) = session else {
@@ -525,7 +518,7 @@ pub unsafe fn gleon_golden(
                 )?,
                 masks: call_masks(masks),
                 text_regions: call_regions(text_regions),
-                text: call_text_tolerance(text_color_tolerance, text_max_diff_ratio)?,
+                text: call_text_tolerance(text_tolerance)?,
             })
         };
         match request() {
@@ -670,8 +663,8 @@ mod tests {
         tolerance: (u8, f64, f64, f64),
         masks: (*const u32, usize),
         text_regions: (*const u32, usize),
-        /// Color tolerance and largest diff ratio of text (NaN: the rule's).
-        text: (f64, f64),
+        /// The text tolerance (NaN: the rule's).
+        text: f64,
     }
 
     impl Default for Call<'_> {
@@ -684,7 +677,7 @@ mod tests {
                 tolerance: (0, 0.0, 0.0, 0.0),
                 masks: (std::ptr::null(), 0),
                 text_regions: (std::ptr::null(), 0),
-                text: (f64::NAN, f64::NAN),
+                text: f64::NAN,
             }
         }
     }
@@ -713,8 +706,7 @@ mod tests {
                 call.masks.1,
                 call.text_regions.0,
                 call.text_regions.1,
-                call.text.0,
-                call.text.1,
+                call.text,
             )
         })
     }
@@ -726,8 +718,7 @@ mod tests {
         assert_eq!(gleon_ffi_abi_version(), ABI_VERSION);
     }
 
-    /// Raw candidates must have the length of their size; text tolerances are both given or
-    /// both NaN.
+    /// Raw candidates must have the length of their size; a text tolerance is a share or NaN.
     #[test]
     fn test_raw_candidates_and_text_tolerances_are_checked() {
         let session = new_session(SESSION_ENV, UNSET);
@@ -760,7 +751,7 @@ mod tests {
             ),
             (
                 Call {
-                    text: (8.0, f64::NAN),
+                    text: 2.0,
                     ..Call::default()
                 },
                 "invalid text tolerance",
@@ -786,7 +777,7 @@ mod tests {
                 candidate: &pixels,
                 format: (1, 4, 4),
                 text_regions: (regions.as_ptr(), 2),
-                text: (24.0, 0.1),
+                text: 0.1,
                 ..Call::default()
             },
         );

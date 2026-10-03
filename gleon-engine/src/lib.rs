@@ -12,7 +12,7 @@ pub mod ssim;
 
 use image::RgbaImage;
 pub use phash::{calculate_hamming_distance, compute_phash};
-pub use pixel::{PixelRegions, TextAnalysis, TextPolicy, TextTile, compare_pixels};
+pub use pixel::{PixelRegions, TextAnalysis, TextTile, compare_pixels};
 pub use ssim::{Region, SsimAnalysis, SsimPolicy};
 
 use crate::config::{DiffConfig, Mode};
@@ -168,8 +168,8 @@ fn execute_pixel_comparison(
     let text_passes = analysis
         .text
         .and_then(|text| text.worst_tile)
-        .zip(regions.text_policy)
-        .is_none_or(|(tile, policy)| tile.diff_ratio() <= policy.max_diff_ratio);
+        .zip(regions.text_tolerance)
+        .is_none_or(|(tile, tolerance)| tile.diff_ratio() <= tolerance);
 
     let measurement = Measurement::Pixel {
         checked_pixels: analysis.checked_pixels,
@@ -298,10 +298,7 @@ mod tests {
         let regions = PixelRegions {
             masks: &masks,
             text: &text,
-            text_policy: Some(TextPolicy {
-                color_tolerance: 8.0,
-                max_diff_ratio: 0.05,
-            }),
+            text_tolerance: Some(0.05),
         };
         let exact = DiffConfig {
             threshold: 0.0,

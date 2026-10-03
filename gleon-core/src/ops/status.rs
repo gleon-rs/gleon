@@ -451,7 +451,7 @@ mod tests {
                             height: gleon_engine::config::Dimension::Pixels(1),
                         }],
                     }],
-                    text: None,
+                    text_tolerance: None,
                 }],
                 ..Default::default()
             }),
@@ -777,7 +777,7 @@ screenshots:
                             height: gleon_engine::config::Dimension::Pixels(1),
                         }],
                     }],
-                    text: None,
+                    text_tolerance: None,
                 }],
                 ..Default::default()
             }),

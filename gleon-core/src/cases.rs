@@ -581,7 +581,7 @@ pub(crate) mod fixtures {
                 tolerance: Tolerance::Exact {},
                 masks: Vec::new(),
                 policy_version: 2,
-                text: None,
+                text_tolerance: None,
             },
             outcome,
             error_kind: (outcome == O::Error).then_some(CaseErrorKind::Image),

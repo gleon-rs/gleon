@@ -1,10 +1,10 @@
 //! Pixel-by-pixel image comparison, with masked and text regions.
 //!
 //! Every pixel of a frame is in one class: masked (never compared, not counted), text (compared
-//! under a [`TextPolicy`]: a per-channel color tolerance, and a share of differing pixels in every
-//! [`TEXT_TILE`]-pixel square tile of a text region) or strict (compared byte for byte). Masks win over text. Text is
-//! what operating systems draw differently (their font engines, hinting); everything else of a
-//! test frame renders the same everywhere.
+//! byte for byte, and passing while no [`TEXT_TILE`]-pixel square tile of a text region has more
+//! than the text tolerance's share of differing pixels) or strict (compared byte for byte). Masks
+//! win over text. Text is what operating systems draw differently (their font engines, hinting);
+//! everything else of a test frame renders the same everywhere.
 
 use image::RgbaImage;
 use rayon::prelude::*;
@@ -19,24 +19,16 @@ use crate::ssim::Region;
 /// dilute the changed word.
 pub const TEXT_TILE: u32 = 16;
 
-/// How much text may differ.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TextPolicy {
-    /// Largest difference of any channel (8-bit units) for a text pixel to count as equal.
-    pub color_tolerance: f64,
-    /// Largest share of differing text pixels in any tile.
-    pub max_diff_ratio: f64,
-}
-
 /// The rectangles of a frame the pixel comparison treats apart; masks win over text.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PixelRegions<'a> {
     /// Pixels never compared nor counted (`ignoreRegions`, mask rules).
     pub masks: &'a [Region],
-    /// Text, compared under [`Self::text_policy`]; strictly without one.
+    /// Text, compared under [`Self::text_tolerance`]; strictly without one.
     pub text: &'a [Region],
-    /// The tolerance of text.
-    pub text_policy: Option<TextPolicy>,
+    /// The largest share of differing pixels in any tile of text, `[0, 1]` (1: text never
+    /// fails).
+    pub text_tolerance: Option<f64>,
 }
 
 impl PixelRegions<'_> {
@@ -44,17 +36,17 @@ impl PixelRegions<'_> {
     pub const NONE: PixelRegions<'static> = PixelRegions {
         masks: &[],
         text: &[],
-        text_policy: None,
+        text_tolerance: None,
     };
 
     /// Whether every pixel is compared strictly.
     #[must_use]
     pub const fn is_none(&self) -> bool {
-        self.masks.is_empty() && (self.text.is_empty() || self.text_policy.is_none())
+        self.masks.is_empty() && (self.text.is_empty() || self.text_tolerance.is_none())
     }
 }
 
-/// A tile of a text region with its pixels and the text pixels beyond the color tolerance.
+/// A tile of a text region with its pixels and the text pixels that differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextTile {
     /// The tile, inside its text region ([`TEXT_TILE`] square, or the region's size where it is
@@ -62,7 +54,7 @@ pub struct TextTile {
     pub region: Region,
     /// Its pixels: text, and masked ones (which count as equal).
     pub pixels: u64,
-    /// Its text pixels beyond the color tolerance.
+    /// Its text pixels that differ.
     pub diff_pixels: u64,
 }
 
@@ -85,7 +77,7 @@ impl TextTile {
 pub struct TextAnalysis {
     /// Text pixels (masked ones left out).
     pub pixels: u64,
-    /// Text pixels beyond the color tolerance.
+    /// Text pixels that differ.
     pub diff_pixels: u64,
     /// The tile with the largest share of differing pixels (the first of equal ones); `None`
     /// without text pixels.
@@ -229,8 +221,8 @@ fn classify(
                 .fill(class);
         }
     };
-    let text = regions.text_policy.filter(|_| !regions.text.is_empty());
-    if text.is_some() {
+    let has_text = regions.text_tolerance.is_some() && !regions.text.is_empty();
+    if has_text {
         regions
             .text
             .iter()
@@ -241,7 +233,6 @@ fn classify(
         .iter()
         .for_each(|region| mark(region, Class::Masked));
 
-    let tolerance = text.map_or(0.0, |policy| policy.color_tolerance);
     let mut analysis = PixelAnalysis {
         checked_pixels: 0,
         diff_pixels: 0,
@@ -265,11 +256,7 @@ fn classify(
             }
             Class::Text => {
                 text_pixels += 1;
-                let beyond = expected
-                    .iter()
-                    .zip(found)
-                    .any(|(e, f)| f64::from(e.abs_diff(*f)) > tolerance);
-                if beyond {
+                if expected != found {
                     text_diff += 1;
                     *class = Class::TextDiff;
                 }
@@ -277,7 +264,7 @@ fn classify(
             Class::StrictDiff | Class::TextDiff | Class::Masked => {}
         }
     }
-    if text.is_some() {
+    if has_text {
         analysis.text = Some(TextAnalysis {
             pixels: text_pixels,
             diff_pixels: text_diff,
@@ -534,26 +521,24 @@ mod tests {
         }
     }
 
-    const TEXT: TextPolicy = TextPolicy {
-        color_tolerance: 24.0,
-        max_diff_ratio: 0.1,
-    };
+    /// A text tolerance: at most 10% of a tile may differ.
+    const TEXT: f64 = 0.1;
 
-    /// Masks win over text, text under a policy is apart from the strict pixels, and the strict
-    /// pixels are compared byte for byte.
+    /// Masks win over text, text under a tolerance is apart from the strict pixels, and both are
+    /// compared byte for byte.
     #[test]
     fn test_classes_and_mask_priority() {
         let baseline = ImageBuffer::from_pixel(64, 32, WHITE);
         let mut actual = baseline.clone();
         actual.put_pixel(1, 1, BLACK); // masked
-        actual.put_pixel(14, 1, BLACK); // text, beyond the tolerance
-        actual.put_pixel(15, 1, GRAY); // text, within the tolerance
+        actual.put_pixel(14, 1, BLACK); // text
+        actual.put_pixel(15, 1, GRAY); // text: any byte that differs counts
         actual.put_pixel(40, 20, Rgba([255, 255, 255, 254])); // strict: alpha counts
         let (masks, text) = ([region(0, 0, 12, 4)], [region(8, 0, 24, 16)]);
         let regions = PixelRegions {
             masks: &masks,
             text: &text,
-            text_policy: Some(TEXT),
+            text_tolerance: Some(TEXT),
         };
 
         let analysis = compare(&baseline, &actual, &regions).analysis;
@@ -561,11 +546,11 @@ mod tests {
         assert_eq!(analysis.checked_pixels, 2048 - 48 - (384 - 16));
         assert_eq!(analysis.diff_pixels, 1);
         let text = analysis.text.unwrap();
-        assert_eq!((text.pixels, text.diff_pixels), (384 - 16, 1));
+        assert_eq!((text.pixels, text.diff_pixels), (384 - 16, 2));
         let worst = text.worst_tile.unwrap();
         // Its 16 masked pixels count as equal.
         assert_eq!(worst.region, region(8, 0, 16, 16));
-        assert_eq!((worst.pixels, worst.diff_pixels), (256, 1));
+        assert_eq!((worst.pixels, worst.diff_pixels), (256, 2));
 
         let diff = compare(&baseline, &actual, &regions).diff_image(&baseline, &actual);
         assert_eq!(diff.get_pixel(14, 1).0, ORANGE);
@@ -575,15 +560,11 @@ mod tests {
             [127, 127, 127, 255],
             "masked: darkened"
         );
-        assert_eq!(
-            diff.get_pixel(11, 1).0,
-            [127, 127, 127, 255],
-            "tolerated: darkened"
-        );
+        assert_eq!(diff.get_pixel(15, 1).0, ORANGE);
 
-        // Without a policy text is compared strictly.
+        // Without a tolerance text is compared strictly.
         let strict = PixelRegions {
-            text_policy: None,
+            text_tolerance: None,
             ..regions
         };
         let analysis = compare(&baseline, &actual, &strict).analysis;
@@ -601,7 +582,7 @@ mod tests {
         let regions = PixelRegions {
             masks: &[],
             text: &text,
-            text_policy: Some(TEXT),
+            text_tolerance: Some(TEXT),
         };
         let mut cluster = baseline.clone();
         let mut noise = baseline.clone();
@@ -617,8 +598,8 @@ mod tests {
         let spread = compare(&baseline, &noise, &regions).analysis.text.unwrap();
         assert_eq!((clustered.diff_pixels, spread.diff_pixels), (40, 40));
         let ratio = |text: TextAnalysis| text.worst_tile.unwrap().diff_ratio();
-        assert!(ratio(clustered) > TEXT.max_diff_ratio, "{clustered:?}");
-        assert!(ratio(spread) <= TEXT.max_diff_ratio, "{spread:?}");
+        assert!(ratio(clustered) > TEXT, "{clustered:?}");
+        assert!(ratio(spread) <= TEXT, "{spread:?}");
         // A whole-region share would not tell them apart: 40 of 2560 pixels pass either way.
     }
 
@@ -632,7 +613,7 @@ mod tests {
         let regions = PixelRegions {
             masks: &masks,
             text: &text,
-            text_policy: Some(TEXT),
+            text_tolerance: Some(TEXT),
         };
         let worst = compare(&baseline, &actual, &regions)
             .analysis
@@ -665,7 +646,7 @@ mod tests {
         let regions = PixelRegions {
             masks: &[],
             text: &text,
-            text_policy: Some(TEXT),
+            text_tolerance: Some(TEXT),
         };
         let ratio_at = |left: u32, top: u32| {
             let mut actual = baseline.clone();
@@ -692,7 +673,7 @@ mod tests {
         let regions = PixelRegions {
             masks: &[],
             text: &text,
-            text_policy: Some(TEXT),
+            text_tolerance: Some(TEXT),
         };
         let worst = compare(&baseline, &actual, &regions)
             .analysis
@@ -735,13 +716,13 @@ mod tests {
         let regions = PixelRegions {
             masks: &masks,
             text: &text,
-            text_policy: Some(TEXT),
+            text_tolerance: Some(TEXT),
         };
         let text = compare(&baseline, &actual, &regions).analysis.text.unwrap();
         assert_eq!((text.pixels, text.diff_pixels), (16, 2));
         let worst = text.worst_tile.unwrap();
         assert_eq!((worst.pixels, worst.diff_pixels), (256, 2));
-        assert!(worst.diff_ratio() <= TEXT.max_diff_ratio);
+        assert!(worst.diff_ratio() <= TEXT);
     }
 
     /// A region beyond the image is rejected on either axis (callers clip them first), before
@@ -758,7 +739,7 @@ mod tests {
             let regions = PixelRegions {
                 masks: &[],
                 text: &text,
-                text_policy: Some(TEXT),
+                text_tolerance: Some(TEXT),
             };
             let panic = std::panic::catch_unwind(|| compare(&image, &image, &regions));
             assert!(panic.is_err(), "{text:?}");

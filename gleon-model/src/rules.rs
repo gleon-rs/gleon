@@ -68,7 +68,7 @@ pub enum RuleMatch {
         tolerance: Tolerance,
         /// The rule's tolerance of text (`pixel` mode only).
         #[serde(skip_serializing_if = "Option::is_none")]
-        text: Option<crate::tolerance::TextTolerance>,
+        text_tolerance: Option<crate::tolerance::TextTolerance>,
         /// Mask zones of the rule's masks whose `path` matches, in declaration order.
         masks: Vec<Zone>,
     },
@@ -172,8 +172,8 @@ impl RuleSet {
             index,
             name: name.to_owned(),
             tolerance: Tolerance::from_rule(rule.mode, &rule.diff),
-            text: rule
-                .text
+            text_tolerance: rule
+                .text_tolerance
                 .map(crate::tolerance::TextTolerance::without_negative_zero),
             masks: rule.matched_mask_zones(std::path::Path::new(normalized.as_ref())),
         })
@@ -241,7 +241,7 @@ screenshots:
                     min_similarity: 0.6,
                     color_tolerance: 64.0
                 },
-                text: None,
+                text_tolerance: None,
                 masks: vec![Zone {
                     x: 0,
                     y: 0,
@@ -258,7 +258,7 @@ screenshots:
                 tolerance: Tolerance::Pixel {
                     max_diff_ratio: 0.02
                 },
-                text: None,
+                text_tolerance: None,
                 masks: vec![],
             }
         );

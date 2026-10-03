@@ -156,60 +156,46 @@ impl Tolerance {
     }
 }
 
-/// How much text may differ, in pixel and exact mode: the text regions an integration reports
-/// (paragraphs of the render tree) are compared under it, everything else strictly.
+/// How much text may differ, in pixel and exact mode.
 ///
-/// Text is what operating systems draw differently; a pixel of text counts as equal while no
-/// channel differs by more than `color_tolerance`, and the text passes while every tile of
-/// [`gleon_engine::pixel::TEXT_TILE`] pixels has at most `max_diff_ratio` differing pixels (a
-/// changed word is a dense cluster, rendering noise is spread thin).
+/// The largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel
+/// tile of the text regions an integration reports (lines of its render tree); everything else
+/// is compared strictly.
+///
+/// Operating systems draw glyphs differently (their font engines, hinting): across them 40% or
+/// more of a tile of text differs while a changed digit of the same width is about a quarter, so
+/// no share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking
+/// it: layout stays exact, text content is not compared. Lower values compare text, at the
+/// risk of failing on another OS's rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TextTolerance {
-    /// Largest difference of any channel of a text pixel, in 8-bit units, `[0, 255]`.
-    #[schemars(range(min = 0.0, max = 255.0))]
-    pub color_tolerance: f64,
-    /// Largest share of differing pixels in any tile of text, `[0, 1]`.
-    #[schemars(range(min = 0.0, max = 1.0))]
-    pub max_diff_ratio: f64,
-}
+#[serde(transparent)]
+pub struct TextTolerance(#[schemars(range(min = 0.0, max = 1.0))] pub f64);
 
 impl TextTolerance {
-    /// Checks the value ranges.
+    /// The tolerance of text an integration reports without one from its call or rule: text
+    /// never fails.
+    pub const DEFAULT: Self = Self(1.0);
+
+    /// Checks the value range.
     ///
     /// # Errors
-    /// Returns [`ToleranceError::ColorTolerance`] if `color_tolerance` is outside `[0, 255]` or
-    /// [`ToleranceError::Ratio`] if `max_diff_ratio` is outside `[0, 1]` (NaN included).
+    /// Returns [`ToleranceError::Ratio`] if the share is outside `[0, 1]` (NaN included).
     pub fn validate(&self) -> Result<(), ToleranceError> {
-        if !gleon_engine::config::is_valid_color_tolerance(self.color_tolerance) {
-            return Err(ToleranceError::ColorTolerance(self.color_tolerance));
+        if (0.0..=1.0).contains(&self.0) {
+            Ok(())
+        } else {
+            Err(ToleranceError::Ratio {
+                name: "text_tolerance",
+                value: self.0,
+            })
         }
-        if !(0.0..=1.0).contains(&self.max_diff_ratio) {
-            return Err(ToleranceError::Ratio {
-                name: "max_diff_ratio",
-                value: self.max_diff_ratio,
-            });
-        }
-        Ok(())
     }
 
-    /// `self` with `-0.0` values as `0.0`, like [`Tolerance::without_negative_zero`].
+    /// `self` with `-0.0` as `0.0`, like [`Tolerance::without_negative_zero`].
     #[must_use]
     pub const fn without_negative_zero(self) -> Self {
         // `-0.0 + 0.0` is `0.0`; every other value (NaN included) stays as it is.
-        Self {
-            color_tolerance: self.color_tolerance + 0.0,
-            max_diff_ratio: self.max_diff_ratio + 0.0,
-        }
-    }
-
-    /// The engine policy implementing this tolerance.
-    #[must_use]
-    pub const fn policy(&self) -> gleon_engine::TextPolicy {
-        gleon_engine::TextPolicy {
-            color_tolerance: self.color_tolerance,
-            max_diff_ratio: self.max_diff_ratio,
-        }
+        Self(self.0 + 0.0)
     }
 }
 
@@ -337,13 +323,9 @@ mod tests {
             serde_json::to_string(&Tolerance::from_rule(Mode::Ssim, &zeros)).unwrap(),
             r#"{"kind":"ssim","min_similarity":0.0,"color_tolerance":0.0}"#
         );
-        let text = TextTolerance {
-            color_tolerance: -0.0,
-            max_diff_ratio: -0.0,
-        };
         assert_eq!(
-            serde_json::to_string(&text.without_negative_zero()).unwrap(),
-            r#"{"color_tolerance":0.0,"max_diff_ratio":0.0}"#
+            serde_json::to_string(&TextTolerance(-0.0).without_negative_zero()).unwrap(),
+            "0.0"
         );
         let kept = Tolerance::Ssim {
             min_similarity: -0.5,

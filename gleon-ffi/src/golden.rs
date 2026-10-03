@@ -411,9 +411,7 @@ impl Call<'_> {
             self.plan.tolerance,
             Tolerance::Exact {} | Tolerance::Pixel { .. }
         );
-        self.plan
-            .text
-            .filter(|_| is_pixel && !self.request.text_regions.is_empty())
+        (is_pixel && !self.request.text_regions.is_empty()).then_some(self.plan.text)
     }
 
     /// Keeps the images of `details` in the artifacts directory and records the case report (and
@@ -573,7 +571,7 @@ impl Call<'_> {
                 tolerance: self.plan.tolerance,
                 masks: self.plan.masks.clone(),
                 policy_version: gleon_engine::ssim::POLICY_VERSION,
-                text: self.text(),
+                text_tolerance: self.text(),
             },
             outcome,
             error_kind: details.error_kind,
@@ -1096,40 +1094,43 @@ metrics:
         );
     }
 
-    /// Text regions tolerate text noise under the text tolerance (the rule's, or the call's),
-    /// everything else stays strict; the case report keeps the text tolerance and the worst
-    /// tile. In SSIM mode text regions do not apply.
+    /// Text regions are compared under the text tolerance (the call's, else the rule's, else 1:
+    /// text never fails), everything else strictly; the case report keeps the text tolerance and
+    /// the worst tile. In SSIM mode text regions do not apply.
     #[test]
-    fn test_text_regions_tolerate_text_noise_only() {
-        let fixture = Fixture::new(Some(&format!("{METRICS}\n",).replace(
-            "diff: { threshold: 0 }",
-            "diff: { threshold: 0 }\n    text: { color_tolerance: 24, max_diff_ratio: 0.1 }",
-        )));
+    fn test_text_regions_are_compared_under_the_text_tolerance() {
         let white = Rgba([255, 255, 255, 255]);
         let golden = image::RgbaImage::from_pixel(32, 16, white);
-        fs::write(
-            &fixture.golden,
-            gleon_model::compare::encode_png(&golden).unwrap(),
-        )
-        .unwrap();
-        let session = fixture.session(None);
         let text = vec![Region {
             x: 0,
             y: 0,
             width: 16,
             height: 16,
         }];
-        let mut noisy = golden.clone();
-        noisy.put_pixel(3, 3, Rgba([0, 0, 0, 255]));
+        // A changed glyph: 32 of the 256 pixels of the text's tile.
+        let mut glyph = golden.clone();
+        for i in 0..32 {
+            glyph.put_pixel(i % 16, i / 16, Rgba([0, 0, 0, 255]));
+        }
+        let mut outside = golden.clone();
+        outside.put_pixel(20, 3, Rgba([0, 0, 0, 255]));
+        let fixture_with = |yaml: &str| {
+            let fixture = Fixture::new(Some(yaml));
+            fs::write(
+                &fixture.golden,
+                gleon_model::compare::encode_png(&golden).unwrap(),
+            )
+            .unwrap();
+            fixture
+        };
 
-        let finished = fixture.compare_raw(&session, &noisy, None, text.clone(), None);
+        // Without a rule's: text never fails, the rest is exact.
+        let fixture = fixture_with(METRICS);
+        let session = fixture.session(None);
+        let finished = fixture.compare_raw(&session, &glyph, None, text.clone(), None);
         assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
         let case = fixture.case();
-        let rule_text = TextTolerance {
-            color_tolerance: 24.0,
-            max_diff_ratio: 0.1,
-        };
-        assert_eq!(case.comparison.text, Some(rule_text));
+        assert_eq!(case.comparison.text_tolerance, Some(TextTolerance::DEFAULT));
         assert!(matches!(
             case.metrics,
             Some(Metrics::Pixel {
@@ -1137,7 +1138,7 @@ metrics:
                 diff_pixels: 0,
                 text: Some(case::TextMetrics {
                     pixels: 256,
-                    diff_pixels: 1,
+                    diff_pixels: 32,
                     ..
                 }),
                 ..
@@ -1145,49 +1146,49 @@ metrics:
         ));
         assert_eq!(case.regions.len(), 2);
         assert_eq!(case.regions[1].kind, case::RegionKind::Text);
-
-        // Outside the text: strict.
-        let mut outside = noisy.clone();
-        outside.put_pixel(20, 3, Rgba([0, 0, 0, 255]));
         let finished = fixture.compare_raw(&session, &outside, None, text.clone(), None);
         assert_eq!(finished.verdict, Verdict::Mismatch);
         assert!(
             finished
                 .message
-                .contains("text color ±24, ≤ 10.00% per tile"),
+                .contains("(gleon pixel ≤ 0.00%, text ignored)"),
             "{}",
             finished.message
         );
 
-        // The call's text tolerance beats the rule's.
-        let strict_text = TextTolerance {
-            color_tolerance: 0.0,
-            max_diff_ratio: 0.0,
-        };
-        let finished = fixture.compare_raw(&session, &noisy, None, text.clone(), Some(strict_text));
+        // The rule's: 10% of a tile; the call's beats it.
+        let fixture = fixture_with(&METRICS.replace(
+            "diff: { threshold: 0 }",
+            "diff: { threshold: 0 }\n    text_tolerance: 0.1",
+        ));
+        let session = fixture.session(None);
+        let finished = fixture.compare_raw(&session, &glyph, None, text.clone(), None);
         assert_eq!(finished.verdict, Verdict::Mismatch);
         assert!(
-            finished.message.contains("text up to"),
+            finished.message.contains(
+                "text up to 12.50% of a tile (gleon pixel ≤ 0.00%, text ≤ 10.00% per tile)"
+            ),
             "{}",
             finished.message
         );
+        let loose = Some(TextTolerance(0.2));
+        let finished = fixture.compare_raw(&session, &glyph, None, text.clone(), loose);
+        assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
 
-        // SSIM compares text like everything else (the same dot fails its structural gate); no text
-        // tolerance is recorded.
+        // SSIM compares text like everything else; no text tolerance is recorded.
         let ssim = Tolerance::Ssim {
             min_similarity: 0.5,
             color_tolerance: 255.0,
         };
-        let finished = fixture.compare_raw(&session, &noisy, Some(ssim), text.clone(), None);
+        let finished = fixture.compare_raw(&session, &glyph, Some(ssim), text.clone(), None);
         assert_eq!(finished.verdict, Verdict::Mismatch, "{}", finished.message);
-        assert_eq!(fixture.case().comparison.text, None);
+        assert_eq!(fixture.case().comparison.text_tolerance, None);
         assert!(finished.warning.is_empty(), "the rule's text: no warning");
 
         // A text tolerance of the call that cannot apply warns: under SSIM, and without text
         // regions (byte inputs).
         for (tolerance, regions) in [(Some(ssim), text), (None, Vec::new())] {
-            let finished =
-                fixture.compare_raw(&session, &noisy, tolerance, regions, Some(strict_text));
+            let finished = fixture.compare_raw(&session, &glyph, tolerance, regions, loose);
             assert!(
                 finished
                     .warning

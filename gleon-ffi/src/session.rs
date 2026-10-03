@@ -339,8 +339,9 @@ pub struct Plan {
     pub tolerance: Tolerance,
     /// The call's masks followed by the rule's.
     pub masks: Vec<Zone>,
-    /// The tolerance of text: the call's, else the rule's.
-    pub text: Option<TextTolerance>,
+    /// The tolerance of text: the call's, else the rule's, else [`TextTolerance::DEFAULT`]
+    /// (text never fails).
+    pub text: TextTolerance,
     /// Whether the golden belongs to a workspace (failure messages point at `.gleon/gleon.yaml`
     /// otherwise).
     pub has_workspace: bool,
@@ -507,7 +508,7 @@ impl Session {
         Ok(Plan {
             tolerance: tolerance.or(rule_tolerance).unwrap_or(Tolerance::Exact {}),
             masks,
-            text: text.or(rule_text),
+            text: text.or(rule_text).unwrap_or(TextTolerance::DEFAULT),
             has_workspace,
             in_workspace,
         })
@@ -527,7 +528,7 @@ impl Session {
         let RuleMatch::Matched {
             name,
             tolerance,
-            text,
+            text_tolerance: text,
             masks,
             ..
         } = compiled

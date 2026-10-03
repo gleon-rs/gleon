@@ -144,7 +144,7 @@ impl Metrics {
                         pixels: analysis.pixels,
                         diff_pixels: analysis.diff_pixels,
                         worst_tile_diff_ratio: worst,
-                        headroom: text.max_diff_ratio - worst,
+                        headroom: text.0 - worst,
                     }
                 });
                 Some(Self::pixel(
@@ -333,12 +333,7 @@ impl RegionMetrics {
                 .map(|tile| Self {
                     kind: RegionKind::Text,
                     rect: Some(tile.region),
-                    metrics: Metrics::pixel(
-                        tile.diff_pixels,
-                        tile.pixels,
-                        text.max_diff_ratio,
-                        None,
-                    ),
+                    metrics: Metrics::pixel(tile.diff_pixels, tile.pixels, text.0, None),
                 }),
             _ => None,
         };
@@ -579,9 +574,9 @@ pub struct Comparison {
     /// The effective tolerance.
     pub tolerance: Tolerance,
     /// The tolerance of the text regions the integration reported (pixel and exact only);
-    /// absent when there were none or no text tolerance applied.
+    /// absent when there were none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<TextTolerance>,
+    pub text_tolerance: Option<TextTolerance>,
     /// Ignored zones, applied to both images.
     pub masks: Vec<Zone>,
     /// Version of the engine's tolerant (SSIM) decision policy.
@@ -1100,14 +1095,14 @@ pub mod text {
         }
     }
 
-    /// A tolerance of text, e.g. `text color ±24, ≤ 10.00% per tile`.
+    /// A tolerance of text: `text ignored` (it never fails), else e.g. `text ≤ 10.00% per tile`.
     #[must_use]
     pub fn text_tolerance(text: &TextTolerance) -> String {
-        format!(
-            "text color ±{}, ≤ {}% per tile",
-            decimal(text.color_tolerance, 0, 2),
-            percent(text.max_diff_ratio)
-        )
+        if text.0 >= 1.0 {
+            "text ignored".to_owned()
+        } else {
+            format!("text ≤ {}% per tile", percent(text.0))
+        }
     }
 
     /// A region, e.g. `(4, 8) 16x32px`.
@@ -1636,7 +1631,7 @@ mod tests {
                 tolerance: Tolerance::Exact {},
                 masks: vec![],
                 policy_version: 2,
-                text: None,
+                text_tolerance: None,
             },
             outcome: CaseOutcome::Error,
             error_kind: Some(CaseErrorKind::Image),
