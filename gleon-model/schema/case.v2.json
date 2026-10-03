@@ -311,8 +311,8 @@
           "format": "uint32",
           "minimum": 0
         },
-        "text": {
-          "description": "The tolerance of the text regions the integration reported (pixel and exact only);\nabsent when there were none or no text tolerance applied.",
+        "text_tolerance": {
+          "description": "The tolerance of the text regions the integration reported (pixel and exact only);\nabsent when there were none.",
           "anyOf": [
             {
               "$ref": "#/$defs/TextTolerance"
@@ -752,13 +752,13 @@
       "type": "object",
       "properties": {
         "diff_pixels": {
-          "description": "Text pixels beyond the color tolerance of the text.",
+          "description": "Text pixels that differ.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "headroom": {
-          "description": "`max_diff_ratio` of the text minus `worst_tile_diff_ratio`; negative means it failed.",
+          "description": "`comparison.text_tolerance` minus `worst_tile_diff_ratio`; negative means it failed.",
           "type": "number",
           "format": "double"
         },
@@ -783,29 +783,11 @@
       ]
     },
     "TextTolerance": {
-      "description": "How much text may differ, in pixel and exact mode: the text regions an integration reports\n(paragraphs of the render tree) are compared under it, everything else strictly.\n\nText is what operating systems draw differently; a pixel of text counts as equal while no\nchannel differs by more than `color_tolerance`, and the text passes while every tile of\n[`gleon_engine::pixel::TEXT_TILE`] pixels has at most `max_diff_ratio` differing pixels (a\nchanged word is a dense cluster, rendering noise is spread thin).",
-      "type": "object",
-      "properties": {
-        "color_tolerance": {
-          "description": "Largest difference of any channel of a text pixel, in 8-bit units, `[0, 255]`.",
-          "type": "number",
-          "format": "double",
-          "maximum": 255.0,
-          "minimum": 0.0
-        },
-        "max_diff_ratio": {
-          "description": "Largest share of differing pixels in any tile of text, `[0, 1]`.",
-          "type": "number",
-          "format": "double",
-          "maximum": 1.0,
-          "minimum": 0.0
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "color_tolerance",
-        "max_diff_ratio"
-      ]
+      "description": "How much text may differ, in pixel and exact mode.\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared strictly.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking\nit: layout stays exact, text content is not compared. Lower values compare text, at the\nrisk of failing on another OS's rendering.",
+      "type": "number",
+      "format": "double",
+      "maximum": 1.0,
+      "minimum": 0.0
     },
     "Tolerance": {
       "description": "Comparison tolerance.\n\nEach mode carries only its own parameters, so a parameter of another mode is unrepresentable.",

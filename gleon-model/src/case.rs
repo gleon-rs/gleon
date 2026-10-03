@@ -93,11 +93,11 @@ pub enum Metrics {
 pub struct TextMetrics {
     /// Text pixels (masked ones left out).
     pub pixels: u64,
-    /// Text pixels beyond the color tolerance of the text.
+    /// Text pixels that differ.
     pub diff_pixels: u64,
     /// Share of differing pixels of the worst tile.
     pub worst_tile_diff_ratio: f64,
-    /// `max_diff_ratio` of the text minus `worst_tile_diff_ratio`; negative means it failed.
+    /// `comparison.text_tolerance` minus `worst_tile_diff_ratio`; negative means it failed.
     pub headroom: f64,
 }
 
@@ -144,7 +144,7 @@ impl Metrics {
                         pixels: analysis.pixels,
                         diff_pixels: analysis.diff_pixels,
                         worst_tile_diff_ratio: worst,
-                        headroom: text.max_diff_ratio - worst,
+                        headroom: text.0 - worst,
                     }
                 });
                 Some(Self::pixel(
@@ -333,12 +333,7 @@ impl RegionMetrics {
                 .map(|tile| Self {
                     kind: RegionKind::Text,
                     rect: Some(tile.region),
-                    metrics: Metrics::pixel(
-                        tile.diff_pixels,
-                        tile.pixels,
-                        text.max_diff_ratio,
-                        None,
-                    ),
+                    metrics: Metrics::pixel(tile.diff_pixels, tile.pixels, text.0, None),
                 }),
             _ => None,
         };
@@ -579,9 +574,9 @@ pub struct Comparison {
     /// The effective tolerance.
     pub tolerance: Tolerance,
     /// The tolerance of the text regions the integration reported (pixel and exact only);
-    /// absent when there were none or no text tolerance applied.
+    /// absent when there were none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<TextTolerance>,
+    pub text_tolerance: Option<TextTolerance>,
     /// Ignored zones, applied to both images.
     pub masks: Vec<Zone>,
     /// Version of the engine's tolerant (SSIM) decision policy.
@@ -865,7 +860,9 @@ impl CaseReport {
 
     /// Checks that the fields agree with the outcome: `error_kind` exactly for errors, no golden
     /// hash for a missing golden, equal hashes for identical images, metrics only for `match`
-    /// and `mismatch` and of the tolerance's mode, images only for failures that keep them.
+    /// and `mismatch` and of the tolerance's mode, tolerances within their ranges, a text
+    /// tolerance only beside a pixel or exact one (and text metrics only with it), images only
+    /// for failures that keep them.
     ///
     /// # Errors
     /// Returns the first [`InconsistentCase`].
@@ -899,6 +896,22 @@ impl CaseReport {
             .is_some_and(|metrics| matches!(metrics, Metrics::Ssim { .. }) != is_ssim_tolerance);
         if has_other_metrics {
             return Err(InconsistentCase::MetricsKind);
+        }
+        let comparison = &self.comparison;
+        if comparison.tolerance.validate().is_err()
+            || comparison
+                .text_tolerance
+                .is_some_and(|text| text.validate().is_err())
+        {
+            return Err(InconsistentCase::ToleranceRange);
+        }
+        let has_text_metrics = self
+            .metrics
+            .is_some_and(|metrics| matches!(metrics, Metrics::Pixel { text: Some(_), .. }));
+        if (comparison.text_tolerance.is_some() && is_ssim_tolerance)
+            || (has_text_metrics && comparison.text_tolerance.is_none())
+        {
+            return Err(InconsistentCase::TextTolerance);
         }
         if self.artifacts.is_some()
             && !matches!(
@@ -968,6 +981,15 @@ pub enum InconsistentCase {
     /// versa).
     #[error("`metrics` are of another mode than `comparison.tolerance`")]
     MetricsKind,
+    /// A tolerance of `comparison` outside its range.
+    #[error("a tolerance of `comparison` is outside its range")]
+    ToleranceRange,
+    /// A text tolerance beside an SSIM tolerance (text regions apply in pixel and exact mode
+    /// only), or text metrics without a text tolerance.
+    #[error(
+        "`comparison.text_tolerance` belongs to pixel and exact tolerances, text metrics to it"
+    )]
+    TextTolerance,
     /// Images of an outcome that keeps none.
     #[error("`artifacts` belong to `mismatch`, `dimension_mismatch` and `missing` only")]
     Artifacts,
@@ -1100,14 +1122,14 @@ pub mod text {
         }
     }
 
-    /// A tolerance of text, e.g. `text color ±24, ≤ 10.00% per tile`.
+    /// A tolerance of text: `text ignored` (it never fails), else e.g. `text ≤ 10.00% per tile`.
     #[must_use]
     pub fn text_tolerance(text: &TextTolerance) -> String {
-        format!(
-            "text color ±{}, ≤ {}% per tile",
-            decimal(text.color_tolerance, 0, 2),
-            percent(text.max_diff_ratio)
-        )
+        if text.0 >= 1.0 {
+            "text ignored".to_owned()
+        } else {
+            format!("text ≤ {}% per tile", percent(text.0))
+        }
     }
 
     /// A region, e.g. `(4, 8) 16x32px`.
@@ -1130,18 +1152,23 @@ pub mod text {
                 text,
                 ..
             } => {
-                let mut summary = format!(
+                let strict = format!(
                     "{}% ({diff_pixels} of {total_pixels}px) differ",
                     percent(*diff_ratio)
                 );
-                if let Some(text) = text.filter(|text| text.diff_pixels > 0) {
-                    let _infallible = write!(
-                        summary,
-                        ", text up to {}% of a tile",
+                // Text is part of the reason only when it failed: within its tolerance its
+                // differences (another OS's rasterization) are no finding.
+                match text.filter(|text| text.headroom < 0.0) {
+                    None => strict,
+                    Some(text) if *diff_pixels == 0 => format!(
+                        "text up to {}% of a tile differs",
                         percent(text.worst_tile_diff_ratio)
-                    );
+                    ),
+                    Some(text) => format!(
+                        "{strict}, text up to {}% of a tile",
+                        percent(text.worst_tile_diff_ratio)
+                    ),
                 }
-                summary
             }
             Metrics::Ssim {
                 min_ssim,
@@ -1269,6 +1296,45 @@ pub mod text {
                 text: None,
             };
             assert_eq!(metrics_summary(&pixel), "0.0167% (1 of 6000px) differ");
+            // Text is named only when it failed its tolerance, not for differences within it
+            // (another OS's rasterization under the default, which never fails).
+            let with_text = |headroom| Metrics::Pixel {
+                total_pixels: 6000,
+                diff_pixels: 1,
+                diff_ratio: 1.0 / 6000.0,
+                headroom: -1.0 / 6000.0,
+                text: Some(super::super::TextMetrics {
+                    pixels: 300,
+                    diff_pixels: 120,
+                    worst_tile_diff_ratio: 0.4,
+                    headroom,
+                }),
+            };
+            assert_eq!(
+                metrics_summary(&with_text(0.6)),
+                "0.0167% (1 of 6000px) differ"
+            );
+            assert_eq!(
+                metrics_summary(&with_text(-0.3)),
+                "0.0167% (1 of 6000px) differ, text up to 40.00% of a tile"
+            );
+            // Text alone failed (the strict pixels all match, or there are none).
+            let text_only = Metrics::Pixel {
+                total_pixels: 0,
+                diff_pixels: 0,
+                diff_ratio: 0.0,
+                headroom: 0.0,
+                text: Some(super::super::TextMetrics {
+                    pixels: 300,
+                    diff_pixels: 120,
+                    worst_tile_diff_ratio: 0.4,
+                    headroom: -0.3,
+                }),
+            };
+            assert_eq!(
+                metrics_summary(&text_only),
+                "text up to 40.00% of a tile differs"
+            );
             let area = Region {
                 x: 10,
                 y: 10,
@@ -1636,7 +1702,7 @@ mod tests {
                 tolerance: Tolerance::Exact {},
                 masks: vec![],
                 policy_version: 2,
-                text: None,
+                text_tolerance: None,
             },
             outcome: CaseOutcome::Error,
             error_kind: Some(CaseErrorKind::Image),
@@ -1788,6 +1854,35 @@ mod tests {
                     "comparison": {"tolerance": {"kind": "ssim", "min_similarity": 0.8, "color_tolerance": 8.0}, "masks": [], "policy_version": 2}
                 }),
                 InconsistentCase::MetricsKind,
+            ),
+            (
+                serde_json::json!({
+                    "comparison": {"tolerance": {"kind": "pixel", "max_diff_ratio": 1.5}, "masks": [], "policy_version": 2}
+                }),
+                InconsistentCase::ToleranceRange,
+            ),
+            (
+                serde_json::json!({
+                    "comparison": {"tolerance": {"kind": "exact"}, "text_tolerance": -0.5, "masks": [], "policy_version": 2}
+                }),
+                InconsistentCase::ToleranceRange,
+            ),
+            (
+                serde_json::json!({
+                    "comparison": {"tolerance": {"kind": "ssim", "min_similarity": 0.8, "color_tolerance": 8.0}, "text_tolerance": 1.0, "masks": [], "policy_version": 2}
+                }),
+                InconsistentCase::TextTolerance,
+            ),
+            (
+                serde_json::json!({
+                    "outcome": "match", "artifacts": null,
+                    "metrics": {
+                        "kind": "pixel", "total_pixels": 4, "diff_pixels": 0, "diff_ratio": 0.0, "headroom": 0.0,
+                        "text": {"pixels": 4, "diff_pixels": 0, "worst_tile_diff_ratio": 0.0, "headroom": 1.0}
+                    },
+                    "golden": {"path": "a.png", "sha256": "1".repeat(64)}
+                }),
+                InconsistentCase::TextTolerance,
             ),
         ] {
             let mut broken = valid.clone();

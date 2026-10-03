@@ -434,10 +434,11 @@ pub struct ScreenshotRule {
     /// Optional zones to mask out (ignore) during verification.
     #[serde(default)]
     pub masks: Vec<MaskRule>,
-    /// How much text may differ, in `pixel` mode: integrations that report the text of a
-    /// screenshot compare it under this tolerance and everything else strictly.
+    /// How much text may differ, in `pixel` mode: the largest share of differing pixels in any
+    /// tile of the text an integration reports, `[0, 1]`; unset, text never fails
+    /// ([`crate::tolerance::TextTolerance::DEFAULT`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<crate::tolerance::TextTolerance>,
+    pub text_tolerance: Option<crate::tolerance::TextTolerance>,
 }
 
 impl ScreenshotRule {
@@ -586,14 +587,15 @@ impl GleonConfig {
                     rule.diff.color_tolerance
                 )));
             }
-            if let Some(text) = &rule.text {
+            if let Some(text) = &rule.text_tolerance {
                 if rule.mode != Mode::Pixel {
                     return Err(ConfigError::Validation(format!(
-                        "screenshots[{i}].text applies to `mode: pixel` only"
+                        "screenshots[{i}].text_tolerance applies to `mode: pixel` only"
                     )));
                 }
-                text.validate()
-                    .map_err(|e| ConfigError::Validation(format!("screenshots[{i}].text: {e}")))?;
+                text.validate().map_err(|e| {
+                    ConfigError::Validation(format!("screenshots[{i}].text_tolerance: {e}"))
+                })?;
             }
             for (j, mask) in rule.masks.iter().enumerate() {
                 for (k, zone) in mask.zones.iter().enumerate() {
@@ -655,7 +657,7 @@ impl Default for GleonConfig {
                 mode: Mode::Pixel,
                 diff: DiffConfig::default(),
                 masks: vec![],
-                text: None,
+                text_tolerance: None,
             }],
             exclude: vec![
                 #[expect(
@@ -891,41 +893,29 @@ screenshots:
         ));
     }
 
-    /// `text:` belongs to pixel rules and takes valid ranges.
+    /// `text_tolerance` belongs to pixel rules and is a share.
     #[test]
     fn test_rule_text_tolerance() {
         let yaml = |mode: &str, text: &str| {
             format!(
-                "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n    text: {text}\n"
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n    text_tolerance: {text}\n"
             )
         };
-        let config = GleonConfig::from_yaml_str(&yaml(
-            "pixel",
-            "{ color_tolerance: 24, max_diff_ratio: 0.1 }",
-        ))
-        .unwrap();
+        let config = GleonConfig::from_yaml_str(&yaml("pixel", "0.1")).unwrap();
         assert_eq!(
-            config.screenshots[0].text,
-            Some(crate::tolerance::TextTolerance {
-                color_tolerance: 24.0,
-                max_diff_ratio: 0.1
-            })
+            config.screenshots[0].text_tolerance,
+            Some(crate::tolerance::TextTolerance(0.1))
         );
         for (mode, text, needle) in [
             (
                 "ssim",
-                "{ color_tolerance: 24, max_diff_ratio: 0.1 }",
-                "text applies to `mode: pixel` only",
+                "0.1",
+                "text_tolerance applies to `mode: pixel` only",
             ),
             (
                 "pixel",
-                "{ color_tolerance: 256, max_diff_ratio: 0.1 }",
-                "screenshots[0].text: `color_tolerance` must be between 0 and 255",
-            ),
-            (
-                "pixel",
-                "{ color_tolerance: 8, max_diff_ratio: 2 }",
-                "`max_diff_ratio` must be between 0.0 and 1.0",
+                "2",
+                "screenshots[0].text_tolerance: `text_tolerance` must be between 0.0 and 1.0",
             ),
         ] {
             let err = GleonConfig::from_yaml_str(&yaml(mode, text)).unwrap_err();

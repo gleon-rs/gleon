@@ -269,7 +269,7 @@ pub fn compare(
     let regions = PixelRegions {
         masks: &masks,
         text: &text_regions,
-        text_policy: text_tolerance.as_ref().map(TextTolerance::policy),
+        text_tolerance: text_tolerance.map(|text| text.0),
     };
     let measured = |measurement| {
         Metrics::from_measurement(&measurement, tolerance, text_tolerance.as_ref())
@@ -584,10 +584,7 @@ mod tests {
                 width: 16,
                 height: 40,
             }],
-            tolerance: TextTolerance {
-                color_tolerance: 8.0,
-                max_diff_ratio: 0.1,
-            },
+            tolerance: TextTolerance(0.1),
         };
         let raw = Candidate::Rgba {
             width: 32,

@@ -12,7 +12,7 @@ pub mod ssim;
 
 use image::RgbaImage;
 pub use phash::{calculate_hamming_distance, compute_phash};
-pub use pixel::{PixelRegions, TextAnalysis, TextPolicy, TextTile, compare_pixels};
+pub use pixel::{PixelRegions, TextAnalysis, TextTile, compare_pixels};
 pub use ssim::{Region, SsimAnalysis, SsimPolicy};
 
 use crate::config::{DiffConfig, Mode};
@@ -27,12 +27,12 @@ pub enum Measurement {
     /// Pixel (and exact) mode: the differing pixels among those compared strictly, and the text
     /// regions.
     Pixel {
-        /// Pixels compared strictly (neither masked nor text under a text policy), the base of
+        /// Pixels compared strictly (neither masked nor text under a text tolerance), the base of
         /// the threshold.
         checked_pixels: u64,
         /// Strictly compared pixels whose RGBA bytes differ.
         diff_count: u64,
-        /// The text regions, when a text policy applied to some.
+        /// The text regions, when a text tolerance applied to some.
         text: Option<TextAnalysis>,
     },
     /// Tolerant (SSIM) mode; see [`ssim`] for the decision policy and [`SsimAnalysis`] for the
@@ -69,46 +69,6 @@ impl From<&SsimAnalysis> for Measurement {
             changed_region: analysis.changed_region,
             failing_pixels: analysis.failing_pixels,
             failing_region: analysis.failing_region,
-        }
-    }
-}
-
-/// Short reason used by every report format, e.g. `"42 pixels"` or
-/// `"min local SSIM 0.9955, colors exceed tolerance by 146.0 at (32, 19) 26x15px"`.
-impl std::fmt::Display for Measurement {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            Self::Pixel {
-                diff_count, text, ..
-            } => {
-                write!(f, "{diff_count} pixels")?;
-                match text.and_then(|text| text.worst_tile) {
-                    Some(TextTile {
-                        region: r,
-                        pixels,
-                        diff_pixels,
-                    }) if diff_pixels > 0 => write!(
-                        f,
-                        ", text {diff_pixels} of {pixels} pixels in the tile at ({}, {}) {}x{}px",
-                        r.x, r.y, r.width, r.height
-                    ),
-                    _ => Ok(()),
-                }
-            }
-            Self::Ssim {
-                min_ssim,
-                max_excess,
-                failing_region: region,
-                ..
-            } => {
-                write!(f, "min local SSIM {min_ssim:.4}")?;
-                if max_excess > 0.0 {
-                    write!(f, ", colors exceed tolerance by {max_excess:.1}")?;
-                }
-                region.map_or(Ok(()), |r| {
-                    write!(f, " at ({}, {}) {}x{}px", r.x, r.y, r.width, r.height)
-                })
-            }
         }
     }
 }
@@ -163,13 +123,7 @@ fn execute_pixel_comparison(
         let mismatch_ratio = analysis.diff_pixels as f64 / analysis.checked_pixels as f64;
         mismatch_ratio <= threshold
     };
-    // Every tile of text within the share: a dense cluster (a changed word) fails, noise spread
-    // over the text passes.
-    let text_passes = analysis
-        .text
-        .and_then(|text| text.worst_tile)
-        .zip(regions.text_policy)
-        .is_none_or(|(tile, policy)| tile.diff_ratio() <= policy.max_diff_ratio);
+    let text_passes = compared.text_passes();
 
     let measurement = Measurement::Pixel {
         checked_pixels: analysis.checked_pixels,
@@ -298,10 +252,7 @@ mod tests {
         let regions = PixelRegions {
             masks: &masks,
             text: &text,
-            text_policy: Some(TextPolicy {
-                color_tolerance: 8.0,
-                max_diff_ratio: 0.05,
-            }),
+            text_tolerance: Some(0.05),
         };
         let exact = DiffConfig {
             threshold: 0.0,
@@ -340,15 +291,44 @@ mod tests {
         }
         let result = compare(&cluster, Mode::Pixel);
         assert!(
-            matches!(&result, ComparisonResult::Mismatch { measurement, .. }
-                if measurement.to_string()
-                    == "0 pixels, text 16 of 256 pixels in the tile at (0, 0) 16x16px"),
+            matches!(
+                &result,
+                ComparisonResult::Mismatch {
+                    measurement: Measurement::Pixel {
+                        diff_count: 0,
+                        text: Some(TextAnalysis {
+                            worst_tile: Some(TextTile {
+                                region: Region {
+                                    x: 0,
+                                    y: 0,
+                                    width: 16,
+                                    height: 16
+                                },
+                                pixels: 256,
+                                diff_pixels: 16,
+                            }),
+                            ..
+                        }),
+                        ..
+                    },
+                    ..
+                }
+            ),
             "{result:?}"
         );
-        // Text without differing pixels says nothing about it.
+        // Text without differing pixels has no worst tile.
         assert!(matches!(
             compare(&baseline, Mode::Pixel),
-            ComparisonResult::Match { measurement } if measurement.to_string() == "0 pixels"
+            ComparisonResult::Match {
+                measurement: Measurement::Pixel {
+                    diff_count: 0,
+                    text: Some(TextAnalysis {
+                        worst_tile: None,
+                        ..
+                    }),
+                    ..
+                }
+            }
         ));
 
         // SSIM: the masked change is painted over, text regions do not apply.
@@ -410,29 +390,6 @@ mod tests {
                     text: None
                 }
             }
-        );
-    }
-
-    #[test]
-    fn test_ssim_detail_display_names_the_failing_gate_and_region() {
-        let detail = Measurement::Ssim {
-            mean_ssim: 0.999,
-            min_ssim: 0.9955,
-            max_excess: 146.0,
-            peak_excess: 154.0,
-            changed_pixels: 390,
-            changed_region: None,
-            failing_pixels: 390,
-            failing_region: Some(Region {
-                x: 32,
-                y: 19,
-                width: 26,
-                height: 15,
-            }),
-        };
-        assert_eq!(
-            detail.to_string(),
-            "min local SSIM 0.9955, colors exceed tolerance by 146.0 at (32, 19) 26x15px"
         );
     }
 
