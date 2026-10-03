@@ -52,11 +52,15 @@ fn html_failure_dto<'a>(
         actual_path,
         baseline_path,
         diff_path,
-        // The marked pixels of the diff image: strict differences and text beyond its tolerance.
+        // The marked pixels of the diff image: strict differences, and those of text that failed
+        // its tolerance.
         diff_count: match report.metrics {
             Some(Metrics::Pixel {
                 diff_pixels, text, ..
-            }) => Some(diff_pixels.saturating_add(text.map_or(0, |text| text.diff_pixels))),
+            }) => {
+                let failed_text = text.filter(|text| text.headroom < 0.0);
+                Some(diff_pixels.saturating_add(failed_text.map_or(0, |text| text.diff_pixels)))
+            }
             _ => None,
         },
         actual_size: size(report.candidate.width, report.candidate.height),
@@ -179,7 +183,7 @@ mod tests {
     }
 
     /// A mismatch of text only marks its text pixels in the diff image: they are its diffs, not
-    /// the zero strict differences.
+    /// the zero strict differences; text within its tolerance marks none.
     #[test]
     fn test_generate_html_counts_the_text_diffs() {
         let mut mismatch = report("billing/form", CaseOutcome::Mismatch);
@@ -195,11 +199,22 @@ mod tests {
                 headroom: -0.08,
             }),
         });
-        let cases = Cases::new("/w/.gleon/runs/latest", vec![mismatch]);
-        let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
-            .unwrap()
-            .unwrap();
-        assert!(html.contains("(46 diffs)"), "{html}");
+        let html = |report| {
+            let cases = Cases::new("/w/.gleon/runs/latest", vec![report]);
+            ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
+                .unwrap()
+                .unwrap()
+        };
+        assert!(html(mismatch.clone()).contains("(46 diffs)"));
+
+        // Text within its tolerance (another OS's rasterization) marks nothing in the diff.
+        if let Some(Metrics::Pixel {
+            text: Some(text), ..
+        }) = &mut mismatch.metrics
+        {
+            text.headroom = 0.82;
+        }
+        assert!(html(mismatch).contains("(0 diffs)"));
     }
 
     #[test]

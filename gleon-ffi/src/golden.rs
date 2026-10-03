@@ -545,6 +545,7 @@ impl Call<'_> {
                 &golden.golden_path,
                 outcome,
                 &self.plan.tolerance,
+                self.text(),
                 case::millis(total),
                 details.metrics.as_ref(),
                 details.message.as_deref(),
@@ -1166,7 +1167,7 @@ metrics:
         assert_eq!(finished.verdict, Verdict::Mismatch);
         assert!(
             finished.message.contains(
-                "text up to 12.50% of a tile (gleon pixel ≤ 0.00%, text ≤ 10.00% per tile)"
+                ": text up to 12.50% of a tile differs (gleon pixel ≤ 0.00%, text ≤ 10.00% per tile)"
             ),
             "{}",
             finished.message

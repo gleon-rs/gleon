@@ -339,8 +339,8 @@ pub struct Plan {
     pub tolerance: Tolerance,
     /// The call's masks followed by the rule's.
     pub masks: Vec<Zone>,
-    /// The tolerance of text: the call's, else the rule's, else [`TextTolerance::DEFAULT`]
-    /// (text never fails).
+    /// The tolerance of text ([`TextTolerance::resolve`]: the call's, else the rule's, else 1, so
+    /// text never fails).
     pub text: TextTolerance,
     /// Whether the golden belongs to a workspace (failure messages point at `.gleon/gleon.yaml`
     /// otherwise).
@@ -508,7 +508,7 @@ impl Session {
         Ok(Plan {
             tolerance: tolerance.or(rule_tolerance).unwrap_or(Tolerance::Exact {}),
             masks,
-            text: text.or(rule_text).unwrap_or(TextTolerance::DEFAULT),
+            text: TextTolerance::resolve(text, rule_text),
             has_workspace,
             in_workspace,
         })

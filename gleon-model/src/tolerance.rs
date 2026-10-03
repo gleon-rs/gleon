@@ -15,7 +15,7 @@ pub enum ToleranceError {
     /// A ratio outside `[0, 1]`.
     #[error("`{name}` must be between 0.0 and 1.0 (got {value})")]
     Ratio {
-        /// Parameter name (`max_diff_ratio` or `min_similarity`).
+        /// Parameter name (`max_diff_ratio`, `min_similarity` or `text_tolerance`).
         name: &'static str,
         /// The rejected value.
         value: f64,
@@ -176,6 +176,13 @@ impl TextTolerance {
     /// never fails.
     pub const DEFAULT: Self = Self(1.0);
 
+    /// The tolerance a comparison uses: the integration call's, else the `.gleon/gleon.yaml`
+    /// rule's, else [`Self::DEFAULT`].
+    #[must_use]
+    pub fn resolve(call: Option<Self>, rule: Option<Self>) -> Self {
+        call.or(rule).unwrap_or(Self::DEFAULT)
+    }
+
     /// Checks the value range.
     ///
     /// # Errors
@@ -279,6 +286,19 @@ mod tests {
             ));
         }
         assert!(ssim(0.8, 255.0).validate().is_ok());
+
+        for good in [0.0, 0.1, 1.0] {
+            assert!(TextTolerance(good).validate().is_ok(), "{good}");
+        }
+        for bad in [-0.1, 1.5, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                TextTolerance(bad).validate(),
+                Err(ToleranceError::Ratio {
+                    name: "text_tolerance",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
@@ -327,6 +347,10 @@ mod tests {
             serde_json::to_string(&TextTolerance(-0.0).without_negative_zero()).unwrap(),
             "0.0"
         );
+        let (call, rule) = (TextTolerance(0.1), TextTolerance(0.2));
+        assert_eq!(TextTolerance::resolve(Some(call), Some(rule)), call);
+        assert_eq!(TextTolerance::resolve(None, Some(rule)), rule);
+        assert_eq!(TextTolerance::resolve(None, None), TextTolerance::DEFAULT);
         let kept = Tolerance::Ssim {
             min_similarity: -0.5,
             color_tolerance: 3.0,

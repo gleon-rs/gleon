@@ -15,7 +15,7 @@ use gleon_model::{
         CaseOutcome, Metrics,
         text::{MAX_DECIMALS, color, decimal, percent, signed, similarity},
     },
-    tolerance::Tolerance,
+    tolerance::{TextTolerance, Tolerance},
 };
 
 /// One-character console marker of `outcome`.
@@ -37,6 +37,7 @@ pub fn console_line(
     golden_path: &str,
     outcome: CaseOutcome,
     tolerance: &Tolerance,
+    text_tolerance: Option<TextTolerance>,
     total_ms: f64,
     metrics: Option<&Metrics>,
     message: Option<&str>,
@@ -83,15 +84,25 @@ pub fn console_line(
                 percent(max_diff_ratio),
                 signed(decimal(headroom * 100.0, 2, MAX_DECIMALS))
             );
-            // Text can fail on its own, so its line shows it too.
-            if let Some(text) = text {
-                let _infallible = write!(
-                    detail,
-                    "  text {}% of a tile (≤{}%, {}%)",
-                    percent(text.worst_tile_diff_ratio),
-                    percent(text.worst_tile_diff_ratio + text.headroom),
-                    signed(decimal(text.headroom * 100.0, 2, MAX_DECIMALS))
-                );
+            // Text can fail on its own, so its line shows it too; ignored text only its share.
+            match (text, text_tolerance) {
+                (Some(text), Some(TextTolerance(share))) if share >= 1.0 => {
+                    let _infallible = write!(
+                        detail,
+                        "  text {}% of a tile (ignored)",
+                        percent(text.worst_tile_diff_ratio)
+                    );
+                }
+                (Some(text), Some(TextTolerance(share))) => {
+                    let _infallible = write!(
+                        detail,
+                        "  text {}% of a tile (≤{}%, {}%)",
+                        percent(text.worst_tile_diff_ratio),
+                        percent(share),
+                        signed(decimal(text.headroom * 100.0, 2, MAX_DECIMALS))
+                    );
+                }
+                _ => {}
             }
             detail
         }
@@ -213,6 +224,7 @@ mod tests {
                 "test/goldens/swatch.png",
                 CaseOutcome::Match,
                 &default_ssim,
+                None,
                 12.4,
                 Some(&ssim),
                 None
@@ -233,6 +245,7 @@ mod tests {
                 &Tolerance::Pixel {
                     max_diff_ratio: 0.01
                 },
+                None,
                 3.0,
                 Some(&pixel),
                 None
@@ -251,6 +264,7 @@ mod tests {
                 "a.png",
                 CaseOutcome::Match,
                 &Tolerance::Exact {},
+                None,
                 0.6,
                 Some(&unchanged),
                 None
@@ -274,6 +288,7 @@ mod tests {
                 "a.png",
                 CaseOutcome::Mismatch,
                 &Tolerance::Exact {},
+                Some(TextTolerance(0.1)),
                 1.0,
                 Some(&text_only),
                 None
@@ -281,8 +296,29 @@ mod tests {
             "gleon ✗ a.png  pixel 0.00% (0 px, ≤0.00%, +0.00%)  text 18.00% of a tile (≤10.00%, \
              -8.00%)  1 ms"
         );
+        // Ignored text (the default) shows only its share, not a 100% bound.
+        assert_eq!(
+            console_line(
+                "a.png",
+                CaseOutcome::Match,
+                &Tolerance::Exact {},
+                Some(TextTolerance::DEFAULT),
+                1.0,
+                Some(&text_only),
+                None
+            ),
+            "gleon ✓ a.png  pixel 0.00% (0 px, ≤0.00%, +0.00%)  text 18.00% of a tile (ignored)  1 ms"
+        );
         let line = |outcome, message| {
-            console_line("a.png", outcome, &Tolerance::Exact {}, 1.0, None, message)
+            console_line(
+                "a.png",
+                outcome,
+                &Tolerance::Exact {},
+                None,
+                1.0,
+                None,
+                message,
+            )
         };
         assert_eq!(
             line(CaseOutcome::Identical, None),

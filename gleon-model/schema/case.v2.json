@@ -752,13 +752,13 @@
       "type": "object",
       "properties": {
         "diff_pixels": {
-          "description": "Text pixels beyond the color tolerance of the text.",
+          "description": "Text pixels that differ.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "headroom": {
-          "description": "`max_diff_ratio` of the text minus `worst_tile_diff_ratio`; negative means it failed.",
+          "description": "`comparison.text_tolerance` minus `worst_tile_diff_ratio`; negative means it failed.",
           "type": "number",
           "format": "double"
         },

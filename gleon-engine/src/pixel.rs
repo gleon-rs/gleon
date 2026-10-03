@@ -80,18 +80,18 @@ pub struct TextAnalysis {
     /// Text pixels that differ.
     pub diff_pixels: u64,
     /// The tile with the largest share of differing pixels (the first of equal ones); `None`
-    /// without text pixels.
+    /// when no text pixel differs.
     pub worst_tile: Option<TextTile>,
 }
 
 /// What [`compare`] measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PixelAnalysis {
-    /// Pixels compared strictly: neither masked nor text under a text policy.
+    /// Pixels compared strictly: neither masked nor text under a text tolerance.
     pub checked_pixels: u64,
     /// Strictly compared pixels whose RGBA bytes differ.
     pub diff_pixels: u64,
-    /// The text regions, when a text policy applied to some.
+    /// The text regions, when a text tolerance applied to some.
     pub text: Option<TextAnalysis>,
 }
 
@@ -112,11 +112,20 @@ pub struct Compared {
     pub analysis: PixelAnalysis,
     /// The class of every pixel (row-major); `None` when every pixel was compared strictly.
     classes: Option<Vec<Class>>,
+    /// Whether a tile of text has more differing pixels than the text tolerance allows.
+    text_fails: bool,
 }
 
 impl Compared {
+    /// Whether the text is within its tolerance (no text: it is).
+    #[must_use]
+    pub const fn text_passes(&self) -> bool {
+        !self.text_fails
+    }
+
     /// The diff visualization of the compared `baseline` and `actual`: strict differences
-    /// magenta, text beyond its tolerance orange, everything else the darkened baseline.
+    /// magenta, differing text orange when the text failed its tolerance, everything else (text
+    /// within its tolerance too) the darkened baseline.
     ///
     /// # Panics
     /// Panics if the images are not the compared ones (another size).
@@ -139,8 +148,8 @@ impl Compared {
             .for_each(|(pixel, class)| {
                 *pixel = match class {
                     Class::StrictDiff => MAGENTA,
-                    Class::TextDiff => ORANGE,
-                    Class::Strict | Class::Text | Class::Masked => {
+                    Class::TextDiff if self.text_fails => ORANGE,
+                    Class::Strict | Class::Text | Class::TextDiff | Class::Masked => {
                         let [r, g, b, a] = *pixel;
                         [r / 2, g / 2, b / 2, a]
                     }
@@ -165,12 +174,21 @@ pub fn compare(baseline: &RgbaImage, actual: &RgbaImage, regions: &PixelRegions<
                 text: None,
             },
             classes: None,
+            text_fails: false,
         };
     }
     let (classes, analysis) = classify(baseline, actual, regions);
+    // Every tile of text within the share: a dense cluster (a changed word) fails, noise spread
+    // over the text passes.
+    let text_fails = analysis
+        .text
+        .and_then(|text| text.worst_tile)
+        .zip(regions.text_tolerance)
+        .is_some_and(|(tile, tolerance)| tile.diff_ratio() > tolerance);
     Compared {
         analysis,
         classes: Some(classes),
+        text_fails,
     }
 }
 
@@ -207,18 +225,28 @@ fn classify(
     let width = baseline.width() as usize;
     let mut classes = vec![Class::Strict; width * baseline.height() as usize];
     let mut mark = |region: &Region, class: Class| {
-        for row in classes
-            .chunks_exact_mut(width)
-            .skip(region.y as usize)
-            .take(region.height as usize)
-        {
-            #[expect(
-                clippy::expect_used,
-                reason = "the regions were checked to lie inside the image"
-            )]
-            row.get_mut(region.x as usize..(region.x + region.width) as usize)
-                .expect("a region lies inside the image")
-                .fill(class);
+        let rows = region.y as usize * width..(region.y + region.height) as usize * width;
+        let columns = region.x as usize..(region.x + region.width) as usize;
+        #[expect(
+            clippy::expect_used,
+            reason = "the regions were checked to lie inside the image"
+        )]
+        let block = classes
+            .get_mut(rows)
+            .expect("a region lies inside the image");
+        if columns.len() == width {
+            // Whole rows are one contiguous block: a single fill.
+            block.fill(class);
+        } else {
+            for row in block.chunks_exact_mut(width) {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "the regions were checked to lie inside the image"
+                )]
+                row.get_mut(columns.clone())
+                    .expect("a region lies inside the image")
+                    .fill(class);
+            }
         }
     };
     let has_text = regions.text_tolerance.is_some() && !regions.text.is_empty();
@@ -268,7 +296,12 @@ fn classify(
         analysis.text = Some(TextAnalysis {
             pixels: text_pixels,
             diff_pixels: text_diff,
-            worst_tile: worst_tile(&classes, width, regions.text),
+            // Without a differing text pixel every tile is at 0%: no scan needed.
+            worst_tile: if text_diff > 0 {
+                worst_tile(&classes, width, regions.text)
+            } else {
+                None
+            },
         });
     }
     (classes, analysis)
@@ -278,13 +311,13 @@ fn classify(
 /// every [`TEXT_TILE`]-pixel square inside a region (the region's own size when it is smaller),
 /// so a cluster is judged whole wherever it falls and no thin strip at a region's edge makes a
 /// tile of its own. Masked pixels of a tile count as equal, so a mask over most of a tile cannot
-/// turn one noisy pixel into a large share; tiles without text pixels are left out.
+/// turn one noisy pixel into a large share. `None` when no text pixel differs.
 ///
 /// The column sums of the tile's rows slide down a region and the tile slides along them, so
 /// this takes one pass over each region. `text` lies inside the image ([`classify`]).
 fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTile> {
     let mut worst: Option<TextTile> = None;
-    // Per column of a region: its text and differing text pixels in the tile's rows.
+    // Per column of a region: its differing text pixels in the tile's rows.
     let mut columns = Vec::new();
     for region in text {
         let (tile_width, tile_height) = (TEXT_TILE.min(region.width), TEXT_TILE.min(region.height));
@@ -298,7 +331,7 @@ fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTi
                 .get(start..start + region.width as usize)
                 .expect("a text region lies inside the image")
         };
-        let mut consider = |x: u32, y: u32, (text_pixels, diff_pixels): (u64, u64)| {
+        let mut consider = |x: u32, y: u32, diff_pixels: u64| {
             let tile = TextTile {
                 region: Region {
                     x,
@@ -310,7 +343,7 @@ fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTi
                 diff_pixels,
             };
             // Shares compared exactly: a / b > c / d as a * d > c * b.
-            let is_worse = text_pixels > 0
+            let is_worse = diff_pixels > 0
                 && worst.is_none_or(|worst| {
                     tile.diff_pixels * worst.pixels > worst.diff_pixels * tile.pixels
                 });
@@ -319,7 +352,7 @@ fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTi
             }
         };
         columns.clear();
-        columns.resize(region.width as usize, (0, 0));
+        columns.resize(region.width as usize, 0);
         for y in region.y..region.y + tile_height {
             add_row(&mut columns, row(y), true);
         }
@@ -328,19 +361,11 @@ fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTi
                 add_row(&mut columns, row(top - 1), false);
                 add_row(&mut columns, row(top + tile_height - 1), true);
             }
-            let mut sum = columns
-                .iter()
-                .take(tile_width as usize)
-                .fold((0, 0), |(pixels, diff), column| {
-                    (pixels + column.0, diff + column.1)
-                });
+            let mut sum = columns.iter().take(tile_width as usize).sum();
             consider(region.x, top, sum);
             let slides = columns.iter().zip(columns.iter().skip(tile_width as usize));
             for (left, (leaving, entering)) in (region.x + 1..).zip(slides) {
-                sum = (
-                    sum.0 - leaving.0 + entering.0,
-                    sum.1 - leaving.1 + entering.1,
-                );
+                sum = sum - leaving + entering;
                 consider(left, top, sum);
             }
         }
@@ -348,20 +373,13 @@ fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTi
     worst
 }
 
-/// Adds (or, without `add`, removes) the text and differing text pixels of `row` to the sums of
-/// its `columns` (`row` is as long as `columns`: a row of the region).
-fn add_row(columns: &mut [(u64, u64)], row: &[Class], add: bool) {
+/// Adds (or, without `add`, removes) the differing text pixels of `row` to the sums of its
+/// `columns` (`row` is as long as `columns`: a row of the region).
+fn add_row(columns: &mut [u64], row: &[Class], add: bool) {
     for (column, class) in columns.iter_mut().zip(row) {
-        let (pixels, diff) = match class {
-            Class::Text => (1, 0),
-            Class::TextDiff => (1, 1),
-            Class::Strict | Class::StrictDiff | Class::Masked => continue,
-        };
-        *column = if add {
-            (column.0 + pixels, column.1 + diff)
-        } else {
-            (column.0 - pixels, column.1 - diff)
-        };
+        if *class == Class::TextDiff {
+            *column = if add { *column + 1 } else { *column - 1 };
+        }
     }
 }
 
@@ -552,14 +570,26 @@ mod tests {
         assert_eq!(worst.region, region(8, 0, 16, 16));
         assert_eq!((worst.pixels, worst.diff_pixels), (256, 2));
 
-        let diff = compare(&baseline, &actual, &regions).diff_image(&baseline, &actual);
-        assert_eq!(diff.get_pixel(14, 1).0, ORANGE);
+        // Text within its tolerance is no difference to show: darkened, like a mask.
+        let compared = compare(&baseline, &actual, &regions);
+        assert!(compared.text_passes());
+        let diff = compared.diff_image(&baseline, &actual);
+        assert_eq!(diff.get_pixel(14, 1).0, [127, 127, 127, 255]);
         assert_eq!(diff.get_pixel(40, 20).0, MAGENTA);
         assert_eq!(
             diff.get_pixel(1, 1).0,
             [127, 127, 127, 255],
             "masked: darkened"
         );
+        // Text beyond its tolerance shows its differing pixels.
+        let failing = PixelRegions {
+            text_tolerance: Some(0.0),
+            ..regions
+        };
+        let compared = compare(&baseline, &actual, &failing);
+        assert!(!compared.text_passes());
+        let diff = compared.diff_image(&baseline, &actual);
+        assert_eq!(diff.get_pixel(14, 1).0, ORANGE);
         assert_eq!(diff.get_pixel(15, 1).0, ORANGE);
 
         // Without a tolerance text is compared strictly.
@@ -625,6 +655,13 @@ mod tests {
         assert_eq!(worst.region, region(26, 26, 16, 16));
         assert_eq!((worst.pixels, worst.diff_pixels), (256, 1));
 
+        // Text without a differing pixel has no worst tile to point at.
+        let same = compare(&baseline, &baseline, &regions)
+            .analysis
+            .text
+            .unwrap();
+        assert_eq!((same.diff_pixels, same.worst_tile), (0, None));
+
         let all_masked = PixelRegions {
             masks: &text,
             ..regions
@@ -634,6 +671,49 @@ mod tests {
             .text
             .unwrap();
         assert_eq!((text.pixels, text.worst_tile), (0, None));
+    }
+
+    /// Regions of whole rows are marked as one block; empty regions (at the image's far edges
+    /// too) mark nothing and make no tile.
+    #[test]
+    fn test_whole_rows_and_empty_regions() {
+        let baseline = ImageBuffer::from_pixel(64, 64, WHITE);
+        let mut actual = baseline.clone();
+        actual.put_pixel(3, 40, BLACK);
+        let text = [
+            region(64, 64, 0, 0),
+            region(64, 0, 0, 64),
+            region(0, 64, 64, 0),
+            region(0, 32, 64, 16),
+        ];
+        let masks = [region(0, 0, 64, 8)];
+        let regions = PixelRegions {
+            masks: &masks,
+            text: &text,
+            text_tolerance: Some(TEXT),
+        };
+        let (classes, analysis) = classify(&baseline, &actual, &regions);
+        let class_at = |x: usize, y: usize| classes[y * 64 + x];
+        assert_eq!(
+            [
+                class_at(63, 7),
+                class_at(0, 8),
+                class_at(0, 47),
+                class_at(3, 40)
+            ],
+            [Class::Masked, Class::Strict, Class::Text, Class::TextDiff]
+        );
+        assert_eq!(
+            (analysis.checked_pixels, analysis.diff_pixels),
+            (64 * 40, 0)
+        );
+        let text = analysis.text.unwrap();
+        assert_eq!((text.pixels, text.diff_pixels), (64 * 16, 1));
+        let worst = text.worst_tile.unwrap();
+        assert_eq!(
+            (worst.region, worst.diff_pixels),
+            (region(0, 32, 16, 16), 1)
+        );
     }
 
     /// A cluster is judged the same wherever it falls in the text: tiles anchored to the region
