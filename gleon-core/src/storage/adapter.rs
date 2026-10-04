@@ -9,8 +9,8 @@ use std::{
 };
 
 use futures::StreamExt as _;
+use gleon_model::fs::Durability;
 use object_store::{ObjectStore, ObjectStoreExt, parse_url_opts, path::Path as ObjPath};
-use tempfile::NamedTempFile;
 use tracing::{debug, instrument, warn};
 
 use super::{BlobMetadata, StorageError, blob_key};
@@ -550,6 +550,15 @@ pub struct RemoteObject {
     pub version: Option<String>,
 }
 
+/// The version of a remote object (no contents), for a conditional put over it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectVersion {
+    /// `ETag` identifier from remote storage, if supported.
+    pub e_tag: Option<String>,
+    /// Version identifier from remote storage, if supported.
+    pub version: Option<String>,
+}
+
 impl ObjectStoreAdapter {
     /// Checks if a blob exists on remote storage without downloading it.
     ///
@@ -568,21 +577,30 @@ impl ObjectStoreAdapter {
         }
     }
 
-    /// Downloads a single blob from remote storage at `blob_key(hash)` to `dest_path` atomically.
+    /// Downloads a single blob from remote storage at `blob_key(hash)` to `dest_path` atomically
+    /// and durably ([`gleon_model::fs::write_atomically_with`]), streamed: a large blob never sits
+    /// in memory whole. The content is checked against its hash before it is kept, so a truncated
+    /// or wrong download never becomes a baseline; a blob of a scheme that cannot be checked
+    /// (only `sha256` can) is not downloaded.
     ///
     /// # Errors
-    /// Returns [`StorageError::BlobNotFound`] if the hash does not exist on remote storage,
-    /// or [`StorageError::Io`] / [`StorageError::PersistFailed`] if atomic write fails.
+    /// Returns [`StorageError::UnsupportedHashScheme`] for a hash that cannot be checked,
+    /// [`StorageError::BlobNotFound`] if the hash does not exist on remote storage,
+    /// [`StorageError::Store`] if the download fails, [`StorageError::HashMismatch`] if the
+    /// content is not the blob's, or [`StorageError::Io`] if writing it fails.
     #[instrument(skip(self, dest_path), level = "debug")]
     pub async fn download_blob(
         &self,
         hash: &crate::manifest::ImageHash,
         dest_path: &Path,
     ) -> Result<(), StorageError> {
+        if hash.scheme() != "sha256" {
+            return Err(StorageError::UnsupportedHashScheme(
+                hash.scheme().to_owned(),
+            ));
+        }
         let key = blob_key(hash);
-
-        let get_result = self.store.get(&key).await;
-        let get_output = match get_result {
+        let get_output = match self.store.get(&key).await {
             Ok(output) => output,
             Err(object_store::Error::NotFound { .. }) => {
                 return Err(StorageError::BlobNotFound(hash.value().to_string()));
@@ -590,36 +608,7 @@ impl ObjectStoreAdapter {
             Err(err) => return Err(StorageError::Store { source: err }),
         };
 
-        let bytes = get_output
-            .bytes()
-            .await
-            .map_err(|source| StorageError::Store { source })?;
-
-        let dest_path_buf = dest_path.to_path_buf();
-        tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
-            let parent_dir = dest_path_buf.parent().unwrap_or_else(|| Path::new("."));
-
-            std::fs::create_dir_all(parent_dir)?;
-
-            let mut temp_file = NamedTempFile::new_in(parent_dir)?;
-            temp_file.write_all(&bytes)?;
-            temp_file.as_file().sync_all()?;
-            temp_file
-                .persist(&dest_path_buf)
-                .map_err(|e| StorageError::PersistFailed {
-                    path: dest_path_buf.display().to_string(),
-                    source: e,
-                })?;
-
-            if let Ok(dir_file) = std::fs::File::open(parent_dir) {
-                let _ = dir_file.sync_all();
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| StorageError::Io {
-            source: std::io::Error::other(e),
-        })??;
+        write_verified(get_output.into_stream(), dest_path, hash.value()).await?;
 
         debug!(hash = %hash.value(), path = %dest_path.display(), "Successfully downloaded blob from remote storage");
         Ok(())
@@ -798,6 +787,26 @@ impl ObjectStoreAdapter {
         }
     }
 
+    /// The version of the object at `relative_path` without downloading it; `Ok(None)` if it
+    /// does not exist.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the check fails for reasons other than `NotFound`.
+    #[instrument(skip(self), level = "debug")]
+    pub async fn head_object(
+        &self,
+        relative_path: &str,
+    ) -> Result<Option<ObjectVersion>, StorageError> {
+        match self.store.head(&ObjPath::from(relative_path)).await {
+            Ok(meta) => Ok(Some(ObjectVersion {
+                e_tag: meta.e_tag,
+                version: meta.version,
+            })),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(source) => Err(StorageError::Store { source }),
+        }
+    }
+
     /// Uploads raw bytes to remote storage at `relative_path` with optional optimistic concurrency check.
     ///
     /// If `expected_e_tag` or `expected_version` is provided and the storage adapter supports conditional put,
@@ -902,6 +911,70 @@ impl ObjectStoreAdapter {
         self.put_object_conditional(relative_path, data, content_type, None, None, false)
             .await
     }
+}
+
+/// Streams `chunks` into `dest` atomically and durably, kept only if the stream ends and its
+/// content hashes to `expected` (sha256).
+async fn write_verified(
+    mut chunks: impl futures::Stream<Item = object_store::Result<bytes::Bytes>> + Unpin,
+    dest: &Path,
+    expected: &str,
+) -> Result<(), StorageError> {
+    use sha2::Digest as _;
+
+    // Chunks go to one blocking writer; `None` marks the end of the stream, and a channel closed
+    // without it (a failed stream, or this future dropped) aborts the write: nothing is left.
+    let (chunks_tx, mut chunks_rx) = tokio::sync::mpsc::channel::<Option<bytes::Bytes>>(8);
+    let (dest, expected) = (dest.to_path_buf(), expected.to_owned());
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut actual = None;
+        let written = gleon_model::fs::write_atomically_with(&dest, Durability::Durable, |file| {
+            let mut digest = sha2::Sha256::new();
+            while let Some(chunk) = chunks_rx.blocking_recv() {
+                let Some(chunk) = chunk else {
+                    let digest = hex::encode(digest.finalize());
+                    if digest.eq_ignore_ascii_case(&expected) {
+                        return Ok(());
+                    }
+                    actual = Some(digest);
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+                };
+                digest.update(&chunk);
+                file.write_all(&chunk)?;
+            }
+            Err(std::io::Error::other("download interrupted"))
+        });
+        (written, actual, expected)
+    });
+    let mut failed = None;
+    while let Some(chunk) = chunks.next().await {
+        match chunk {
+            Ok(chunk) => {
+                // A closed channel means the writer failed: its error is reported below.
+                if chunks_tx.send(Some(chunk)).await.is_err() {
+                    break;
+                }
+            }
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    if failed.is_none() {
+        let _ = chunks_tx.send(None).await;
+    }
+    drop(chunks_tx);
+    let (written, actual, expected) = writer.await.map_err(|e| StorageError::Io {
+        source: std::io::Error::other(e),
+    })?;
+    if let Some(source) = failed {
+        return Err(StorageError::Store { source });
+    }
+    if let Some(actual) = actual {
+        return Err(StorageError::HashMismatch { expected, actual });
+    }
+    Ok(written?)
 }
 
 #[cfg(all(test, not(miri)))]
@@ -1210,8 +1283,17 @@ mod tests {
             .await
             .unwrap();
 
-        let retrieved = adapter.get_object("history.json").await.unwrap();
-        assert_eq!(retrieved.map(|r| r.bytes), Some(content.clone()));
+        let retrieved = adapter.get_object("history.json").await.unwrap().unwrap();
+        assert_eq!(retrieved.bytes, content);
+        assert_eq!(
+            adapter.head_object("history.json").await.unwrap(),
+            Some(ObjectVersion {
+                e_tag: retrieved.e_tag,
+                version: retrieved.version,
+            }),
+            "the version without the contents"
+        );
+        assert_eq!(adapter.head_object("missing.json").await.unwrap(), None);
 
         // 3. Put object with empty/invalid content-type filters it out cleanly
         adapter
@@ -1338,5 +1420,75 @@ mod tests {
             )
             .await;
         assert!(matches!(res, Err(StorageError::Store { .. })));
+    }
+
+    /// Writes `chunks` to `dir/blob`, expecting the hash of the chunks that are not errors.
+    async fn write_chunks(
+        dir: &Path,
+        chunks: Vec<object_store::Result<bytes::Bytes>>,
+    ) -> Result<(), StorageError> {
+        use sha2::Digest as _;
+        let whole: Vec<u8> = chunks.iter().flatten().flat_map(|c| c.to_vec()).collect();
+        let expected = hex::encode(sha2::Sha256::digest(&whole));
+        write_verified(futures::stream::iter(chunks), &dir.join("blob"), &expected).await
+    }
+
+    fn files_in(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().count()
+    }
+
+    #[tokio::test]
+    async fn test_a_download_is_kept_only_when_its_stream_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk = |bytes: &'static [u8]| Ok(bytes::Bytes::from_static(bytes));
+        write_chunks(dir.path(), vec![chunk(b"a"), chunk(b"b")])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("blob")).unwrap(), b"ab");
+        std::fs::remove_file(dir.path().join("blob")).unwrap();
+
+        // A stream that fails after a chunk: its error, and nothing written.
+        let reset = object_store::Error::Generic {
+            store: "test",
+            source: "connection reset".into(),
+        };
+        let err = write_chunks(dir.path(), vec![chunk(b"a"), Err(reset), chunk(b"b")])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::Store { .. }), "{err:?}");
+        assert_eq!(files_in(dir.path()), 0, "no file, no temporary file");
+
+        // A writer that cannot write: its error, with the stream left unread.
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let many = (0..32).map(|_| chunk(b"x")).collect();
+        let err = write_chunks(&file, many).await.unwrap_err();
+        assert!(matches!(err, StorageError::Io { .. }), "{err:?}");
+    }
+
+    /// A download dropped halfway (e.g. a cancelled pull) never commits the chunks it got, even
+    /// when they hash as expected.
+    #[tokio::test]
+    async fn test_an_abandoned_download_writes_nothing() {
+        use sha2::Digest as _;
+        let dir = tempfile::tempdir().unwrap();
+        let first = futures::stream::iter([Ok(bytes::Bytes::from_static(b"a"))]);
+        let stalled = first.chain(futures::stream::pending());
+        let dest = dir.path().join("blob");
+        let expected = hex::encode(sha2::Sha256::digest(b"a"));
+        let write = write_verified(stalled, &dest, &expected);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), write)
+                .await
+                .is_err()
+        );
+        // The blocking writer finishes on its own once the channel closes.
+        for _ in 0..500 {
+            if files_in(dir.path()) == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(files_in(dir.path()), 0);
     }
 }

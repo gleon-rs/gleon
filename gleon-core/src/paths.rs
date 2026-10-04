@@ -70,24 +70,6 @@ impl GleonPaths {
         self.runs_root().join("latest")
     }
 
-    /// `.gleon/runs/latest/actual/`
-    #[must_use]
-    pub fn runs_actual(&self) -> PathBuf {
-        self.runs_latest().join("actual")
-    }
-
-    /// `.gleon/runs/latest/diffs/`
-    #[must_use]
-    pub fn runs_latest_diffs(&self) -> PathBuf {
-        self.runs_latest().join("diffs")
-    }
-
-    /// `.gleon/diffs/` (legacy top-level cache directory purged by `gleon clean`).
-    #[must_use]
-    pub fn diffs_dir(&self) -> PathBuf {
-        self.gleon_dir().join("diffs")
-    }
-
     /// `.gleon/gleon.yaml`
     #[must_use]
     pub fn config_file(&self) -> PathBuf {
@@ -104,12 +86,6 @@ impl GleonPaths {
     #[must_use]
     pub fn dashboard_file(&self) -> PathBuf {
         self.gleon_dir().join("dashboard.html")
-    }
-
-    /// `.gleon/runs/latest/gleon-report.json`
-    #[must_use]
-    pub fn report_file(&self) -> PathBuf {
-        self.runs_latest().join("gleon-report.json")
     }
 
     /// `.gleon/.gitignore`
@@ -176,15 +152,6 @@ mod tests {
             Path::new("/workspace/.gleon/blobs/sha256")
         );
         assert_eq!(
-            paths.runs_actual(),
-            Path::new("/workspace/.gleon/runs/latest/actual")
-        );
-        assert_eq!(
-            paths.runs_latest_diffs(),
-            Path::new("/workspace/.gleon/runs/latest/diffs")
-        );
-        assert_eq!(paths.diffs_dir(), Path::new("/workspace/.gleon/diffs"));
-        assert_eq!(
             paths.config_file(),
             Path::new("/workspace/.gleon/gleon.yaml")
         );
@@ -195,10 +162,6 @@ mod tests {
         assert_eq!(
             paths.dashboard_file(),
             Path::new("/workspace/.gleon/dashboard.html")
-        );
-        assert_eq!(
-            paths.report_file(),
-            Path::new("/workspace/.gleon/runs/latest/gleon-report.json")
         );
         assert_eq!(paths.gitignore(), Path::new("/workspace/.gleon/.gitignore"));
     }

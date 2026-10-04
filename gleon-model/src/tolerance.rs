@@ -166,21 +166,34 @@ impl Tolerance {
 /// more of a tile of text differs while a changed digit of the same width is about a quarter, so
 /// no share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking
 /// it: layout stays exact, text content is not compared. Lower values compare text, at the
-/// risk of failing on another OS's rendering.
+/// risk of failing on another OS's rendering. Against a golden of the platform it runs on, the
+/// default is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct TextTolerance(#[schemars(range(min = 0.0, max = 1.0))] pub f64);
 
 impl TextTolerance {
-    /// The tolerance of text an integration reports without one from its call or rule: text
-    /// never fails.
+    /// The tolerance of text an integration reports without one from its call or rule, against a
+    /// golden of another (or an unknown) platform: text never fails.
     pub const DEFAULT: Self = Self(1.0);
 
-    /// The tolerance a comparison uses: the integration call's, else the `.gleon/gleon.yaml`
-    /// rule's, else [`Self::DEFAULT`].
+    /// The default tolerance of text against a golden of the platform it is compared on: one OS draws
+    /// the same glyphs the same way give or take a pixel per tile across its versions (macOS 15
+    /// against goldens of macOS 26: 1 of 256), while a changed digit is about a quarter.
+    pub const OWN_PLATFORM: Self = Self(0.05);
+
+    /// The tolerance a comparison uses: the `explicit` one (the integration call's, else the
+    /// `.gleon/gleon.yaml` rule's), else the default of the golden: [`Self::OWN_PLATFORM`] for a
+    /// golden of the platform it is compared on (`is_own_platform`), [`Self::DEFAULT`] for any
+    /// other. An explicit value always applies, so `1` turns text comparison off on the golden's
+    /// platform too.
     #[must_use]
-    pub fn resolve(call: Option<Self>, rule: Option<Self>) -> Self {
-        call.or(rule).unwrap_or(Self::DEFAULT)
+    pub const fn resolve(explicit: Option<Self>, is_own_platform: bool) -> Self {
+        match explicit {
+            Some(explicit) => explicit,
+            None if is_own_platform => Self::OWN_PLATFORM,
+            None => Self::DEFAULT,
+        }
     }
 
     /// Checks the value range.
@@ -347,10 +360,20 @@ mod tests {
             serde_json::to_string(&TextTolerance(-0.0).without_negative_zero()).unwrap(),
             "0.0"
         );
-        let (call, rule) = (TextTolerance(0.1), TextTolerance(0.2));
-        assert_eq!(TextTolerance::resolve(Some(call), Some(rule)), call);
-        assert_eq!(TextTolerance::resolve(None, Some(rule)), rule);
-        assert_eq!(TextTolerance::resolve(None, None), TextTolerance::DEFAULT);
+        let explicit = TextTolerance(0.2);
+        for is_own in [false, true] {
+            assert_eq!(TextTolerance::resolve(Some(explicit), is_own), explicit);
+        }
+        assert_eq!(TextTolerance::resolve(None, false), TextTolerance::DEFAULT);
+        assert_eq!(
+            TextTolerance::resolve(None, true),
+            TextTolerance::OWN_PLATFORM
+        );
+        assert_eq!(
+            TextTolerance::resolve(Some(TextTolerance::DEFAULT), true),
+            TextTolerance::DEFAULT,
+            "an explicit 1 turns text off on the golden's platform too"
+        );
         let kept = Tolerance::Ssim {
             min_similarity: -0.5,
             color_tolerance: 3.0,

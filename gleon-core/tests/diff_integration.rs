@@ -119,12 +119,16 @@ fn test_diff_from_nested_subdirectory() {
     let nested_dir = root_dir.join("src").join("billing");
     fs::create_dir_all(&nested_dir).unwrap();
 
+    // A screenshot at the root, found from the nested directory (a new one: no baseline yet).
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/200x100.png");
+    fs::copy(fixture, root_dir.join("shot.png")).unwrap();
+
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &nested_dir).unwrap();
     assert_eq!(ctx.base_dir, root_dir);
 
     let report = run_diff(&ctx, &DiffOptions::default())
         .expect("run_diff should succeed when using ctx.base_dir");
-    assert_eq!(report.failed_tests, 0);
+    assert_eq!(report.total_tests, 1);
 }
 
 #[test]
@@ -508,7 +512,7 @@ fn test_diff_fallback_platform_integration() {
     let ctx_macos = ResolvedContext::resolve(&options_macos, base_path, &EmptyEnv).unwrap();
     assert_eq!(
         ctx_macos.fallback_platform_key.as_deref(),
-        Some("7:windows-6:x86_64")
+        Some("windows-x86_64")
     );
 
     let diff_res = run_diff(&ctx_macos, &DiffOptions::default()).unwrap();

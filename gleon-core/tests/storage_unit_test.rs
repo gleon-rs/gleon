@@ -40,11 +40,7 @@ async fn test_memory_store_blob_and_manifest_lifecycle() {
     let src_file = dir.path().join("sample_blob.png");
     std::fs::write(&src_file, b"png_file_bytes").expect("write src file");
 
-    let blob_hash = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    )
-    .unwrap();
+    let blob_hash = sha256_of(b"png_file_bytes");
 
     // 1. Upload Blob
     adapter
@@ -94,6 +90,75 @@ async fn test_memory_store_blob_and_manifest_lifecycle() {
     let missing_local = dir.path().join("non_existent_file.png");
     let upload_err = adapter.upload_blob(&blob_hash, &missing_local).await;
     assert!(matches!(upload_err, Err(StorageError::Io { .. })));
+}
+
+/// The content-addressed hash of `bytes`.
+fn sha256_of(bytes: &[u8]) -> gleon_core::manifest::ImageHash {
+    use sha2::Digest as _;
+    gleon_core::manifest::ImageHash::new("sha256", hex::encode(sha2::Sha256::digest(bytes)))
+        .unwrap()
+}
+
+/// A blob whose content is not what its hash names (truncated, or replaced by a proxy) is never
+/// kept: no file, no temporary file.
+#[tokio::test]
+async fn test_download_rejects_content_that_does_not_match_its_hash() {
+    let adapter = ObjectStoreAdapter::from_config(&StorageConfig::new("memory://")).unwrap();
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.png");
+    std::fs::write(&src, b"truncated").unwrap();
+    let claimed = sha256_of(b"the whole blob");
+    adapter.upload_blob(&claimed, &src).await.unwrap();
+
+    let blobs = dir.path().join("blobs/sha256");
+    let dest = blobs.join(claimed.value());
+    let err = adapter.download_blob(&claimed, &dest).await.unwrap_err();
+    assert!(
+        matches!(&err, StorageError::HashMismatch { expected, actual }
+            if expected == claimed.value() && *actual == sha256_of(b"truncated").value()),
+        "{err:?}"
+    );
+    assert!(!dest.exists());
+    assert_eq!(
+        std::fs::read_dir(&blobs).unwrap().count(),
+        0,
+        "no temporary file left"
+    );
+}
+
+/// A blob whose hash cannot be checked is not downloaded at all.
+#[tokio::test]
+async fn test_download_refuses_hash_schemes_it_cannot_check() {
+    let adapter = ObjectStoreAdapter::from_config(&StorageConfig::new("memory://")).unwrap();
+    let dir = tempdir().unwrap();
+    let hash = gleon_core::manifest::ImageHash::new("blake3", "a".repeat(64)).unwrap();
+    let dest = dir.path().join("blob");
+    let err = adapter.download_blob(&hash, &dest).await.unwrap_err();
+    assert!(
+        matches!(&err, StorageError::UnsupportedHashScheme(scheme) if scheme == "blake3"),
+        "{err:?}"
+    );
+    assert!(!dest.exists());
+}
+
+/// Downloaded blobs get the same permissions as staged ones (written by `gleon_model::fs`).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_downloaded_blobs_are_world_readable() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let adapter = ObjectStoreAdapter::from_config(&StorageConfig::new("memory://")).unwrap();
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.png");
+    std::fs::write(&src, b"blob").unwrap();
+    let hash = sha256_of(b"blob");
+    adapter.upload_blob(&hash, &src).await.unwrap();
+    let dest = dir.path().join("blob");
+    adapter.download_blob(&hash, &dest).await.unwrap();
+    assert_eq!(
+        std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
 }
 
 #[test]

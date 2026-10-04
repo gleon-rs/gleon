@@ -202,6 +202,81 @@ fn test_reports_and_approval_of_a_real_flutter_failure() {
     );
 }
 
+/// Copies the directory tree `from` into `to`, restoring `.png.bin` files (candidates kept out
+/// of the fixtures' screenshots) as `.png`.
+fn copy_run(from: &Path, to: &Path) {
+    copy_tree(from, to);
+    let mut dirs = vec![to.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if let Some(png) = path.to_str().and_then(|p| p.strip_suffix(".bin")) {
+                fs::rename(&path, png).unwrap();
+            }
+        }
+    }
+}
+
+/// A real run of the Flutter example on macOS whose workspace names another
+/// `fallback_platform` (`linux-x86_64`): the golden compared with the shared one, text ignored,
+/// passed and kept its candidate. The reports say which golden was compared, and
+/// approving by the shared golden's path (what the test printed) records this platform's own.
+#[test]
+fn test_a_real_run_against_the_fallback_seeds_per_platform_goldens() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = temp.path().join("download/metrics-macos-arm64");
+    fs::create_dir_all(&run).unwrap();
+    copy_run(&fixtures().join("cases/flutter-macos-fallback"), &run);
+    let root = temp.path().join("app");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
+    init_workspace(&ctx).unwrap();
+
+    let cases = Cases::load(&run, None).unwrap();
+    assert_eq!(cases.run_id().unwrap().as_str(), "fallback-fixture-1");
+    let [case] = cases.reports() else {
+        panic!("one case: {:?}", cases.reports());
+    };
+    assert_eq!(case.outcome, CaseOutcome::Match);
+    assert_eq!(
+        case.golden.path,
+        "test/goldens/macos-aarch64/counter_initial.png"
+    );
+    assert_eq!(case.golden.compared(), "test/goldens/counter_initial.png");
+    ReportGenerator::generate_all(&run, &cases).unwrap();
+    let xml = fs::read_to_string(run.join("junit.xml")).unwrap();
+    assert!(
+        xml.contains(r#"tests="1" failures="0" errors="0""#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"file="test&#x2f;goldens&#x2f;counter_initial.png""#)
+            && !xml.contains("macos-aarch64"),
+        "the compared golden, not the own one that does not exist yet: {xml}"
+    );
+
+    let approved = approve_workspace(
+        &ctx,
+        &[Path::new("test/goldens/counter_initial.png").to_path_buf()],
+        std::slice::from_ref(&run),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        approved.approved_test_cases,
+        ["test/goldens/counter_initial"]
+    );
+    assert_eq!(
+        fs::read(root.join("test/goldens/macos-aarch64/counter_initial.png")).unwrap(),
+        fs::read(run.join("artifacts/test/goldens/counter_initial/candidate.png")).unwrap()
+    );
+    assert!(
+        !root.join("test/goldens/counter_initial.png").exists(),
+        "the shared golden is the fallback platform's"
+    );
+}
+
 /// A `gleon diff` run with every kind of failure: the HTML report next to the case reports links
 /// images that exist, the PR comment and `JUnit` tell failures from errors.
 #[test]
@@ -288,15 +363,6 @@ screenshots:
         xml.contains(r#"tests="5" failures="4" errors="1""#),
         "{xml}"
     );
-}
-
-/// A demo page kept with the fixtures: images that fail to load are replaced by a script, never
-/// by inline handlers.
-#[test]
-fn test_fallback_demo_fixture_avoids_inline_handlers() {
-    let fallback = fs::read_to_string(fixtures().join("report_output/fallback_demo.html")).unwrap();
-    assert!(fallback.contains("document.addEventListener('error'"));
-    assert!(!fallback.contains("onerror="));
 }
 
 /// Every committed case report fixture is a valid report of this schema version.

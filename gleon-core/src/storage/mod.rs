@@ -1,7 +1,7 @@
 pub mod adapter;
 
 pub use adapter::{
-    DeleteSummary, ObjectStoreAdapter, RemoteBlobEntry, RemoteObject, StorageConfig,
+    DeleteSummary, ObjectStoreAdapter, ObjectVersion, RemoteBlobEntry, RemoteObject, StorageConfig,
 };
 use object_store::path::Path as ObjPath;
 
@@ -86,14 +86,18 @@ pub enum StorageError {
     #[error("Object or blob not found on remote storage: {0}")]
     BlobNotFound(String),
 
-    /// Persist operation failed during atomic download.
-    #[error("Atomic persist failed for target path '{path}': {source}")]
-    PersistFailed {
-        /// Target file path.
-        path: String,
-        /// Inner tempfile persist error.
-        #[source]
-        source: tempfile::PersistError,
+    /// A blob's hash scheme cannot be checked on download (only `sha256` can), so it is not
+    /// downloaded: an unchecked blob could silently become a baseline.
+    #[error("cannot check blobs of hash scheme '{0}' on download (only sha256)")]
+    UnsupportedHashScheme(String),
+
+    /// A downloaded blob is not the content its hash names (truncated or replaced on the way).
+    #[error("downloaded blob does not match its hash: expected {expected}, got {actual}")]
+    HashMismatch {
+        /// The blob's hash value.
+        expected: String,
+        /// The hash of the downloaded content.
+        actual: String,
     },
 }
 
@@ -110,20 +114,6 @@ pub fn local_blob_path(
     hash: &crate::manifest::ImageHash,
 ) -> std::path::PathBuf {
     blobs_root.join(hash.scheme()).join(hash.value())
-}
-
-/// Recovers the [`crate::manifest::ImageHash`] a local blob path was built from by
-/// [`local_blob_path`], i.e. the trailing `<scheme>/<value>` pair.
-///
-/// Returns `None` if `path` doesn't have that shape or the pair fails hash validation, so a
-/// caller can't accidentally treat an arbitrary local file as a content-addressed blob.
-#[must_use]
-pub fn image_hash_from_local_blob_path(
-    path: &std::path::Path,
-) -> Option<crate::manifest::ImageHash> {
-    let value = path.file_name()?.to_str()?;
-    let scheme = path.parent()?.file_name()?.to_str()?;
-    crate::manifest::ImageHash::new(scheme, value).ok()
 }
 
 /// Returns `true` if `hash`'s blob exists under `blobs_root` and is usable.
@@ -161,36 +151,6 @@ mod tests {
 
     fn sha256(value: &str) -> ImageHash {
         ImageHash::new("sha256", value).unwrap()
-    }
-
-    #[test]
-    fn test_image_hash_from_local_blob_path_round_trips_local_blob_path() {
-        let root = std::path::Path::new("/workspace/.gleon/blobs");
-        let hash = sha256(&"a".repeat(64));
-        let path = local_blob_path(root, &hash);
-
-        assert_eq!(image_hash_from_local_blob_path(&path), Some(hash));
-    }
-
-    #[test]
-    fn test_image_hash_from_local_blob_path_rejects_malformed_input() {
-        // Empty path: no file name, no parent.
-        assert_eq!(
-            image_hash_from_local_blob_path(std::path::Path::new("")),
-            None
-        );
-
-        // A bare file name has no `<scheme>/` parent segment to read.
-        assert_eq!(
-            image_hash_from_local_blob_path(std::path::Path::new("foo.png")),
-            None
-        );
-
-        // Right shape, but the "hash" fails `ImageHash` validation (wrong length/charset).
-        assert_eq!(
-            image_hash_from_local_blob_path(std::path::Path::new("sha256/not-a-real-hash")),
-            None
-        );
     }
 
     #[test]

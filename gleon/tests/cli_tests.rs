@@ -232,12 +232,13 @@ fn test_stage_command() -> Result<(), Box<dyn std::error::Error>> {
 fn test_diff_command() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
     let mut cmd = gleon();
+    // A run that compares nothing is no pass.
     cmd.current_dir(dir.path())
         .arg("diff")
         .assert()
-        .success()
+        .failure()
         .stderr(predicates::str::contains(
-            "Ran 0 test(s). Passed: 0, Failed: 0.",
+            "no screenshots match the `screenshots` rules",
         ));
     Ok(())
 }
@@ -626,10 +627,11 @@ fn test_pull_and_push_no_storage_configured() -> Result<(), Box<dyn std::error::
         .arg("diff")
         .arg("--auto-pull")
         .assert()
-        .success()
+        .failure()
         .stderr(predicates::str::contains(
-            "Ran 0 test(s). Passed: 0, Failed: 0.",
-        ));
+            "Operating in local mode. Cloud sync disabled. Please configure storage.",
+        ))
+        .stderr(predicates::str::contains("no screenshots match"));
 
     Ok(())
 }
@@ -808,7 +810,7 @@ fn test_dotenv_loading_integration() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = gleon();
     cmd.current_dir(dir.path())
         .arg("--verbose")
-        .arg("diff")
+        .arg("status")
         .assert()
         .success()
         .stderr(predicates::str::contains(
@@ -1389,10 +1391,12 @@ fn test_diff_auto_pull_runs_pull_first() {
         .args(["diff", "--auto-pull"])
         .assert();
 
-    // No storage configured -> pull reports local mode, then the diff itself proceeds.
+    // No storage configured -> pull reports local mode, then the diff itself runs (and finds
+    // no screenshots in the empty workspace).
     assert
-        .success()
-        .stderr(predicate::str::contains("Running blob pull..."));
+        .failure()
+        .stderr(predicate::str::contains("Running blob pull..."))
+        .stderr(predicate::str::contains("no screenshots match"));
 }
 
 /// The whole loop a developer runs, through the binary: a test run fails, its reports show the

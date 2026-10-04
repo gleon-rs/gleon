@@ -45,7 +45,7 @@ fn html_failure_dto<'a>(
     let diff_path = image(artifacts.and_then(|a| a.diff.as_ref()));
     HtmlFailureDto {
         name: &report.name,
-        image: &report.golden.path,
+        image: report.golden.compared(),
         outcome: report.outcome.as_str(),
         error_kind: report.error_kind.map(CaseErrorKind::as_str),
         error: CaseSummary(report).to_string(),

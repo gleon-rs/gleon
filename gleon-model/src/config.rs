@@ -155,6 +155,14 @@ pub struct GleonConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformConfig>,
     /// Optional fallback platform identifier used when current platform baselines are missing.
+    ///
+    /// For integrations that commit goldens as image files (the Flutter package) it is the
+    /// platform of the shared goldens (`<dir>/<file>`); only its OS and architecture count, under
+    /// the names a process reports (`macos-aarch64`, not `macos-arm64`: others are an error for
+    /// integrations). On it text is compared by default; any other platform keeps its own goldens
+    /// in `<dir>/<os>-<arch>/<file>` and, until it has one, compares the shared golden with text
+    /// ignored by default (see `text_tolerance`). Without it every platform compares the shared
+    /// goldens that way. `platform` and the `GLEON_*PLATFORM` variables are read by the CLI only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_platform: Option<PlatformConfig>,
     /// List of screenshot match rules.
@@ -435,8 +443,10 @@ pub struct ScreenshotRule {
     #[serde(default)]
     pub masks: Vec<MaskRule>,
     /// How much text may differ, in `pixel` mode: the largest share of differing pixels in any
-    /// tile of the text an integration reports, `[0, 1]`; unset, text never fails
-    /// ([`crate::tolerance::TextTolerance::DEFAULT`]).
+    /// tile of the text an integration reports, `[0, 1]`. Unset, it depends on the golden
+    /// ([`crate::tolerance::TextTolerance::resolve`]): 0.05 against a golden of the platform the
+    /// test runs on (see `fallback_platform`), else 1, so text never fails. A value set here
+    /// applies to every golden of the rule: 1 turns text comparison off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_tolerance: Option<crate::tolerance::TextTolerance>,
 }

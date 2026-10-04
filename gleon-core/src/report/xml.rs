@@ -26,7 +26,7 @@ impl<'a> XmlCase<'a> {
         };
         Self {
             name: &report.name,
-            image: &report.golden.path,
+            image: report.golden.compared(),
             status,
             message: report
                 .outcome

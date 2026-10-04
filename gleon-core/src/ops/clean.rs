@@ -1,8 +1,10 @@
 //! Workspace cleanup operation.
 //!
-//! Removes local screenshot PNG files matching rules in `gleon.yaml`,
-//! untracks them from the Git index (using `gix`), appends wildcard entries to
-//! `.gitignore`, and purges temporary `.gleon/runs/` and `.gleon/diffs/` directories.
+//! Purges the temporary `.gleon/runs/` directory and, only when asked
+//! ([`CleanOptions::screenshots`]), removes the screenshot PNG files matching rules in
+//! `gleon.yaml`, untracks them from the Git index (using `gix`) and appends wildcard entries to
+//! `.gitignore`. Screenshots are never touched by default: in an integration's workspace (the
+//! Flutter package) the rules match its committed goldens.
 
 use std::path::PathBuf;
 
@@ -22,12 +24,20 @@ pub enum CleanError {
 
 /// Options controlling the clean workspace operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent flags of `gleon clean`, not a state machine"
+)]
 pub struct CleanOptions {
     /// If true, only simulate the cleanup without modifying disk or Git index.
     pub dry_run: bool,
+    /// If true, also delete the screenshots the rules match, untrack them from Git and add the
+    /// rules to `.gitignore` (workspaces whose baselines live in manifests). Off by default: an
+    /// integration's rules match its committed goldens.
+    pub screenshots: bool,
     /// If true, do not update .gitignore.
     pub skip_gitignore: bool,
-    /// If true, do not delete .gleon/runs and .gleon/diffs directories.
+    /// If true, do not delete the .gleon/runs directory.
     pub keep_runs: bool,
 }
 
@@ -40,32 +50,61 @@ pub struct CleanResult {
     pub untracked_files: Vec<PathBuf>,
     /// List of entries added to .gitignore (or to be added in dry run).
     pub gitignore_entries_added: Vec<String>,
-    /// Whether runs/diffs cache was cleaned.
+    /// Whether the runs cache was cleaned.
     pub cache_cleaned: bool,
 }
 
-/// Cleans screenshot files, untracks them from Git index, updates .gitignore, and cleans runs cache.
+/// Purges the `.gleon/runs` cache and, with [`CleanOptions::screenshots`], cleans the
+/// screenshot files: deletes them, untracks them from the Git index and updates `.gitignore`.
 ///
 /// # Errors
 ///
 /// Returns an error if the workspace configuration cannot be scanned, if the `.gitignore` file
 /// exists but cannot be read (other than being missing) or cannot be written atomically, or if
-/// the `.gleon/runs`/`.gleon/diffs` cache directories exist but fail to be removed for a reason
-/// other than already being absent.
-// Genuinely long from four sequential, independent steps (delete+prune, git untrack,
-// .gitignore update, cache cleanup), not from duplicated logic — see ops/common.rs for the
-// helpers that already factor out what *is* shared with other operations.
-#[expect(
-    clippy::too_many_lines,
-    reason = "long by design; see the comment above"
-)]
+/// the `.gleon/runs` cache directory exists but fails to be removed for a reason other than
+/// already being absent.
 pub fn clean_workspace(
     context: &ResolvedContext,
     options: &CleanOptions,
 ) -> Result<CleanResult, CleanError> {
     let base_path = context.base_dir.as_path();
     let mut result = CleanResult::default();
+    if options.screenshots {
+        clean_screenshots(context, options, &mut result)?;
+    }
 
+    // The cache directory (.gleon/runs).
+    if !options.keep_runs {
+        let runs_dir = crate::paths::GleonPaths::new(base_path).runs_root();
+        if !options.dry_run {
+            match std::fs::remove_dir_all(&runs_dir) {
+                Ok(()) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(CoreError::Io(e).into()),
+            }
+        }
+        result.cache_cleaned = true;
+        tracing::debug!("Cleaned the .gleon/runs cache directory");
+    }
+
+    Ok(result)
+}
+
+/// Deletes the screenshots the rules match (pruning emptied directories), untracks them from the
+/// Git index and adds the rules to `.gitignore`.
+// Genuinely long from three sequential, independent steps (delete+prune, git untrack,
+// .gitignore update), not from duplicated logic — see ops/common.rs for the helpers that already
+// factor out what *is* shared with other operations.
+#[expect(
+    clippy::too_many_lines,
+    reason = "long by design; see the comment above"
+)]
+fn clean_screenshots(
+    context: &ResolvedContext,
+    options: &CleanOptions,
+    result: &mut CleanResult,
+) -> Result<(), CleanError> {
+    let base_path = context.base_dir.as_path();
     let config = context.config.clone().unwrap_or_default();
 
     // 1. Scan for all screenshots matched by rules in gleon.yaml
@@ -208,29 +247,7 @@ pub fn clean_workspace(
         }
     }
 
-    // 5. Clean cache directories (.gleon/runs and .gleon/diffs)
-    if !options.keep_runs {
-        let paths = crate::paths::GleonPaths::new(base_path);
-        let runs_dir = paths.runs_root();
-        let diffs_dir = paths.diffs_dir();
-
-        if !options.dry_run {
-            match std::fs::remove_dir_all(&runs_dir) {
-                Ok(()) => {}
-                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(CoreError::Io(e).into()),
-            }
-            match std::fs::remove_dir_all(&diffs_dir) {
-                Ok(()) => {}
-                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(CoreError::Io(e).into()),
-            }
-        }
-        result.cache_cleaned = true;
-        tracing::debug!("Cleaned .gleon/runs and .gleon/diffs cache directories");
-    }
-
-    Ok(result)
+    Ok(())
 }
 
 #[cfg(all(test, not(miri)))]
@@ -259,7 +276,6 @@ mod tests {
         let gleon_dir = base_path.join(".gleon");
         std::fs::create_dir_all(&gleon_dir).unwrap();
         std::fs::create_dir_all(gleon_dir.join("runs")).unwrap();
-        std::fs::create_dir_all(gleon_dir.join("diffs")).unwrap();
 
         let config_yaml = r#"
 required_version: ">=0.1.0"
@@ -282,6 +298,7 @@ screenshots:
 
         // 2. Test dry-run
         let dry_opts = CleanOptions {
+            screenshots: true,
             dry_run: true,
             skip_gitignore: false,
             keep_runs: false,
@@ -295,13 +312,15 @@ screenshots:
         assert!(golden_file.exists()); // File still exists after dry run
 
         // 3. Test actual execution
-        let exec_opts = CleanOptions::default();
+        let exec_opts = CleanOptions {
+            screenshots: true,
+            ..CleanOptions::default()
+        };
         let exec_res = clean_workspace(&ctx, &exec_opts).unwrap();
         assert_eq!(exec_res.deleted_files.len(), 1);
         assert!(!golden_file.exists()); // File removed
         assert!(!golden_dir.exists()); // Empty parent dir pruned
         assert!(!gleon_dir.join("runs").exists()); // Runs dir removed
-        assert!(!gleon_dir.join("diffs").exists()); // Diffs dir removed
 
         // 4. Verify .gitignore content
         let gitignore = std::fs::read_to_string(base_path.join(".gitignore")).unwrap();
@@ -337,6 +356,7 @@ screenshots:
                 .unwrap();
 
         let opts = CleanOptions {
+            screenshots: true,
             dry_run: false,
             skip_gitignore: true,
             keep_runs: true,
@@ -377,7 +397,10 @@ screenshots:
             ResolvedContext::from_options(&crate::context::ContextOptions::default(), base_path)
                 .unwrap();
 
-        let opts = CleanOptions::default();
+        let opts = CleanOptions {
+            screenshots: true,
+            ..CleanOptions::default()
+        };
         let res = clean_workspace(&ctx, &opts).unwrap();
         assert_eq!(res.deleted_files.len(), 1);
 
@@ -414,7 +437,10 @@ screenshots:
             ResolvedContext::from_options(&crate::context::ContextOptions::default(), base_path)
                 .unwrap();
 
-        let opts = CleanOptions::default();
+        let opts = CleanOptions {
+            screenshots: true,
+            ..CleanOptions::default()
+        };
         let err = clean_workspace(&ctx, &opts).unwrap_err();
         assert!(matches!(err, CleanError::Core(CoreError::Io(_))));
     }
@@ -474,7 +500,10 @@ screenshots:
             ResolvedContext::from_options(&crate::context::ContextOptions::default(), base_path)
                 .unwrap();
 
-        let opts = CleanOptions::default();
+        let opts = CleanOptions {
+            screenshots: true,
+            ..CleanOptions::default()
+        };
         let res = clean_workspace(&ctx, &opts).unwrap();
         assert_eq!(res.deleted_files.len(), 1);
 
@@ -520,7 +549,10 @@ screenshots:
             ResolvedContext::from_options(&crate::context::ContextOptions::default(), base_path)
                 .unwrap();
 
-        let opts = CleanOptions::default();
+        let opts = CleanOptions {
+            screenshots: true,
+            ..CleanOptions::default()
+        };
         let res = clean_workspace(&ctx, &opts);
 
         // Restore permissions before assertions
@@ -562,6 +594,7 @@ screenshots:
                 .unwrap();
 
         let opts = CleanOptions {
+            screenshots: true,
             dry_run: false,
             skip_gitignore: false,
             keep_runs: true,
@@ -614,64 +647,14 @@ screenshots:
             ResolvedContext::from_options(&crate::context::ContextOptions::default(), base_path)
                 .unwrap();
 
-        let opts = CleanOptions::default();
+        let opts = CleanOptions {
+            screenshots: true,
+            ..CleanOptions::default()
+        };
         let res = clean_workspace(&ctx, &opts);
 
         // Restore permissions before assertions
         std::fs::set_permissions(&runs_dir, orig_perms).unwrap();
-
-        assert!(res.is_err());
-        assert!(matches!(
-            res.unwrap_err(),
-            CleanError::Core(CoreError::Io(_))
-        ));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_clean_workspace_diffs_dir_removal_failure() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempdir().unwrap();
-        let base_path = temp.path();
-
-        let gleon_dir = base_path.join(".gleon");
-        std::fs::create_dir_all(&gleon_dir).unwrap();
-
-        let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "*.png"
-    mode: pixel
-"#;
-        std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
-
-        let diffs_dir = gleon_dir.join("diffs");
-        std::fs::create_dir_all(&diffs_dir).unwrap();
-        let inner_file = diffs_dir.join("diff.png");
-        std::fs::write(&inner_file, b"content").unwrap();
-
-        // Make diffs_dir read-only so remove_dir_all fails
-        let orig_perms = std::fs::metadata(&diffs_dir).unwrap().permissions();
-        let mut read_only = orig_perms.clone();
-        read_only.set_mode(0o555);
-        std::fs::set_permissions(&diffs_dir, read_only).unwrap();
-
-        let probe = diffs_dir.join(".probe");
-        if std::fs::write(&probe, b"").is_ok() {
-            let _ = std::fs::remove_file(&probe);
-            std::fs::set_permissions(&diffs_dir, orig_perms).unwrap();
-            return;
-        }
-
-        let ctx =
-            ResolvedContext::from_options(&crate::context::ContextOptions::default(), base_path)
-                .unwrap();
-
-        let opts = CleanOptions::default();
-        let res = clean_workspace(&ctx, &opts);
-
-        // Restore permissions before assertions
-        std::fs::set_permissions(&diffs_dir, orig_perms).unwrap();
 
         assert!(res.is_err());
         assert!(matches!(
@@ -734,6 +717,7 @@ screenshots:
                 .unwrap();
 
         let opts = CleanOptions {
+            screenshots: true,
             dry_run: false,
             skip_gitignore: true,
             keep_runs: true,

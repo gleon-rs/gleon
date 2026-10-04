@@ -19,7 +19,6 @@ use crate::{
     context::{ContextError, ResolvedContext},
     manifest::{ImageHash, WorkspaceIndex},
     ops::common::CoreError,
-    platform::validate_segment,
     storage::StorageConfig,
 };
 
@@ -54,9 +53,7 @@ pub fn list_platform_dirs(manifests_root: &Path) -> Result<Vec<(String, PathBuf)
             .filter(|_| is_dir)
             .filter(|n| !n.starts_with('.'))
             .and_then(|n| {
-                if n.chars().all(|c| {
-                    c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':'
-                }) {
+                if n.chars().all(gleon_model::platform::is_key_char) {
                     Some(n.to_string())
                 } else {
                     None
@@ -80,7 +77,8 @@ pub fn list_platform_dirs(manifests_root: &Path) -> Result<Vec<(String, PathBuf)
 ///
 /// # Errors
 /// Returns [`CoreError::Io`] if `manifests_root` fails to read, or [`CoreError::Context`] if
-/// `platform_override` or the context's platform identity fails segment validation.
+/// `platform_override` is no platform key or the context's platform identity fails segment
+/// validation.
 pub fn resolve_platform_dirs(
     context: &ResolvedContext,
     manifests_root: &Path,
@@ -90,7 +88,7 @@ pub fn resolve_platform_dirs(
     if all_platforms {
         list_platform_dirs(manifests_root).map_err(CoreError::Io)
     } else if let Some(p) = platform_override {
-        let valid_key = validate_segment(p)
+        let valid_key = gleon_model::platform::validate_key(p)
             .map_err(|e| CoreError::Context(ContextError::Platform(e)))?
             .into_owned();
         Ok(vec![(valid_key.clone(), manifests_root.join(valid_key))])
@@ -243,12 +241,15 @@ mod tests {
         let temp = tempdir().unwrap();
         let manifests = temp.path().join("manifests");
         std::fs::create_dir_all(manifests.join("valid-platform")).unwrap();
+        // Keys with a renderer and labels (`PlatformInfo::to_key`).
+        std::fs::create_dir_all(manifests.join("linux-x86_64+chrome+theme=dark")).unwrap();
         std::fs::create_dir_all(manifests.join("invalid platform space")).unwrap();
+        std::fs::create_dir_all(manifests.join("5:linux-6:x86_64")).unwrap();
         std::fs::write(manifests.join("some_file.txt"), "hello").unwrap();
 
         let res = list_platform_dirs(&manifests).unwrap();
-        assert_eq!(res.len(), 1);
-        assert_eq!(res[0].0, "valid-platform");
+        let names: Vec<_> = res.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["linux-x86_64+chrome+theme=dark", "valid-platform"]);
     }
 
     #[test]
@@ -295,10 +296,7 @@ mod tests {
         ctx.platform.os = "linux".to_string();
 
         let res = resolve_platform_dirs(&ctx, &manifests, false, None).unwrap();
-        assert_eq!(
-            res,
-            vec![("5:linux".to_string(), manifests.join("5:linux"))]
-        );
+        assert_eq!(res, vec![("linux".to_string(), manifests.join("linux"))]);
     }
 
     #[test]

@@ -25,6 +25,10 @@ pub enum PlatformError {
     /// A `GLEON_PLATFORM`-style key-value string could not be parsed.
     #[error("Failed to parse platform string: {0}")]
     ParseError(String),
+    /// An integration's `fallback_platform` names no platform a process could run on, so it
+    /// would never match one (an OS or architecture under another name, or no OS).
+    #[error("{0}")]
+    UnknownHost(String),
     /// A label key collided with a reserved key (e.g. `os`, `arch`).
     #[error("Label key '{0}' is reserved — use --{1} flag instead")]
     ReservedLabelKey(String, String),
@@ -83,6 +87,40 @@ impl PlatformConfig {
             renderer: None,
             labels: None,
         })
+    }
+
+    /// The directory of the running process's own goldens next to the shared ones, `<os>-<arch>`
+    /// (`macos-aarch64`, `linux-x86_64`, `windows-x86_64`): valid on every file system.
+    #[must_use]
+    pub fn host_dir() -> String {
+        format!("{HOST_OS}-{HOST_ARCH}")
+    }
+
+    /// Whether this platform (the `fallback_platform` of an integration's workspace) is the
+    /// running process's: the same OS, and the same architecture if it names one. Renderer and
+    /// labels are not compared; an opaque value is read like `os-arch`.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError`] if the value names no OS, or an OS or architecture under a name
+    /// no process reports ([`KNOWN_OS`], [`KNOWN_ARCH`]; e.g. `macos-arm64` for
+    /// `macos-aarch64`): such a value would silently never match.
+    pub fn matches_host(&self) -> Result<bool, PlatformError> {
+        self.matches(HOST_OS, HOST_ARCH)
+    }
+
+    fn matches(&self, os: &str, arch: &str) -> Result<bool, PlatformError> {
+        let matches = |fields: &PlatformFields| -> Result<bool, PlatformError> {
+            let own_os = known_name(fields.os.as_deref(), "OS", KNOWN_OS)?
+                .ok_or_else(|| PlatformError::UnknownHost("an OS is required".to_owned()))?;
+            let own_arch = known_name(fields.arch.as_deref(), "architecture", KNOWN_ARCH)?;
+            Ok(own_os == os && own_arch.is_none_or(|own| own == arch))
+        };
+        match self {
+            Self::Opaque(key) => {
+                matches(&PlatformFields::parse_key_value(key).map_err(PlatformError::ParseError)?)
+            }
+            Self::Structured(fields) => matches(fields),
+        }
     }
 
     /// Resolves this configuration to a platform key string.
@@ -240,6 +278,72 @@ impl PlatformFields {
     }
 }
 
+/// The OS names a process reports (`std::env::consts::OS`) on the platforms integrations run
+/// their tests on.
+pub const KNOWN_OS: &[&str] = &["linux", "macos", "windows", "android", "ios", "fuchsia"];
+
+/// The architecture names a process reports (`std::env::consts::ARCH`) on those platforms.
+pub const KNOWN_ARCH: &[&str] = &["x86_64", "aarch64", "x86", "arm"];
+
+/// `name` normalized ([`validate_segment`]) if it is one of `known`, `None` if absent.
+fn known_name<'a>(
+    name: Option<&'a str>,
+    what: &str,
+    known: &[&str],
+) -> Result<Option<std::borrow::Cow<'a, str>>, PlatformError> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let clean = validate_segment(name)?;
+    if known.contains(&clean.as_ref()) {
+        Ok(Some(clean))
+    } else {
+        Err(PlatformError::UnknownHost(format!(
+            "{what} '{name}' is not a name a process reports; use one of {}",
+            known.join(", ")
+        )))
+    }
+}
+
+/// Whether `c` may appear in a platform key ([`PlatformInfo::to_key`]): a segment character
+/// (`[a-z0-9_.-]`) or one of its separators `+` and `=`.
+#[must_use]
+pub const fn is_key_char(c: char) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-' | '+' | '=')
+}
+
+/// Validates a platform key given by a user (a `--platform` filter): trimmed, lowercased, and
+/// made of [`is_key_char`] characters only.
+///
+/// # Errors
+/// Returns `PlatformError::InvalidSegment` if the key is empty, `.` or `..`, or contains other
+/// characters.
+pub fn validate_key(s: &str) -> Result<std::borrow::Cow<'_, str>, PlatformError> {
+    let trimmed = s.trim();
+    let lowered = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+        std::borrow::Cow::Owned(trimmed.to_ascii_lowercase())
+    } else {
+        std::borrow::Cow::Borrowed(trimmed)
+    };
+    if lowered.is_empty() || lowered == "." || lowered == ".." || !lowered.chars().all(is_key_char)
+    {
+        return Err(PlatformError::InvalidSegment(format!(
+            "'{s}' is not a platform key: use [a-z0-9_.-] segments joined by '+' and '='"
+        )));
+    }
+    Ok(lowered)
+}
+
+/// The golden of the platform directory `platform_dir` ([`PlatformConfig::host_dir`]) beside the
+/// shared golden `shared`: `<dir>/<platform_dir>/<file>`. Both paths are `/`-separated.
+#[must_use]
+pub fn platform_golden(shared: &str, platform_dir: &str) -> String {
+    match shared.rsplit_once('/') {
+        Some((dir, file)) => format!("{dir}/{platform_dir}/{file}"),
+        None => format!("{platform_dir}/{shared}"),
+    }
+}
+
 /// Validates that a user-provided segment contains only allowed characters.
 /// Returns Ok(lowercased) or descriptive error.
 ///
@@ -285,98 +389,50 @@ pub fn validate_segment(s: &str) -> Result<std::borrow::Cow<'_, str>, PlatformEr
 }
 
 impl PlatformInfo {
-    /// Generates a deterministic flat key from `PlatformInfo` fields.
+    /// The key of this platform, which names its manifests directory, made of [`is_key_char`]
+    /// characters (valid file names on every OS):
+    /// - `<os>-<arch>` (`macos-aarch64`, the name integrations give the directory of a
+    ///   platform's own goldens), or `<os>` without an architecture;
+    /// - `os=<os>+arch=<arch>` when the OS or architecture contains `-` (`os=ios-sim+arch=arm`),
+    ///   so no two platforms share a key;
+    /// - then `+<renderer>` and `+<key>=<value>` per label, sorted by key.
+    ///
+    /// An opaque platform's key is its value, so `macos-aarch64` names the same platform as
+    /// `{os: macos, arch: aarch64}` (and `custom-env` as `{os: custom, arch: env}`).
     ///
     /// # Errors
     /// Returns `PlatformError::InvalidSegment` if the OS, architecture, renderer,
     /// or any label key/value fails segment validation (see [`validate_segment`]).
     pub fn to_key(&self) -> Result<String, PlatformError> {
-        use std::fmt::Write;
-        let mut key_out = String::new();
+        use std::fmt::Write as _;
 
-        match validate_segment(&self.os) {
-            Ok(os) => {
-                // Writing to a `String` via `fmt::Write` never fails.
-                #[expect(
-                    clippy::expect_used,
-                    reason = "`fmt::Write` for `String` is infallible"
-                )]
-                write!(&mut key_out, "{}:{}", os.len(), os)
-                    .expect("write! to a String cannot fail");
-            }
-            Err(e) => {
-                return Err(PlatformError::InvalidSegment(format!(
-                    "OS '{}' is empty or invalid: {}",
-                    self.os, e
-                )));
-            }
-        }
-
-        if let Some(ref arch) = self.arch {
-            match validate_segment(arch) {
-                Ok(clean_arch) => {
-                    // Writing to a `String` via `fmt::Write` never fails.
-                    #[expect(
-                        clippy::expect_used,
-                        reason = "`fmt::Write` for `String` is infallible"
-                    )]
-                    write!(&mut key_out, "-{}:{}", clean_arch.len(), clean_arch)
-                        .expect("write! to a String cannot fail");
-                }
-                Err(e) => {
-                    return Err(PlatformError::InvalidSegment(format!(
-                        "Architecture '{arch}' is invalid: {e}"
-                    )));
+        let invalid = |what: &str, value: &str, e: PlatformError| {
+            PlatformError::InvalidSegment(format!("{what} '{value}' is invalid: {e}"))
+        };
+        let os = validate_segment(&self.os).map_err(|e| invalid("OS", &self.os, e))?;
+        let mut key = String::new();
+        match &self.arch {
+            None => key.push_str(&os),
+            Some(arch) => {
+                let arch = validate_segment(arch).map_err(|e| invalid("Architecture", arch, e))?;
+                if os.contains('-') || arch.contains('-') {
+                    let _infallible = write!(key, "os={os}+arch={arch}");
+                } else {
+                    let _infallible = write!(key, "{os}-{arch}");
                 }
             }
         }
-
-        if let Some(ref renderer) = self.renderer {
-            match validate_segment(renderer) {
-                Ok(clean_renderer) => {
-                    // Writing to a `String` via `fmt::Write` never fails.
-                    #[expect(
-                        clippy::expect_used,
-                        reason = "`fmt::Write` for `String` is infallible"
-                    )]
-                    write!(&mut key_out, "-{}:{}", clean_renderer.len(), clean_renderer)
-                        .expect("write! to a String cannot fail");
-                }
-                Err(e) => {
-                    return Err(PlatformError::InvalidSegment(format!(
-                        "Renderer '{renderer}' is invalid: {e}"
-                    )));
-                }
-            }
+        if let Some(renderer) = &self.renderer {
+            let renderer =
+                validate_segment(renderer).map_err(|e| invalid("Renderer", renderer, e))?;
+            let _infallible = write!(key, "+{renderer}");
         }
-
         for (k, v) in &self.labels {
-            let key = match validate_segment(k) {
-                Ok(key) => key,
-                Err(e) => {
-                    return Err(PlatformError::InvalidSegment(format!(
-                        "Label key '{k}' is invalid: {e}"
-                    )));
-                }
-            };
-            let val = match validate_segment(v) {
-                Ok(val) => val,
-                Err(e) => {
-                    return Err(PlatformError::InvalidSegment(format!(
-                        "Label value '{v}' is invalid for key '{k}': {e}"
-                    )));
-                }
-            };
-            // Writing to a `String` via `fmt::Write` never fails.
-            #[expect(
-                clippy::expect_used,
-                reason = "`fmt::Write` for `String` is infallible"
-            )]
-            write!(&mut key_out, "-{}:{}={}:{}", key.len(), key, val.len(), val)
-                .expect("write! to a String cannot fail");
+            let label = validate_segment(k).map_err(|e| invalid("Label key", k, e))?;
+            let value = validate_segment(v).map_err(|e| invalid("Label value", v, e))?;
+            let _infallible = write!(key, "+{label}={value}");
         }
-
-        Ok(key_out)
+        Ok(key)
     }
 }
 
@@ -402,7 +458,7 @@ mod tests {
             renderer: None,
             labels: BTreeMap::new(),
         };
-        assert_eq!(info.to_key().unwrap(), "5:macos-7:aarch64");
+        assert_eq!(info.to_key().unwrap(), "macos-aarch64");
 
         let mut labels = BTreeMap::new();
         labels.insert("theme".to_string(), "dark".to_string());
@@ -417,7 +473,7 @@ mod tests {
         // Labels are sorted alphabetically: locale, theme
         assert_eq!(
             info_rich.to_key().unwrap(),
-            "5:linux-6:x86_64-12:flutter-3.22-6:locale=5:en_us-5:theme=4:dark"
+            "linux-x86_64+flutter-3.22+locale=en_us+theme=dark"
         );
     }
 
@@ -617,16 +673,105 @@ labels:
         );
         assert_eq!(
             PlatformConfig::host().to_key().unwrap(),
-            format!(
-                "{}:{HOST_OS}-{}:{HOST_ARCH}",
-                HOST_OS.len(),
-                HOST_ARCH.len()
-            )
+            PlatformConfig::host_dir(),
+            "the manifests of a platform and its own goldens share the name"
+        );
+        assert_eq!(
+            PlatformConfig::Opaque("macos-aarch64".to_owned()).to_key(),
+            PlatformConfig::Structured(PlatformFields {
+                os: Some("macos".to_owned()),
+                arch: Some("aarch64".to_owned()),
+                ..PlatformFields::default()
+            })
+            .to_key(),
+            "an opaque `os-arch` names the same platform"
         );
     }
 
     #[test]
-    fn test_to_key_length_prefixed_format() {
+    fn test_host_dir_and_platform_goldens() {
+        assert_eq!(PlatformConfig::host_dir(), format!("{HOST_OS}-{HOST_ARCH}"));
+        assert!(!PlatformConfig::host_dir().contains(':'));
+        assert_eq!(
+            platform_golden("test/goldens/a.png", "linux-x86_64"),
+            "test/goldens/linux-x86_64/a.png"
+        );
+        assert_eq!(
+            platform_golden("a.png", "windows-x86_64"),
+            "windows-x86_64/a.png"
+        );
+    }
+
+    #[test]
+    fn test_matches_the_host() {
+        let opaque = |key: &str| PlatformConfig::Opaque(key.to_owned());
+        let structured = |os: Option<&str>, arch: Option<&str>| {
+            PlatformConfig::Structured(PlatformFields {
+                os: os.map(str::to_owned),
+                arch: arch.map(str::to_owned),
+                renderer: Some("flutter-3.47.5".to_owned()),
+                labels: None,
+            })
+        };
+        for (platform, matches) in [
+            (opaque("macos-aarch64"), true),
+            (opaque("macos"), true),
+            (opaque("MacOS-AArch64"), true),
+            (opaque("macos-x86_64"), false),
+            (opaque("linux-aarch64"), false),
+            (structured(Some("macos"), Some("aarch64")), true),
+            (structured(Some("macos "), Some(" AArch64")), true),
+            (structured(Some("macos"), None), true),
+            (structured(Some("macos"), Some("x86_64")), false),
+        ] {
+            assert_eq!(
+                platform.matches("macos", "aarch64"),
+                Ok(matches),
+                "{platform:?}"
+            );
+        }
+        // Values that could never match fail instead of silently naming another platform.
+        for (platform, needle) in [
+            (opaque("macos-arm64"), "architecture 'arm64'"),
+            (opaque("darwin-aarch64"), "OS 'darwin'"),
+            (opaque("linux-x64"), "architecture 'x64'"),
+            (opaque("macos-aarch64-extra"), "ambiguous"),
+            (structured(None, Some("aarch64")), "an OS is required"),
+        ] {
+            let err = platform.matches("macos", "aarch64").unwrap_err();
+            assert!(err.to_string().contains(needle), "{platform:?}: {err}");
+        }
+        assert_eq!(opaque(&PlatformConfig::host_dir()).matches_host(), Ok(true));
+        assert_eq!(PlatformConfig::host().matches_host(), Ok(true));
+    }
+
+    /// An opaque value is one segment: a renderer or labels need the structured form, so a key
+    /// with `+` or `=` never reaches `parse_key_value` or `matches_host` as an opaque value.
+    #[test]
+    fn test_opaque_values_are_single_segments() {
+        for key in ["linux-x86_64+chrome", "os=ios-sim+arch=arm"] {
+            let err = serde_yaml::from_str::<PlatformConfig>(key).unwrap_err();
+            assert!(err.to_string().contains("[a-z0-9_.-]"), "{key}: {err}");
+        }
+        let structured: PlatformConfig =
+            serde_yaml::from_str("{ os: linux, arch: x86_64, renderer: chrome }").unwrap();
+        assert_eq!(structured.to_key().unwrap(), "linux-x86_64+chrome");
+        assert_eq!(structured.matches("linux", "x86_64"), Ok(true));
+    }
+
+    #[test]
+    fn test_platform_keys_given_by_users() {
+        assert_eq!(
+            validate_key(" Linux-x86_64+Chrome+theme=dark ").unwrap(),
+            "linux-x86_64+chrome+theme=dark"
+        );
+        for bad in ["", "..", "linux:x86_64", "a/b", "a b"] {
+            assert!(validate_key(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_keys_are_file_names_and_unambiguous() {
         let info = PlatformInfo {
             os: "linux".to_string(),
             arch: Some("x86_64".to_string()),
@@ -637,10 +782,46 @@ labels:
                 map
             },
         };
-        // Expect: 5:linux-6:x86_64-6:chrome-5:theme=4:dark
+        assert_eq!(info.to_key().unwrap(), "linux-x86_64+chrome+theme=dark");
+        let key = |os: &str, arch: Option<&str>, renderer: Option<&str>| {
+            PlatformInfo {
+                os: os.to_owned(),
+                arch: arch.map(str::to_owned),
+                renderer: renderer.map(str::to_owned),
+                labels: BTreeMap::new(),
+            }
+            .to_key()
+        };
+        assert_eq!(key("linux", None, Some("chrome")).unwrap(), "linux+chrome");
+        assert_eq!(key("custom-env", None, None).unwrap(), "custom-env");
+        // A `-` inside the OS or architecture switches to the explicit form, so these differ.
+        assert_eq!(key("custom", Some("env"), None).unwrap(), "custom-env");
         assert_eq!(
-            info.to_key().unwrap(),
-            "5:linux-6:x86_64-6:chrome-5:theme=4:dark"
+            key("ios-simulator", Some("aarch64"), None).unwrap(),
+            "os=ios-simulator+arch=aarch64"
+        );
+        assert_eq!(
+            key("android", Some("arm64-v8a"), Some("flutter-3.47.5")).unwrap(),
+            "os=android+arch=arm64-v8a+flutter-3.47.5"
+        );
+        assert_eq!(
+            key("a-b", Some("c"), None).unwrap(),
+            "os=a-b+arch=c",
+            "not `a-b-c`, nor `a-b+c` of {{os: a-b, renderer: c}}"
+        );
+        assert_eq!(key("a-b", None, Some("c")).unwrap(), "a-b+c");
+        assert!(
+            key("ios-simulator", Some("aarch64"), None)
+                .unwrap()
+                .chars()
+                .all(is_key_char)
+        );
+        assert!(
+            !info
+                .to_key()
+                .unwrap()
+                .contains([':', '/', '\\', '*', '?', '"', '<', '>', '|']),
+            "valid on Windows"
         );
     }
 }

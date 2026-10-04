@@ -201,6 +201,16 @@ mod tests {
     use super::*;
     use crate::{context::ContextError, platform::PlatformError};
 
+    /// Writes `content` to `dir/<name>` and returns the file with its content address: downloads
+    /// check it.
+    fn blob_file(dir: &Path, name: &str, content: &str) -> (std::path::PathBuf, ImageHash) {
+        use sha2::Digest as _;
+        let file = dir.join(name);
+        std::fs::write(&file, content).unwrap();
+        let hash = ImageHash::new("sha256", hex::encode(sha2::Sha256::digest(content))).unwrap();
+        (file, hash)
+    }
+
     #[test]
     fn test_pull_error_display() {
         let err1: PullError = CoreError::NotInitialized.into();
@@ -329,8 +339,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let gleon_dir = temp.path().join(".gleon");
 
-        let plat_key = "5:linux-6:x86_64";
-        let fb_key = "5:macos-7:aarch64";
+        let plat_key = "linux-x86_64";
+        let fb_key = "macos-aarch64";
         std::fs::create_dir_all(gleon_dir.join("manifests").join(plat_key)).unwrap();
         std::fs::create_dir_all(gleon_dir.join("manifests").join(fb_key)).unwrap();
 
@@ -363,7 +373,7 @@ mod tests {
         let gleon_dir = temp.path().join(".gleon");
         std::fs::create_dir_all(gleon_dir.join("manifests")).unwrap();
 
-        let plat_key = "5:linux-6:x86_64";
+        let plat_key = "linux-x86_64";
         let manifests_dir = gleon_dir.join("manifests").join(plat_key);
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
@@ -466,8 +476,8 @@ mod tests {
         let gleon_dir = temp.path().join(".gleon");
         std::fs::create_dir_all(&gleon_dir).unwrap();
 
-        let linux_key = "5:linux-6:x86_64";
-        let macos_key = "5:macos-7:aarch64";
+        let linux_key = "linux-x86_64";
+        let macos_key = "macos-aarch64";
 
         let ctx = ResolvedContext {
             base_dir: temp.path().to_path_buf(),
@@ -485,29 +495,15 @@ mod tests {
         let cfg = StorageConfig::new(format!("file://{}", remote_temp.path().display()));
         let adapter = ObjectStoreAdapter::from_config(&cfg).unwrap();
 
-        let hash1 = ImageHash::new(
-            "sha256",
-            "1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .unwrap();
-        let hash2 = ImageHash::new(
-            "sha256",
-            "2222222222222222222222222222222222222222222222222222222222222222",
-        )
-        .unwrap();
-        let dummy_hash = ImageHash::new(
-            "sha256",
-            "3333333333333333333333333333333333333333333333333333333333333333",
-        )
-        .unwrap();
+        let (file1, hash1) = blob_file(temp.path(), "blob1", "data 1");
+        let (file2, hash2) = blob_file(temp.path(), "blob2", "data 2");
+        let (dummy_file, dummy_hash) = blob_file(temp.path(), "blob3", "data 3");
 
         let phash = ImageHash::new("dhash", "0000000000000000").unwrap();
 
         // Upload blobs to remote
-        let dummy_file = temp.path().join("blob_tmp");
-        std::fs::write(&dummy_file, "data").unwrap();
-        adapter.upload_blob(&hash1, &dummy_file).await.unwrap();
-        adapter.upload_blob(&hash2, &dummy_file).await.unwrap();
+        adapter.upload_blob(&hash1, &file1).await.unwrap();
+        adapter.upload_blob(&hash2, &file2).await.unwrap();
         adapter.upload_blob(&dummy_hash, &dummy_file).await.unwrap();
 
         // 1. Fallback manifests (macos) contains test1 (pointing to dummy_hash) and test2 (pointing to hash2)
@@ -594,14 +590,11 @@ mod tests {
         let cfg = StorageConfig::new(format!("file://{}", remote_dir.display()));
         let adapter = ObjectStoreAdapter::from_config(&cfg).unwrap();
 
-        let hash_a = ImageHash::new("sha256", "a".repeat(64)).unwrap();
+        let (dummy_file, hash_a) = blob_file(temp.path(), "dummy", "blob data");
         let phash = ImageHash::new("dhash", "0000000000000000").unwrap();
-
-        let dummy_file = temp.path().join("dummy");
-        std::fs::write(&dummy_file, "blob data").unwrap();
         adapter.upload_blob(&hash_a, &dummy_file).await.unwrap();
 
-        let plat_dir = gleon_dir.join("manifests").join("5:linux-6:x86_64");
+        let plat_dir = gleon_dir.join("manifests").join("linux-x86_64");
         std::fs::create_dir_all(&plat_dir).unwrap();
         let manifest =
             crate::manifest::SingleTestManifest::new(hash_a.clone(), phash, 10, 10).unwrap();
@@ -628,11 +621,8 @@ mod tests {
         let cfg = StorageConfig::new(format!("file://{}", remote_dir.display()));
         let adapter = ObjectStoreAdapter::from_config(&cfg).unwrap();
 
-        let hash_b = ImageHash::new("sha256", "b".repeat(64)).unwrap();
+        let (dummy_file, hash_b) = blob_file(temp.path(), "dummy", "blob data b");
         let phash = ImageHash::new("dhash", "0000000000000000").unwrap();
-
-        let dummy_file = temp.path().join("dummy");
-        std::fs::write(&dummy_file, "blob data b").unwrap();
         adapter.upload_blob(&hash_b, &dummy_file).await.unwrap();
 
         let plat_dir = gleon_dir.join("manifests").join("macos-aarch64");

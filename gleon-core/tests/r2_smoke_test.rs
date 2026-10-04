@@ -53,7 +53,7 @@ async fn smoke_r2_live_upload_download() {
     let png_fixture = fixture_path("baseline_100x100.png");
     let hash = gleon_core::manifest::ImageHash::new(
         "sha256",
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "d9d60867c3201adfe2c83a740037e71c8daef340283cc21c8a58d3f76d34669a",
     )
     .unwrap();
 

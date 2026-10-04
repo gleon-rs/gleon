@@ -219,7 +219,7 @@ impl super::ReportGenerator {
                 out,
                 "| {} | {} | {mark} {} |",
                 MarkdownEscape(&report.name),
-                MarkdownEscape(&report.golden.path),
+                MarkdownEscape(report.golden.compared()),
                 status(report.outcome)
             )
             .expect("fmt::Write on String is infallible");

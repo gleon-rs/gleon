@@ -233,24 +233,29 @@ async fn test_push_pull_all_platforms_option() {
     fs::create_dir_all(&blobs_dir).unwrap();
 
     // Create manifest and blob for macos-aarch64
-    let hash1 = ImageHash::new("sha256", "1".repeat(64)).unwrap();
+    // Content addresses of the blobs: downloads check them.
+    let (sha1, sha2) = (
+        "8ba0d06bc5a88966b1f681d9cab28709781ad7c450802d0e477132d8919e0cbf",
+        "534d059533cc6a29b0e8747334c6af08619b1b59e6727f50a8094c90f6393282",
+    );
+    let hash1 = ImageHash::new("sha256", sha1).unwrap();
     let phash1 = ImageHash::new("dhash", "0000000000000000").unwrap();
     let m1 = SingleTestManifest::new(hash1, phash1, 10, 10).unwrap();
 
     let mut idx1 = WorkspaceIndex::new();
     idx1.save_test(manifests_root.join("macos-aarch64"), "auth/login", &m1)
         .unwrap();
-    fs::write(blobs_dir.join("1".repeat(64)), b"blob1").unwrap();
+    fs::write(blobs_dir.join(sha1), b"blob1").unwrap();
 
     // Create manifest and blob for linux-x86_64
-    let hash2 = ImageHash::new("sha256", "2".repeat(64)).unwrap();
+    let hash2 = ImageHash::new("sha256", sha2).unwrap();
     let phash2 = ImageHash::new("dhash", "0000000000000000").unwrap();
     let m2 = SingleTestManifest::new(hash2, phash2, 10, 10).unwrap();
 
     let mut idx2 = WorkspaceIndex::new();
     idx2.save_test(manifests_root.join("linux-x86_64"), "dashboard/main", &m2)
         .unwrap();
-    fs::write(blobs_dir.join("2".repeat(64)), b"blob2").unwrap();
+    fs::write(blobs_dir.join(sha2), b"blob2").unwrap();
 
     // Push with all_platforms = true
     let push_all = push_blobs(&ctx, Some(&storage_config), true, None)
@@ -260,8 +265,8 @@ async fn test_push_pull_all_platforms_option() {
     assert_eq!(push_all.uploaded_blobs, 2);
 
     // Delete local blobs
-    fs::remove_file(blobs_dir.join("1".repeat(64))).unwrap();
-    fs::remove_file(blobs_dir.join("2".repeat(64))).unwrap();
+    fs::remove_file(blobs_dir.join(sha1)).unwrap();
+    fs::remove_file(blobs_dir.join(sha2)).unwrap();
 
     // Pull with all_platforms = true
     let pull_all = pull_blobs(&ctx, Some(&storage_config), true, None)
@@ -269,6 +274,6 @@ async fn test_push_pull_all_platforms_option() {
         .unwrap();
     assert_eq!(pull_all.total_manifest_blobs, 2);
     assert_eq!(pull_all.downloaded_blobs, 2);
-    assert!(blobs_dir.join("1".repeat(64)).is_file());
-    assert!(blobs_dir.join("2".repeat(64)).is_file());
+    assert!(blobs_dir.join(sha1).is_file());
+    assert!(blobs_dir.join(sha2).is_file());
 }

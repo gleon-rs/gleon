@@ -1,0 +1,78 @@
+{
+  "schema_version": 2,
+  "name": "test/goldens/counter_initial",
+  "golden": {
+    "path": "test/goldens/macos-aarch64/counter_initial.png",
+    "sha256": "67fb28e3f28ae98186e3e13adb7c1f3c67489de8ce49508ffe31b69d46fcd8c0",
+    "width": 360,
+    "height": 640,
+    "fallback": "test/goldens/counter_initial.png"
+  },
+  "candidate": {
+    "sha256": "89612416a0521f78360d829f6b58b8c3d57424931c7780f1455b97ac4aa327bc",
+    "width": 360,
+    "height": 640
+  },
+  "source": {
+    "tool": "gleon_flutter",
+    "tool_version": "0.1.0",
+    "renderer": "flutter-3.47.6"
+  },
+  "platform": {
+    "os": "macos",
+    "arch": "aarch64"
+  },
+  "test": {
+    "name": "matches the initial golden"
+  },
+  "comparison": {
+    "tolerance": {
+      "kind": "pixel",
+      "max_diff_ratio": 0.0
+    },
+    "text_tolerance": 1.0,
+    "masks": [],
+    "policy_version": 2
+  },
+  "outcome": "match",
+  "metrics": {
+    "kind": "pixel",
+    "total_pixels": 217292,
+    "diff_pixels": 0,
+    "diff_ratio": 0.0,
+    "headroom": 0.0,
+    "text": {
+      "pixels": 13108,
+      "diff_pixels": 0,
+      "worst_tile_diff_ratio": 0.0,
+      "headroom": 1.0
+    }
+  },
+  "regions": [
+    {
+      "kind": "image",
+      "metrics": {
+        "kind": "pixel",
+        "total_pixels": 217292,
+        "diff_pixels": 0,
+        "diff_ratio": 0.0,
+        "headroom": 0.0,
+        "text": {
+          "pixels": 13108,
+          "diff_pixels": 0,
+          "worst_tile_diff_ratio": 0.0,
+          "headroom": 1.0
+        }
+      }
+    }
+  ],
+  "artifacts": {
+    "candidate": ".gleon/runs/latest/artifacts/test/goldens/counter_initial/candidate.png"
+  },
+  "timings_ms": {
+    "total": 2.456,
+    "native": 0.7
+  },
+  "run_id": "fallback-fixture-1",
+  "recorded_at": "2026-10-04T15:59:44.669789Z"
+}

@@ -161,7 +161,8 @@ pub fn resolve_platform_filter_dir<'a>(
     let mut components = path.components();
     match (components.next(), components.next()) {
         (Some(std::path::Component::Normal(seg)), None)
-            if crate::manifest::index::validate_test_path(&seg.to_string_lossy()).is_ok() =>
+            if gleon_model::platform::validate_key(&seg.to_string_lossy())
+                .is_ok_and(|key| key == p) =>
         {
             Ok(manifests_root.join(p))
         }
@@ -373,7 +374,7 @@ mod tests {
     fn test_platform_key_resolves_and_rejects_invalid() {
         let mut ctx = ResolvedContext::default();
         ctx.platform.os = "linux".to_string();
-        assert_eq!(platform_key(&ctx).unwrap(), "5:linux");
+        assert_eq!(platform_key(&ctx).unwrap(), "linux");
 
         ctx.platform.os = "in/valid".to_string();
         assert!(matches!(platform_key(&ctx), Err(CoreError::Context(_))));
@@ -411,6 +412,11 @@ mod tests {
             resolve_platform_filter_dir(root, Some("macos-aarch64")).unwrap(),
             root.join("macos-aarch64")
         );
+        assert_eq!(
+            resolve_platform_filter_dir(root, Some("linux-x86_64+chrome+theme=dark")).unwrap(),
+            root.join("linux-x86_64+chrome+theme=dark"),
+            "keys with a renderer and labels"
+        );
     }
 
     #[test]
@@ -418,7 +424,7 @@ mod tests {
         let root = Path::new("/w/.gleon/manifests");
 
         // Multi-segment, parent traversal and absolute paths must never escape the root.
-        for bad in ["macos/aarch64", "../etc", "/etc", ".", ""] {
+        for bad in ["macos/aarch64", "../etc", "/etc", ".", "", "a:b", "MacOS"] {
             assert_eq!(
                 resolve_platform_filter_dir(root, Some(bad)),
                 Err(bad),

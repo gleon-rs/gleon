@@ -17,6 +17,7 @@ use gleon_engine::config::Zone;
 use gleon_model::{
     case::{RUN_ID_ENV, RunId},
     config::{ArtifactsDir, GITIGNORE_LINES, GleonConfig, MetricsConfig},
+    platform::{self, PlatformConfig},
     rules::{RuleMatch, RuleSet},
     tolerance::{TextTolerance, Tolerance},
 };
@@ -121,6 +122,24 @@ struct Compiled {
     rules: RuleSet,
     /// The artifacts directory, `GLEON_ARTIFACTS_DIR` applied.
     artifacts: Arc<ArtifactsDir>,
+    /// How the goldens are laid out for this platform.
+    layout: Layout,
+}
+
+/// How the goldens of a workspace are laid out for the running platform (its
+/// `fallback_platform`).
+#[derive(Debug)]
+enum Layout {
+    /// No `fallback_platform`: one golden for every platform, recorded on an unknown one.
+    Shared,
+    /// This platform is the `fallback_platform`: the shared goldens are its own.
+    Primary,
+    /// Another platform: its own goldens in `<dir>/<os>-<arch>/`, else the shared ones of
+    /// `platform` (the key of the `fallback_platform`).
+    Foreign {
+        /// The `fallback_platform`, as its key.
+        platform: String,
+    },
 }
 
 /// The config compiled from one version of the file (or why it is invalid).
@@ -227,6 +246,16 @@ fn compile(text: &str, artifacts_env: Option<&ArtifactsDir>) -> Result<Arc<Compi
         metrics: config.metrics,
         artifacts: Arc::new(config.artifacts_dir(artifacts_env, None)),
         rules,
+        layout: match &config.fallback_platform {
+            None => Layout::Shared,
+            Some(primary) => match primary.matches_host() {
+                Ok(true) => Layout::Primary,
+                Ok(false) => Layout::Foreign {
+                    platform: primary.to_key().map_err(|e| e.to_string())?,
+                },
+                Err(e) => return Err(format!("fallback_platform: {e}")),
+            },
+        },
     }))
 }
 
@@ -246,14 +275,14 @@ fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
 
 /// `path` absolute with symbolic links resolved.
 #[cfg(not(windows))]
-fn canonical(path: &Path) -> io::Result<PathBuf> {
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
     std::fs::canonicalize(path)
 }
 
 /// `path` absolute with symbolic links resolved, without the `\\?\` verbatim prefix of
 /// `canonicalize` (which Dart never shows).
 #[cfg(windows)]
-fn canonical(path: &Path) -> io::Result<PathBuf> {
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = std::fs::canonicalize(path)?;
     let text = resolved.to_string_lossy();
     Ok(text.strip_prefix(r"\\?\UNC\").map_or_else(
@@ -339,14 +368,52 @@ pub struct Plan {
     pub tolerance: Tolerance,
     /// The call's masks followed by the rule's.
     pub masks: Vec<Zone>,
-    /// The tolerance of text ([`TextTolerance::resolve`]: the call's, else the rule's, else 1, so
-    /// text never fails).
-    pub text: TextTolerance,
+    /// The explicit tolerance of text: the call's, else the rule's (see
+    /// [`TextTolerance::resolve`] for the default).
+    pub text: Option<TextTolerance>,
+    /// The golden files of this platform.
+    pub goldens: Goldens,
     /// Whether the golden belongs to a workspace (failure messages point at `.gleon/gleon.yaml`
     /// otherwise).
     pub has_workspace: bool,
     /// The golden inside its workspace, when a rule of the workspace matches it.
     pub in_workspace: Option<InWorkspace>,
+}
+
+/// The golden files of a comparison on this platform. The integration passes the shared golden
+/// `<dir>/<file>`; with a `fallback_platform` in the workspace, every other platform has its own
+/// golden in `<dir>/<os>-<arch>/<file>` ([`platform::platform_golden`]).
+#[derive(Debug)]
+pub struct Goldens {
+    /// This platform's golden: compared first, written in update mode (and by `gleon approve`).
+    pub target: PathBuf,
+    /// The shared golden of another platform, compared while `target` does not exist.
+    pub fallback: Option<Fallback>,
+    /// Whether `target` was recorded on this platform, so text is compared by default
+    /// ([`TextTolerance::OWN_PLATFORM`]); without `fallback_platform` nobody knows.
+    pub is_own: bool,
+}
+
+/// The shared golden a platform without its own golden compares.
+#[derive(Debug)]
+pub struct Fallback {
+    /// The file.
+    pub golden: PathBuf,
+    /// The file relative to the workspace root, `/`-separated.
+    pub path: String,
+    /// The platform it was recorded on (the key of the `fallback_platform`).
+    pub platform: String,
+}
+
+impl Goldens {
+    /// One golden for every platform: the integration's.
+    fn shared(golden: &Path) -> Self {
+        Self {
+            target: golden.to_path_buf(),
+            fallback: None,
+            is_own: false,
+        }
+    }
 }
 
 impl Plan {
@@ -363,9 +430,10 @@ impl Plan {
 pub struct InWorkspace {
     /// The workspace.
     pub workspace: Arc<Workspace>,
-    /// Canonical test name (the name of its case report and artifacts folder).
+    /// Canonical test name (the name of its case report and artifacts folder), of the shared
+    /// golden: the same on every platform.
     pub name: String,
-    /// Golden path relative to the root, `/`-separated.
+    /// This platform's golden ([`Goldens::target`]) relative to the root, `/`-separated.
     pub golden_path: String,
     /// The artifacts directory, relative to the root.
     pub artifacts: Arc<ArtifactsDir>,
@@ -427,6 +495,7 @@ impl Session {
     }
 
     /// Why every call of this session fails.
+    #[cfg(test)]
     pub const fn failure(&self) -> Option<&Failure> {
         self.failure.as_ref()
     }
@@ -489,9 +558,9 @@ impl Session {
         }
         let workspace = self.workspace_of(golden);
         let has_workspace = workspace.is_some();
-        let rule = match workspace {
+        let (goldens, rule) = match workspace {
             Some(workspace) => self.rule(workspace, golden)?,
-            None => None,
+            None => (Goldens::shared(golden), None),
         };
         let (rule_tolerance, rule_text, in_workspace) = match rule {
             Some(Rule {
@@ -508,16 +577,24 @@ impl Session {
         Ok(Plan {
             tolerance: tolerance.or(rule_tolerance).unwrap_or(Tolerance::Exact {}),
             masks,
-            text: TextTolerance::resolve(text, rule_text),
+            text: text.or(rule_text),
+            goldens,
             has_workspace,
             in_workspace,
         })
     }
 
-    /// The rule of `golden` in `workspace`; `None` outside the workspace or when no rule applies.
-    fn rule(&self, workspace: Arc<Workspace>, golden: &Path) -> Result<Option<Rule>, Failure> {
-        let Some(golden_path) = workspace.relative_path(golden) else {
-            return Ok(None);
+    /// The golden files of `golden` in `workspace` and its rule; the shared golden alone and
+    /// `None` outside the workspace or when no rule applies. Rules match the shared golden, so
+    /// they are the same on every platform; only a golden a rule matches follows the per-platform
+    /// layout of `fallback_platform`.
+    fn rule(
+        &self,
+        workspace: Arc<Workspace>,
+        golden: &Path,
+    ) -> Result<(Goldens, Option<Rule>), Failure> {
+        let Some(shared_path) = workspace.relative_path(golden) else {
+            return Ok((Goldens::shared(golden), None));
         };
         let config_error = |message: String| {
             Failure::config(text::config_error(&workspace.config_display(), &message))
@@ -533,13 +610,47 @@ impl Session {
             ..
         } = compiled
             .rules
-            .resolve(&golden_path)
+            .resolve(&shared_path)
             .map_err(|e| config_error(e.to_string()))?
         else {
-            return Ok(None);
+            // Excluded or unmatched: compared like without the file, one golden for every
+            // platform.
+            return Ok((Goldens::shared(golden), None));
+        };
+        let (goldens, golden_path) = match &compiled.layout {
+            Layout::Shared => (Goldens::shared(golden), shared_path),
+            Layout::Primary => (
+                Goldens {
+                    is_own: true,
+                    ..Goldens::shared(golden)
+                },
+                shared_path,
+            ),
+            Layout::Foreign { platform } => {
+                let own_path = platform::platform_golden(&shared_path, &PlatformConfig::host_dir());
+                // From the canonical path, like the one `gleon approve` writes: the integration's
+                // may lead through a symbolic link.
+                let mut target = workspace.root.clone();
+                for segment in own_path.split('/') {
+                    target.push(segment);
+                }
+                let fallback = Fallback {
+                    golden: golden.to_path_buf(),
+                    path: shared_path,
+                    platform: platform.clone(),
+                };
+                (
+                    Goldens {
+                        target,
+                        fallback: Some(fallback),
+                        is_own: true,
+                    },
+                    own_path,
+                )
+            }
         };
         let is_recorded = self.metrics_override.unwrap_or(compiled.metrics.enabled);
-        Ok(Some(Rule {
+        let rule = Rule {
             tolerance,
             text,
             masks,
@@ -552,7 +663,8 @@ impl Session {
                     console: compiled.metrics.console,
                 }),
             },
-        }))
+        };
+        Ok((goldens, Some(rule)))
     }
 }
 
@@ -682,7 +794,7 @@ metrics:
             Arc::new(Workspace::new(root)),
             &other.path().join("Clock.png"),
         );
-        assert!(matches!(rule, Ok(None)));
+        assert!(matches!(rule, Ok((_, None))));
     }
 
     #[test]
@@ -850,6 +962,101 @@ metrics:
         let missing = record(first.join("test/goldens/new/dir/d.png"));
         assert_eq!(missing.golden_path, "test/goldens/new/dir/d.png");
         assert!(Arc::ptr_eq(&a.workspace, &missing.workspace));
+    }
+
+    /// `fallback_platform` lays out the goldens its rules match; an excluded or unmatched golden
+    /// stays one golden for every platform, like without the file.
+    #[test]
+    fn test_goldens_follow_the_fallback_platform() {
+        let host = PlatformConfig::host_dir();
+        let config = |platform: &str| {
+            format!(
+                "required_version: \">=0.1.0\"\nfallback_platform: {platform}\n\
+                 exclude: \"test/goldens/skip_*.png\"\n\
+                 screenshots: [{{ include: \"test/goldens/*.png\" }}]"
+            )
+        };
+        let (_dir, root) = workspace(&config(&host), "a.png");
+        let golden = root.join("test/goldens/a.png");
+        let plan = session(None).plan(&golden, None, vec![], None).unwrap();
+        assert_eq!(plan.goldens.target, golden);
+        assert!(plan.goldens.fallback.is_none());
+        assert!(plan.goldens.is_own);
+
+        let (_dir, root) = workspace(&config("{ os: ios }"), "a.png");
+        for unmanaged in ["test/goldens/skip_a.png", "test/other/a.png"] {
+            let golden = root.join(unmanaged);
+            let plan = session(None).plan(&golden, None, vec![], None).unwrap();
+            assert!(plan.in_workspace.is_none(), "{unmanaged}");
+            assert_eq!(plan.goldens.target, golden, "{unmanaged}");
+            assert!(plan.goldens.fallback.is_none() && !plan.goldens.is_own);
+        }
+        let golden = root.join("test/goldens/a.png");
+        let plan = session(None).plan(&golden, None, vec![], None).unwrap();
+        assert!(plan.in_workspace.is_some());
+        assert_eq!(
+            plan.goldens.target,
+            root.join("test/goldens").join(&host).join("a.png")
+        );
+        let fallback = plan.goldens.fallback.unwrap();
+        assert_eq!(
+            (
+                fallback.golden,
+                fallback.path.as_str(),
+                fallback.platform.as_str()
+            ),
+            (golden, "test/goldens/a.png", "ios")
+        );
+        assert!(plan.goldens.is_own);
+    }
+
+    /// A `fallback_platform` that could never name a platform fails every golden of the
+    /// workspace instead of silently treating every platform as another one.
+    #[test]
+    fn test_a_fallback_platform_no_process_reports_is_a_config_error() {
+        for (platform, needle) in [
+            ("macos-arm64", "architecture 'arm64'"),
+            ("darwin-aarch64", "OS 'darwin'"),
+            ("macos-aarch64-extra", "ambiguous"),
+            ("{ arch: aarch64 }", "an OS is required"),
+        ] {
+            let yaml = format!(
+                "required_version: \">=0.1.0\"\nfallback_platform: {platform}\n\
+                 screenshots: [{{ include: \"**/*.png\" }}]"
+            );
+            let (_dir, root) = workspace(&yaml, "a.png");
+            let error = session(None)
+                .plan(&root.join("test/goldens/a.png"), None, vec![], None)
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Config);
+            assert!(
+                error.message.contains("fallback_platform: ") && error.message.contains(needle),
+                "{platform}: {error:?}"
+            );
+        }
+    }
+
+    /// The own golden of a symbolically linked shared one sits where `gleon approve` writes it:
+    /// beside the link's target, as the case report names it.
+    #[cfg(unix)]
+    #[test]
+    fn test_own_goldens_of_linked_goldens_follow_the_link() {
+        let yaml = "required_version: \">=0.1.0\"\nfallback_platform: { os: ios }\n\
+                    screenshots: [{ include: \"**/*.png\" }]";
+        let (_dir, root) = workspace(yaml, "a.png");
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::rename(root.join("test/goldens/a.png"), root.join("assets/a.png")).unwrap();
+        std::os::unix::fs::symlink("../../assets/a.png", root.join("test/goldens/a.png")).unwrap();
+        let plan = session(None)
+            .plan(&root.join("test/goldens/a.png"), None, vec![], None)
+            .unwrap();
+        let golden = plan.in_workspace.unwrap();
+        let host = PlatformConfig::host_dir();
+        assert_eq!(golden.golden_path, format!("assets/{host}/a.png"));
+        assert_eq!(
+            plan.goldens.target,
+            root.join("assets").join(&host).join("a.png")
+        );
     }
 
     #[test]

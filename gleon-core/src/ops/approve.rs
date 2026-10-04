@@ -259,12 +259,17 @@ pub struct ApproveResult {
     pub warnings: Vec<String>,
 }
 
-/// Whether `report` names `filter`: its test name or golden path starts with it (whole names).
+/// Whether `report` names `filter`: its test name, golden path or compared golden (the shared
+/// golden another platform's case fell back to, which its test prints) starts with it (whole
+/// names).
 fn matches_filter(report: &CaseReport, filter: &Path) -> bool {
-    let golden = Path::new(&report.golden.path);
+    let matches_golden = |golden: &str| {
+        let golden = Path::new(golden);
+        golden.starts_with(filter) || golden.with_extension("").starts_with(filter)
+    };
     Path::new(&report.name).starts_with(filter)
-        || golden.starts_with(filter)
-        || golden.with_extension("").starts_with(filter)
+        || matches_golden(&report.golden.path)
+        || matches_golden(report.golden.compared())
 }
 
 /// Whether `file` resolves inside `base_dir`: its nearest existing directory, symlinks followed,
@@ -287,13 +292,6 @@ fn golden_file(base_dir: &Path, report: &CaseReport) -> Result<PathBuf, ApproveE
     use std::io::Read as _;
 
     let path = Path::new(&report.golden.path);
-    let is_png = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
-    let is_hidden = path.components().any(|component| {
-        matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('.'))
-    });
     let file = base_dir.join(path);
     let is_link = std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink());
     // The PNG header (signature and size) is enough to tell.
@@ -301,10 +299,42 @@ fn golden_file(base_dir: &Path, report: &CaseReport) -> Result<PathBuf, ApproveE
     let replaces_no_png = std::fs::File::open(&file)
         .and_then(|file| file.take(24).read_to_end(&mut head))
         .is_ok_and(|_| case::png_size(&head).is_none());
-    if !is_png || is_hidden || is_link || replaces_no_png || !resolves_inside(base_dir, &file) {
+    if !is_png_outside_hidden_dirs(path)
+        || is_link
+        || replaces_no_png
+        || !resolves_inside(base_dir, &file)
+    {
         return Err(ApproveError::UnsafeGoldenPath {
             name: report.name.clone(),
             path: report.golden.path.clone(),
+        });
+    }
+    Ok(file)
+}
+
+/// Whether `path` names a `.png` file outside hidden directories.
+fn is_png_outside_hidden_dirs(path: &Path) -> bool {
+    let is_png = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
+    is_png
+        && !path.components().any(|component| {
+            matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('.'))
+        })
+}
+
+/// The golden `report` was compared with, inside the workspace at `base_dir`: the source of a
+/// per-platform golden approved from a pass without differences. Like [`golden_file`], a `.png`
+/// outside hidden directories and not a symlink, so a report never copies another file.
+fn compared_golden(base_dir: &Path, report: &CaseReport) -> Result<PathBuf, ApproveError> {
+    let path = Path::new(report.golden.compared());
+    let file = base_dir.join(path);
+    let is_link = std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !is_png_outside_hidden_dirs(path) || is_link || !resolves_inside(base_dir, &file) {
+        return Err(ApproveError::UnsafeGoldenPath {
+            name: report.name.clone(),
+            path: report.golden.compared().to_owned(),
         });
     }
     Ok(file)
@@ -342,27 +372,46 @@ fn candidates_of<'a>(
     let mut by_target = HashMap::<Target, (&Sha256Hex, &Path)>::new();
     for (run, cases) in loaded {
         for report in cases.reports() {
-            let can_approve = matches!(
-                report.outcome,
-                CaseOutcome::Mismatch | CaseOutcome::DimensionMismatch | CaseOutcome::Missing
-            ) && (filters.is_empty()
-                || filters.iter().any(|p| matches_filter(report, p)));
-            let candidate = report
+            // A pass against another platform's golden kept its candidate to become this
+            // platform's own golden.
+            let is_seed = report.golden.fallback.is_some()
+                && matches!(report.outcome, CaseOutcome::Match | CaseOutcome::Identical);
+            let can_approve = (is_seed
+                || matches!(
+                    report.outcome,
+                    CaseOutcome::Mismatch | CaseOutcome::DimensionMismatch | CaseOutcome::Missing
+                ))
+                && (filters.is_empty() || filters.iter().any(|p| matches_filter(report, p)));
+            if !can_approve {
+                continue;
+            }
+            let kept = report
                 .artifacts
                 .as_ref()
                 .and_then(|artifacts| artifacts.candidate.as_ref());
-            let (Some(candidate), Some(sha256)) = (
-                candidate.filter(|_| can_approve),
-                report.candidate.sha256.as_ref(),
-            ) else {
-                continue;
-            };
-            let file = cases.artifact_path(candidate).ok_or_else(|| {
-                ApproveError::CandidateOutsideRuns {
-                    name: report.name.clone(),
-                    path: candidate.clone(),
+            let (file, sha256) = match (kept, is_seed) {
+                (Some(candidate), _) => {
+                    let Some(sha256) = report.candidate.sha256.as_ref() else {
+                        continue;
+                    };
+                    let file = cases.artifact_path(candidate).ok_or_else(|| {
+                        ApproveError::CandidateOutsideRuns {
+                            name: report.name.clone(),
+                            path: candidate.clone(),
+                        }
+                    })?;
+                    (file, sha256)
                 }
-            })?;
+                // A pass without differences kept no candidate: the compared (shared) golden is
+                // this platform's rendering, checked against the hash the report recorded.
+                (None, true) => {
+                    let Some(sha256) = report.golden.sha256.as_ref() else {
+                        continue;
+                    };
+                    (compared_golden(base_dir, report)?, sha256)
+                }
+                (None, false) => continue,
+            };
             let target = target(base_dir, report)?;
             match by_target.entry(target.clone()) {
                 Entry::Occupied(first) if first.get().0 != sha256 => {
@@ -410,7 +459,9 @@ fn nothing_to_approve(runs: &[PathBuf], filters: &[PathBuf]) -> ApproveError {
 
 /// Promotes the candidates of the failed cases of a run to baselines.
 ///
-/// Failed cases are `mismatch`, `dimension_mismatch` and `missing`. Cases of `gleon diff` become
+/// Failed cases are `mismatch`, `dimension_mismatch` and `missing`; an integration's pass against
+/// another platform's golden (`golden.fallback`) becomes this platform's own golden too: its kept
+/// candidate, or the compared golden itself when no pixel differed. Cases of `gleon diff` become
 /// manifests and blobs on the platform of the case, cases of integrations without manifests
 /// overwrite their golden PNG file. Every candidate is checked before the first write.
 ///
@@ -648,7 +699,7 @@ mod tests {
         SingleTestManifest::load(file).unwrap()
     }
 
-    const LINUX: &str = "5:linux-6:x86_64";
+    const LINUX: &str = "linux-x86_64";
 
     #[test]
     fn test_approve_error_display() {
@@ -884,10 +935,7 @@ mod tests {
         assert_eq!(res.approved_test_cases.len(), 2);
         let sha = |shade| hex::encode(Sha256::digest(png(shade)));
         assert_eq!(manifest_of(&ctx, LINUX, "a").hash.value(), sha(1));
-        assert_eq!(
-            manifest_of(&ctx, "5:macos-7:aarch64", "a").hash.value(),
-            sha(2)
-        );
+        assert_eq!(manifest_of(&ctx, "macos-aarch64", "a").hash.value(), sha(2));
     }
 
     #[test]
@@ -948,6 +996,165 @@ mod tests {
         // The same candidate twice is one approval.
         let res = approve_workspace(&ctx, &[], &[first, third], None).unwrap();
         assert_eq!(res.approved_test_cases, ["g"]);
+    }
+
+    /// Integrations with per-platform goldens (`fallback_platform`): each platform's case names
+    /// its own golden file, so the runs of two platforms approve side by side.
+    #[test]
+    fn test_approve_per_platform_goldens_of_integrations() {
+        let (temp, ctx) = workspace();
+        let macos = PlatformConfig::Structured(PlatformFields {
+            os: Some("macos".to_owned()),
+            arch: Some("aarch64".to_owned()),
+            ..PlatformFields::default()
+        });
+        let macos_run = temp.path().join("download/metrics-macos-arm64");
+        let linux_run = temp.path().join("download/metrics-linux-x64");
+        let name = "test/goldens/a";
+        failed_case_on(
+            &macos_run,
+            name,
+            "gleon_flutter",
+            CaseOutcome::Mismatch,
+            &png(1),
+            macos,
+        );
+        let mut linux = failed_case(
+            &linux_run,
+            name,
+            "gleon_flutter",
+            CaseOutcome::Mismatch,
+            &png(2),
+        );
+        // Compared with the shared (macOS) golden, since Linux had none of its own yet.
+        linux.golden.path = "test/goldens/linux-x86_64/a.png".to_owned();
+        linux.golden.fallback = Some("test/goldens/a.png".to_owned());
+        write_case(&linux_run, &linux);
+
+        // The path the Linux test printed (the compared shared golden) selects its case too.
+        let res = approve_workspace(
+            &ctx,
+            &[PathBuf::from("test/goldens/a.png")],
+            &[macos_run.clone(), linux_run.clone()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(res.approved_test_cases, [name]);
+        let golden = |path: &str| std::fs::read(temp.path().join(path)).unwrap();
+        assert_eq!(golden("test/goldens/linux-x86_64/a.png"), png(2));
+
+        let res = approve_workspace(&ctx, &[], &[macos_run, linux_run], None).unwrap();
+        assert_eq!(res.approved_test_cases, [name, name]);
+        assert_eq!(golden("goldens/test/goldens/a.png"), png(1));
+    }
+
+    /// A pass against another platform's golden kept its candidate: approving it records this
+    /// platform's own golden; a pass without `golden.fallback` has nothing to approve.
+    #[test]
+    fn test_approve_seeds_own_goldens_from_passes_against_the_fallback() {
+        let (temp, ctx) = workspace();
+        let run = temp.path().join("download/metrics-windows-x64");
+        let mut seed = failed_case(
+            &run,
+            "test/goldens/a",
+            "gleon_flutter",
+            CaseOutcome::Match,
+            &png(3),
+        );
+        seed.golden.path = "test/goldens/windows-x86_64/a.png".to_owned();
+        seed.golden.fallback = Some("test/goldens/a.png".to_owned());
+        seed.artifacts = Some(case::Artifacts {
+            candidate: Some(".gleon/runs/latest/artifacts/test/goldens/a/candidate.png".to_owned()),
+            ..case::Artifacts::default()
+        });
+        seed.validate().unwrap();
+        write_case(&run, &seed);
+        failed_case(
+            &run,
+            "test/goldens/b",
+            "gleon_flutter",
+            CaseOutcome::Match,
+            &png(4),
+        );
+
+        let res = approve_workspace(&ctx, &[], &[run], None).unwrap();
+        assert_eq!(res.approved_test_cases, ["test/goldens/a"]);
+        assert_eq!(
+            std::fs::read(temp.path().join("test/goldens/windows-x86_64/a.png")).unwrap(),
+            png(3)
+        );
+    }
+
+    /// A pass against the fallback without a differing pixel keeps no candidate: approving it
+    /// copies the compared golden, which must still be the one the report hashed.
+    #[test]
+    fn test_approve_seeds_passes_without_differences_from_the_compared_golden() {
+        let (temp, ctx) = workspace();
+        let shared = temp.path().join("test/goldens/a.png");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, png(5)).unwrap();
+        let run = temp.path().join("download/metrics-windows-x64");
+        let mut seed = report("test/goldens/a", CaseOutcome::Match);
+        seed.run_id = Some(RunId::new("run-1").unwrap());
+        seed.source.tool = "gleon_flutter".to_owned();
+        seed.golden.path = "test/goldens/windows-x86_64/a.png".to_owned();
+        seed.golden.fallback = Some("test/goldens/a.png".to_owned());
+        seed.golden.sha256 = Some(Sha256Hex::of(&png(5)));
+        seed.validate().unwrap();
+        write_case(&run, &seed);
+
+        let res = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
+        assert_eq!(res.approved_test_cases, ["test/goldens/a"]);
+        let own = temp.path().join("test/goldens/windows-x86_64/a.png");
+        assert_eq!(std::fs::read(&own).unwrap(), png(5));
+
+        // The shared golden changed since the run: nothing is approved from it.
+        std::fs::remove_file(&own).unwrap();
+        std::fs::write(&shared, png(6)).unwrap();
+        assert!(matches!(
+            approve_workspace(&ctx, &[], &[run], None),
+            Err(ApproveError::CandidateChanged { .. })
+        ));
+        assert!(!own.exists());
+    }
+
+    /// The compared golden of a seed is checked like the golden it writes: a report never makes
+    /// approve copy a hidden file, a file that is not a PNG, or a symlink, even with its hash (a
+    /// path out of the workspace fails the report's validation).
+    #[test]
+    fn test_approve_seeds_only_from_png_goldens_outside_hidden_directories() {
+        let (temp, ctx) = workspace();
+        let run = temp.path().join("download/metrics-windows-x64");
+        let mut compared = vec![".secret/a.png", "notes.txt"];
+        std::fs::create_dir_all(temp.path().join(".secret")).unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(temp.path().join("test/goldens")).unwrap();
+            std::os::unix::fs::symlink(
+                "../../.secret/a.png",
+                temp.path().join("test/goldens/link.png"),
+            )
+            .unwrap();
+            compared.push("test/goldens/link.png");
+        }
+        for path in compared {
+            let file = temp.path().join(path);
+            if !file.exists() {
+                std::fs::write(&file, png(5)).unwrap();
+            }
+            let mut seed = report("test/goldens/a", CaseOutcome::Match);
+            seed.source.tool = "gleon_flutter".to_owned();
+            seed.golden.path = "test/goldens/windows-x86_64/a.png".to_owned();
+            seed.golden.fallback = Some(path.to_owned());
+            seed.golden.sha256 = Some(Sha256Hex::of(&png(5)));
+            write_case(&run, &seed);
+            let err = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap_err();
+            assert!(
+                matches!(&err, ApproveError::UnsafeGoldenPath { path: unsafe_path, .. } if unsafe_path == path),
+                "{path}: {err}"
+            );
+        }
+        assert!(!temp.path().join("test/goldens/windows-x86_64").exists());
     }
 
     /// Case reports may come from CI artifacts of untrusted code: they never pick another file.
@@ -1048,7 +1255,7 @@ mod tests {
     fn test_approve_removes_redundant_override_when_matching_fallback() {
         let (temp, mut ctx) = workspace();
         let gleon_dir = temp.path().join(".gleon");
-        let macos_key = "5:macos-7:aarch64";
+        let macos_key = "macos-aarch64";
         ctx.fallback_platform_key = Some(macos_key.to_string());
 
         let candidate = png(5);

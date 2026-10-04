@@ -77,8 +77,8 @@ fn test_init_workspace_honors_cli_overrides() {
 
     let options = ContextOptions {
         branch: Some("feature/login".to_string()),
-        os: Some("custom-os".to_string()),
-        arch: Some("custom-arch".to_string()),
+        os: Some("android".to_string()),
+        arch: Some("arm".to_string()),
         labels: vec![("theme".to_string(), "dark".to_string())],
         ..Default::default()
     };
@@ -87,7 +87,7 @@ fn test_init_workspace_honors_cli_overrides() {
     init_workspace(&ctx).expect("init_workspace should succeed");
 
     let platform_key = ctx.platform.to_key().unwrap();
-    assert_eq!(platform_key, "9:custom-os-11:custom-arch-5:theme=4:dark");
+    assert_eq!(platform_key, "android-arm+theme=dark");
     assert!(
         base_path
             .join(".gleon/manifests")

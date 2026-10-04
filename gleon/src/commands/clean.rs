@@ -9,24 +9,13 @@ use tracing::info;
 use crate::{commands::report_failure, exit_code::ExitCode};
 
 /// Runs the `clean` command.
-pub fn run_clean(
-    ctx: &ResolvedContext,
-    dry_run: bool,
-    skip_gitignore: bool,
-    keep_runs: bool,
-) -> ExitCode {
-    let options = CleanOptions {
-        dry_run,
-        skip_gitignore,
-        keep_runs,
-    };
-
-    let res = match clean_workspace(ctx, &options) {
+pub fn run_clean(ctx: &ResolvedContext, options: &CleanOptions) -> ExitCode {
+    let res = match clean_workspace(ctx, options) {
         Ok(r) => r,
         Err(e) => return report_failure("Error cleaning workspace", &e),
     };
 
-    if dry_run {
+    if options.dry_run {
         info!(
             "[dry-run] Found {} screenshot(s) to remove:",
             res.deleted_files.len()
@@ -41,9 +30,9 @@ pub fn run_clean(
             }
         }
         if res.cache_cleaned {
-            info!("[dry-run] Would remove .gleon/runs and .gleon/diffs directories.");
+            info!("[dry-run] Would remove the .gleon/runs directory.");
         }
-    } else {
+    } else if options.screenshots {
         info!(
             "Removed {} screenshot(s) ({} untracked from Git index).",
             res.deleted_files.len(),
@@ -55,9 +44,9 @@ pub fn run_clean(
                 res.gitignore_entries_added.len()
             );
         }
-        if res.cache_cleaned {
-            info!("Cleaned .gleon/runs and .gleon/diffs cache.");
-        }
+    }
+    if !options.dry_run && res.cache_cleaned {
+        info!("Cleaned the .gleon/runs cache.");
     }
 
     ExitCode::Success
@@ -105,12 +94,34 @@ screenshots:
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
         // 1. Dry run
-        let exit_code = run_clean(&ctx, true, false, false);
+        let exit_code = run_clean(
+            &ctx,
+            &CleanOptions {
+                dry_run: true,
+                screenshots: true,
+                skip_gitignore: false,
+                keep_runs: false,
+            },
+        );
         assert_eq!(exit_code, ExitCode::Success);
         assert!(test_dir.join("login.png").exists());
 
-        // 2. Real run
-        let exit_code = run_clean(&ctx, false, false, false);
+        // 2. A plain run keeps the screenshots (an integration's goldens) and `.gitignore`.
+        let exit_code = run_clean(&ctx, &CleanOptions::default());
+        assert_eq!(exit_code, ExitCode::Success);
+        assert!(test_dir.join("login.png").exists());
+        assert!(!base_path.join(".gitignore").exists());
+
+        // 3. Real run with screenshots
+        let exit_code = run_clean(
+            &ctx,
+            &CleanOptions {
+                dry_run: false,
+                screenshots: true,
+                skip_gitignore: false,
+                keep_runs: false,
+            },
+        );
         assert_eq!(exit_code, ExitCode::Success);
         assert!(!test_dir.join("login.png").exists());
         assert!(base_path.join(".gitignore").exists());
@@ -144,12 +155,28 @@ screenshots:
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
         // 1. Dry run with keep_runs=true and skip_gitignore=true
-        let exit_code = run_clean(&ctx, true, true, true);
+        let exit_code = run_clean(
+            &ctx,
+            &CleanOptions {
+                dry_run: true,
+                screenshots: true,
+                skip_gitignore: true,
+                keep_runs: true,
+            },
+        );
         assert_eq!(exit_code, ExitCode::Success);
         assert!(test_dir.join("login.png").exists());
 
         // 2. Real run with keep_runs=true and skip_gitignore=true
-        let exit_code = run_clean(&ctx, false, true, true);
+        let exit_code = run_clean(
+            &ctx,
+            &CleanOptions {
+                dry_run: false,
+                screenshots: true,
+                skip_gitignore: true,
+                keep_runs: true,
+            },
+        );
         assert_eq!(exit_code, ExitCode::Success);
         assert!(!test_dir.join("login.png").exists());
         assert!(!base_path.join(".gitignore").exists());
@@ -178,7 +205,15 @@ screenshots:
 
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-        let exit_code = run_clean(&ctx, false, false, false);
+        let exit_code = run_clean(
+            &ctx,
+            &CleanOptions {
+                dry_run: false,
+                screenshots: true,
+                skip_gitignore: false,
+                keep_runs: false,
+            },
+        );
         assert_eq!(exit_code, ExitCode::Failure);
     }
 }

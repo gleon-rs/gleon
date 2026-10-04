@@ -21,7 +21,7 @@
       "default": []
     },
     "fallback_platform": {
-      "description": "Optional fallback platform identifier used when current platform baselines are missing.",
+      "description": "Optional fallback platform identifier used when current platform baselines are missing.\n\nFor integrations that commit goldens as image files (the Flutter package) it is the\nplatform of the shared goldens (`<dir>/<file>`); only its OS and architecture count, under\nthe names a process reports (`macos-aarch64`, not `macos-arm64`: others are an error for\nintegrations). On it text is compared by default; any other platform keeps its own goldens\nin `<dir>/<os>-<arch>/<file>` and, until it has one, compares the shared golden with text\nignored by default (see `text_tolerance`). Without it every platform compares the shared\ngoldens that way. `platform` and the `GLEON_*PLATFORM` variables are read by the CLI only.",
       "anyOf": [
         {
           "$ref": "#/$defs/PlatformConfig"
@@ -277,7 +277,7 @@
           "default": "pixel"
         },
         "text_tolerance": {
-          "description": "How much text may differ, in `pixel` mode: the largest share of differing pixels in any\ntile of the text an integration reports, `[0, 1]`; unset, text never fails\n([`crate::tolerance::TextTolerance::DEFAULT`]).",
+          "description": "How much text may differ, in `pixel` mode: the largest share of differing pixels in any\ntile of the text an integration reports, `[0, 1]`. Unset, it depends on the golden\n([`crate::tolerance::TextTolerance::resolve`]): 0.05 against a golden of the platform the\ntest runs on (see `fallback_platform`), else 1, so text never fails. A value set here\napplies to every golden of the rule: 1 turns text comparison off.",
           "anyOf": [
             {
               "$ref": "#/$defs/TextTolerance"
@@ -294,7 +294,7 @@
       ]
     },
     "TextTolerance": {
-      "description": "How much text may differ, in pixel and exact mode.\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared strictly.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking\nit: layout stays exact, text content is not compared. Lower values compare text, at the\nrisk of failing on another OS's rendering.",
+      "description": "How much text may differ, in pixel and exact mode.\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared strictly.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking\nit: layout stays exact, text content is not compared. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",
       "type": "number",
       "format": "double",
       "maximum": 1.0,

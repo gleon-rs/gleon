@@ -229,7 +229,10 @@ impl Cases {
                 .filter(|report| {
                     report.outcome == CaseOutcome::Missing
                         || root.is_none_or(|root| {
-                            root.join(&report.golden.path).try_exists().unwrap_or(true)
+                            // The compared golden: a platform's own one may not exist yet.
+                            root.join(report.golden.compared())
+                                .try_exists()
+                                .unwrap_or(true)
                         })
                 })
                 .collect();
@@ -560,6 +563,7 @@ pub(crate) mod fixtures {
                 blob: None,
                 width: Some(10),
                 height: Some(10),
+                fallback: None,
             },
             candidate: CandidateImage {
                 sha256: Some(candidate),
@@ -792,6 +796,11 @@ mod tests {
         write(&runs_latest, report("live", CaseOutcome::Match), None, 10);
         write(&runs_latest, report("gone", CaseOutcome::Match), None, 10);
         write(&runs_latest, report("new", CaseOutcome::Missing), None, 10);
+        // Compared with the shared golden: this platform's own one does not exist yet.
+        let mut fallback = report("fallback", CaseOutcome::Match);
+        fallback.golden.path = "linux-x86_64/live.png".to_owned();
+        fallback.golden.fallback = Some("live.png".to_owned());
+        write(&runs_latest, fallback, None, 10);
         write(
             &runs_latest,
             report("ci", CaseOutcome::Match),
@@ -801,10 +810,10 @@ mod tests {
         std::fs::write(temp.path().join("ci.png"), b"png").unwrap();
 
         let cases = Cases::load(&runs_latest, None).unwrap();
-        assert_eq!(names(&cases), ["ci", "live", "new"]);
+        assert_eq!(names(&cases), ["ci", "fallback", "live", "new"]);
         assert_eq!(cases.run_id(), None);
         assert_eq!(cases.warnings().len(), 1);
-        assert!(cases.warnings()[0].starts_with("2 case report(s) without a run id"));
+        assert!(cases.warnings()[0].starts_with("3 case report(s) without a run id"));
 
         // Outside a workspace (a downloaded artifact) nothing can be checked on disk.
         let copy = temp.path().join("download");

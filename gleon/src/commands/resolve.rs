@@ -363,7 +363,16 @@ mod tests {
             .join("auth");
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
-        let conflicted = include_str!("../../../gleon-core/tests/fixtures/conflict_2way.json");
+        // "Ours" names a real PNG fixture by its content address: downloads check it.
+        let ours_blob = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gleon-core/tests/fixtures/baseline_100x100.png");
+        let ours_hash = gleon_core::manifest::ImageHash::new(
+            "sha256",
+            "d9d60867c3201adfe2c83a740037e71c8daef340283cc21c8a58d3f76d34669a",
+        )
+        .unwrap();
+        let conflicted = include_str!("../../../gleon-core/tests/fixtures/conflict_2way.json")
+            .replace(&"1".repeat(64), ours_hash.value());
         let login_path = manifests_dir.join("login.json");
         std::fs::write(&login_path, conflicted).unwrap();
 
@@ -372,14 +381,7 @@ mod tests {
         let conflicts = scan_conflicts(base_dir, None).unwrap();
         let config = StorageConfig::new("memory://");
         let adapter = ObjectStoreAdapter::from_config(&config).unwrap();
-
-        let ours_hash = gleon_core::manifest::ImageHash::new(
-            "sha256",
-            "1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .unwrap();
-        // Upload a dummy blob for ours hash into memory adapter so download_blob succeeds
-        adapter.upload_blob(&ours_hash, &login_path).await.unwrap();
+        adapter.upload_blob(&ours_hash, &ours_blob).await.unwrap();
 
         // This will attempt to download missing blob for ours and theirs
         let count = resolve_conflicts_with_selector(&ctx, conflicts, Some(&adapter), |_| Ok(0))

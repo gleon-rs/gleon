@@ -40,7 +40,8 @@ async fn test_file_scheme_storage_integration() {
 
     let hash = gleon_core::manifest::ImageHash::new(
         "sha256",
-        "a1b2c3d4e5f67890123456789abcdef0123456789abcdef0123456789abcdef0",
+        // The real content address of the fixture: downloads check it.
+        "d9d60867c3201adfe2c83a740037e71c8daef340283cc21c8a58d3f76d34669a",
     )
     .unwrap();
 

@@ -145,9 +145,27 @@ pub fn unused_text_tolerance(golden_uri: &str) -> String {
     )
 }
 
+/// The clause of a failure against the shared golden of `platform`, compared because this
+/// platform has no own golden `own_uri` yet.
+pub fn fallback(platform: &str, own_uri: &str) -> String {
+    format!(
+        " Compared with the {platform} golden: this platform has no own golden \"{own_uri}\" yet \
+         (record or approve it to compare text too)."
+    )
+}
+
 /// Flutter's message for a missing golden.
 pub fn missing_golden(golden_uri: &str) -> String {
     format!("Could not be compared against non-existent file: \"{golden_uri}\"")
+}
+
+/// The clause of a missing golden on a platform with its own goldens: the shared golden of
+/// `platform` is missing too, and a new golden starts there.
+pub fn missing_fallback(platform: &str, shared_uri: &str) -> String {
+    format!(
+        " (nor the {platform} golden \"{shared_uri}\": record a new golden on {platform} first, \
+         every other platform compares it until it has its own)"
+    )
 }
 
 /// An invalid `.gleon/gleon.yaml`, `GLEON_METRICS` value or golden name.
