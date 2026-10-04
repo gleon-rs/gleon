@@ -1,0 +1,5 @@
+# LF everywhere: fixtures, snapshots and schemas are compared byte for byte, also on Windows
+# (whose checkouts would otherwise turn them into CRLF).
+* text=auto eol=lf
+*.png binary
+*.bin binary
