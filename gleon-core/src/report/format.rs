@@ -1,6 +1,9 @@
 //! Path and outcome formatting helpers shared by the report generators.
 
-use std::path::{Component, Path};
+use std::{
+    borrow::Cow,
+    path::{Component, Path},
+};
 
 use gleon_model::case::{CaseOutcome, CaseReport, text};
 
@@ -81,22 +84,29 @@ impl std::fmt::Display for CaseSummary<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let report = self.0;
         let size = |width: Option<u32>, height: Option<u32>| Some((width?, height?));
-        let detail = report.message.clone().or_else(|| match report.outcome {
-            CaseOutcome::DimensionMismatch => Some(text::dimension_summary(
-                size(report.golden.width, report.golden.height)?,
-                size(report.candidate.width, report.candidate.height)?,
-            )),
-            _ => report.metrics.as_ref().map(text::metrics_summary),
+        let detail = report.message.as_deref().map(Cow::Borrowed).or_else(|| {
+            match report.outcome {
+                CaseOutcome::DimensionMismatch => Some(text::dimension_summary(
+                    size(report.golden.width, report.golden.height)?,
+                    size(report.candidate.width, report.candidate.height)?,
+                )),
+                _ => report.metrics.as_ref().map(text::metrics_summary),
+            }
+            .map(Cow::Owned)
         });
         f.write_str(status(report.outcome))?;
         if let Some(kind) = report.error_kind {
             write!(f, " ({})", kind.as_str())?;
         }
-        let fallback = match report.outcome {
+        let otherwise = match report.outcome {
             CaseOutcome::Missing => "the golden does not exist yet",
             outcome => outcome.as_str(),
         };
-        write!(f, ": {}", detail.as_deref().unwrap_or(fallback))
+        write!(f, ": {}", detail.as_deref().unwrap_or(otherwise))?;
+        if let Some(shared) = &report.golden.fallback {
+            write!(f, " ({})", text::ComparedWithFallback(shared))?;
+        }
+        Ok(())
     }
 }
 
@@ -196,5 +206,13 @@ mod tests {
             "Mismatch: <0.0001% (1 of 4000000px) differ"
         );
         assert_eq!(status(CaseOutcome::Identical), "Pass");
+
+        let mut fallback = report("a", CaseOutcome::Mismatch);
+        fallback.golden.fallback = Some("test/goldens/a.png".to_owned());
+        assert_eq!(
+            CaseSummary(&fallback).to_string(),
+            "Mismatch: 5.00% (5 of 100px) differ (compared with test/goldens/a.png of the \
+             fallback platform)"
+        );
     }
 }

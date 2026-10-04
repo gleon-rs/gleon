@@ -205,11 +205,18 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         }
         Commands::Clean {
             dry_run,
+            screenshots,
             skip_gitignore,
             keep_runs,
         } => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            commands::clean::run_clean(&ctx, *dry_run, *skip_gitignore, *keep_runs)
+            let options = gleon_core::ops::clean::CleanOptions {
+                dry_run: *dry_run,
+                screenshots: *screenshots,
+                skip_gitignore: *skip_gitignore,
+                keep_runs: *keep_runs,
+            };
+            commands::clean::run_clean(&ctx, &options)
         }
         // The exit code is the test command's, not a gleon outcome.
         Commands::Test { command } => {

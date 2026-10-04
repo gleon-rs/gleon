@@ -44,23 +44,37 @@ screenshots:
     let golden_file = goldens_dir.join("nav.png");
     fs::write(&golden_file, VALID_PNG_BYTES).unwrap();
 
-    // 1. Run gleon clean --dry-run
+    // 1. A plain clean removes the run cache only: the rules may match committed goldens (an
+    // integration's workspace).
+    Command::cargo_bin("gleon")
+        .unwrap()
+        .current_dir(base_path)
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Cleaned the .gleon/runs cache."))
+        .stderr(predicate::str::contains("screenshot(s)").not());
+    assert!(golden_file.exists());
+    assert!(!runs_dir.exists());
+    assert!(!base_path.join(".gitignore").exists());
+    fs::create_dir_all(&runs_dir).unwrap();
+
+    // 2. Run gleon clean --screenshots --dry-run
     let mut cmd_dry = Command::cargo_bin("gleon").unwrap();
     cmd_dry
         .current_dir(base_path)
-        .arg("clean")
-        .arg("--dry-run")
+        .args(["clean", "--screenshots", "--dry-run"])
         .assert()
         .success()
         .stderr(predicate::str::contains("[dry-run]"));
 
     assert!(golden_file.exists());
 
-    // 2. Run gleon clean
+    // 3. Run gleon clean --screenshots
     let mut cmd_exec = Command::cargo_bin("gleon").unwrap();
     cmd_exec
         .current_dir(base_path)
-        .arg("clean")
+        .args(["clean", "--screenshots"])
         .assert()
         .success()
         .stderr(predicate::str::contains("Removed 1 screenshot(s)"));

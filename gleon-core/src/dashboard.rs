@@ -12,7 +12,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use gleon_model::{
-    case::{CaseErrorKind, CaseOutcome, CaseReport, Metrics},
+    case::{CaseErrorKind, CaseOutcome, CaseReport, Metrics, text},
     platform::PlatformConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -123,7 +123,14 @@ impl From<&CaseReport> for TestHistoryEntry {
             outcome: report.outcome,
             error_kind: report.error_kind,
             metrics: report.metrics,
-            message: report.message.clone(),
+            message: match (&report.message, report.golden.fallback.as_deref()) {
+                (Some(message), Some(shared)) => Some(format!(
+                    "{message} ({})",
+                    text::ComparedWithFallback(shared)
+                )),
+                (None, Some(shared)) => Some(text::ComparedWithFallback(shared).to_string()),
+                (message, None) => message.clone(),
+            },
         }
     }
 }
@@ -556,7 +563,8 @@ where
                 history_create_only = true;
             }
 
-            if let Some(remote_html) = ad.get_object("dashboard.html").await? {
+            // Only its version: the page is compiled again from the history.
+            if let Some(remote_html) = ad.head_object("dashboard.html").await? {
                 expected_dashboard_etag = remote_html.e_tag;
                 expected_dashboard_version = remote_html.version;
             } else {
@@ -729,6 +737,27 @@ mod tests {
     fn passing_run(run_id: &str) -> Cases {
         Cases::new("runs/latest", vec![report("home", CaseOutcome::Match)])
             .with_run_id(gleon_model::case::RunId::new(run_id).unwrap())
+    }
+
+    /// A failure compared with another platform's golden says so in the history.
+    #[test]
+    fn test_history_entries_name_a_fallback_golden() {
+        use crate::cases::fixtures::report;
+
+        let mut case = report("a", CaseOutcome::Mismatch);
+        case.message = Some("5.00% (5 of 100px) differ".to_owned());
+        case.golden.fallback = Some("test/goldens/a.png".to_owned());
+        assert_eq!(
+            TestHistoryEntry::from(&case).message.as_deref(),
+            Some(
+                "5.00% (5 of 100px) differ (compared with test/goldens/a.png of the fallback platform)"
+            )
+        );
+        case.message = None;
+        assert_eq!(
+            TestHistoryEntry::from(&case).message.as_deref(),
+            Some("compared with test/goldens/a.png of the fallback platform")
+        );
     }
 
     #[test]

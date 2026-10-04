@@ -67,6 +67,14 @@ pub enum DiffOpError {
         source: io::Error,
     },
 
+    /// No screenshot matches the rules: a run that compares nothing must not pass.
+    #[error(
+        "no screenshots match the `screenshots` rules of .gleon/gleon.yaml, so nothing was \
+         compared (integrations such as the Flutter package record their own case reports: run \
+         their tests with `gleon test -- <command>` instead)"
+    )]
+    NoScreenshots,
+
     /// Error shared across `ops::*` operations.
     #[error(transparent)]
     Core(#[from] CoreError),
@@ -335,7 +343,7 @@ fn clear_previous_run(runs_latest: &Path) -> Result<(), DiffOpError> {
 /// # Errors
 ///
 /// Returns an error if the workspace is not initialized, if the platform key cannot be
-/// resolved, if manifests fail to load, if the previous run's output cannot be cleared, if
+/// resolved, if manifests fail to load, if no screenshot matches the rules (after clearing the previous run), if the previous run's output cannot be cleared, if
 /// screenshots cannot be scanned or read, if a case report or its images cannot be written, or if
 /// reading the case reports back or rendering the reports fails.
 pub fn run_diff(
@@ -358,6 +366,10 @@ pub fn run_diff(
     let test_cases = load_config_and_scan(context)?;
     let runs_dir = paths.runs_latest();
     clear_previous_run(&runs_dir)?;
+    // After clearing: a workspace without screenshots has no current run to approve from either.
+    if test_cases.is_empty() {
+        return Err(DiffOpError::NoScreenshots);
+    }
 
     let config = context.config.clone().unwrap_or_default();
     let run = DiffRun {
@@ -680,6 +692,19 @@ mod tests {
         assert!(candidate.is_file());
         assert_eq!(case_report(root, "shots/a").outcome, CaseOutcome::Mismatch);
         assert!(root.join(".gleon/runs/latest/report.md").is_file());
+
+        // Nothing to compare fails too, but the previous run is gone: its candidates are of
+        // screenshots that no longer exist.
+        std::fs::remove_file(root.join("shots/bad name.png")).unwrap();
+        std::fs::remove_file(root.join("shots/a.png")).unwrap();
+        let err = run_diff(&ctx, &DiffOptions::default()).unwrap_err();
+        assert!(matches!(err, DiffOpError::NoScreenshots), "{err:?}");
+        assert!(err.to_string().starts_with("no screenshots match"), "{err}");
+        assert!(!candidate.exists());
+        assert!(matches!(
+            crate::ops::approve_workspace(&ctx, &[], &[], None),
+            Err(crate::ops::ApproveError::NothingToApprove { .. })
+        ));
     }
 
     /// Images in a custom artifacts directory outside `latest/` are approved from and cleaned up
@@ -957,8 +982,8 @@ mod tests {
         let gleon_dir = base_path.join(".gleon");
         std::fs::create_dir_all(&gleon_dir).unwrap();
 
-        let linux_key = "5:linux-6:x86_64";
-        let macos_key = "5:macos-7:aarch64";
+        let linux_key = "linux-x86_64";
+        let macos_key = "macos-aarch64";
 
         let mut ctx = ResolvedContext {
             base_dir: base_path.to_path_buf(),

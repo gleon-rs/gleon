@@ -113,6 +113,18 @@ pub struct SsimHeadroom {
 }
 
 impl Metrics {
+    /// Whether any compared pixel differs (text included): a pass without any is the golden
+    /// itself.
+    #[must_use]
+    pub fn differs(&self) -> bool {
+        match *self {
+            Self::Pixel {
+                diff_pixels, text, ..
+            } => diff_pixels > 0 || text.is_some_and(|text| text.diff_pixels > 0),
+            Self::Ssim { changed_pixels, .. } => changed_pixels > 0,
+        }
+    }
+
     /// Combines an engine measurement with the tolerance (and the tolerance of text) it was
     /// taken under.
     ///
@@ -366,6 +378,19 @@ pub struct GoldenImage {
     /// Height in pixels; absent if the PNG header could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// The golden compared in place of `path`, which does not exist yet: the shared golden of the
+    /// workspace (its `fallback_platform`; integrations with per-platform goldens). `sha256`, `width`
+    /// and `height` describe it; `path` is still where `gleon approve` writes, also from a pass,
+    /// which keeps its candidate for that.
+    #[serde(
+        default,
+        deserialize_with = "optional_workspace_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(regex(
+        pattern = r"^(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*$"
+    ))]
+    pub fallback: Option<String>,
 }
 
 impl GoldenImage {
@@ -379,7 +404,14 @@ impl GoldenImage {
             blob,
             width: size.map(|(width, _)| width),
             height: size.map(|(_, height)| height),
+            fallback: None,
         }
+    }
+
+    /// The golden the case was compared with: [`Self::fallback`], else [`Self::path`].
+    #[must_use]
+    pub fn compared(&self) -> &str {
+        self.fallback.as_deref().unwrap_or(&self.path)
     }
 }
 
@@ -875,6 +907,9 @@ impl CaseReport {
         if self.outcome == O::Missing && self.golden.sha256.is_some() {
             return Err(InconsistentCase::MissingGoldenHash);
         }
+        if self.golden.fallback.is_some() && matches!(self.outcome, O::Missing | O::Updated) {
+            return Err(InconsistentCase::Fallback);
+        }
         if self.outcome == O::Identical
             && (self.candidate.sha256.is_none() || self.golden.sha256 != self.candidate.sha256)
         {
@@ -913,7 +948,16 @@ impl CaseReport {
         {
             return Err(InconsistentCase::TextTolerance);
         }
+        // A pass against another platform's golden keeps its candidate, for `gleon approve` to
+        // record this platform's own golden.
+        let keeps_fallback_candidate = self.golden.fallback.is_some()
+            && matches!(self.outcome, O::Match | O::Identical)
+            && self
+                .artifacts
+                .as_ref()
+                .is_some_and(|a| a.golden.is_none() && a.diff.is_none());
         if self.artifacts.is_some()
+            && !keeps_fallback_candidate
             && !matches!(
                 self.outcome,
                 O::Mismatch | O::DimensionMismatch | O::Missing
@@ -968,6 +1012,9 @@ pub enum InconsistentCase {
     /// A missing golden with a hash.
     #[error("a missing golden has no `golden.sha256`")]
     MissingGoldenHash,
+    /// A fallback golden of an outcome that compared none.
+    #[error("`golden.fallback` belongs to outcomes that compared a golden")]
+    Fallback,
     /// Identical images with different hashes.
     #[error("`identical` images have the same `sha256`")]
     IdenticalHashes,
@@ -991,7 +1038,10 @@ pub enum InconsistentCase {
     )]
     TextTolerance,
     /// Images of an outcome that keeps none.
-    #[error("`artifacts` belong to `mismatch`, `dimension_mismatch` and `missing` only")]
+    #[error(
+        "`artifacts` belong to `mismatch`, `dimension_mismatch` and `missing`, and the candidate \
+         of a pass against `golden.fallback`"
+    )]
     Artifacts,
 }
 
@@ -1200,6 +1250,19 @@ pub mod text {
             "golden is {}x{}px, test image is {}x{}px",
             golden.0, golden.1, candidate.0, candidate.1
         )
+    }
+
+    /// The note on a case compared with the shared golden ([`super::GoldenImage::fallback`]).
+    ///
+    /// Its platform has no own golden yet; written without an intermediate `String`, e.g.
+    /// `compared with test/goldens/a.png of the fallback platform`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ComparedWithFallback<'a>(pub &'a str);
+
+    impl std::fmt::Display for ComparedWithFallback<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "compared with {} of the fallback platform", self.0)
+        }
     }
 
     /// Why an image cannot be analyzed with SSIM: `width`x`height` exceeds the engine's budget.
@@ -1548,6 +1611,7 @@ mod tests {
                 blob: Some(blob),
                 width: Some(4),
                 height: Some(3),
+                fallback: None,
             }
         );
         let missing = GoldenImage::of("a.png".to_owned(), None, None);
@@ -1764,6 +1828,21 @@ mod tests {
         });
         let parse = |json: &serde_json::Value| CaseReport::parse(json.to_string().as_bytes());
         assert!(parse(&valid).is_ok());
+        let mut outside = valid.clone();
+        outside["golden"]["fallback"] = "../a.png".into();
+        assert!(matches!(parse(&outside), Err(CaseParseError::Json(_))));
+        // A pass against the fallback golden keeps its candidate for `gleon approve`.
+        let mut seeding = valid.clone();
+        seeding["outcome"] = "match".into();
+        seeding["metrics"] = serde_json::json!({
+            "kind": "pixel", "total_pixels": 4, "diff_pixels": 0, "diff_ratio": 0.0, "headroom": 0.0
+        });
+        seeding["golden"] = serde_json::json!({
+            "path": "test/goldens/linux-x86_64/A.png", "fallback": "test/goldens/A.png",
+            "sha256": "1".repeat(64)
+        });
+        let report = parse(&seeding).unwrap();
+        assert_eq!(report.golden.compared(), "test/goldens/A.png");
 
         // Other writers may spell an absent image as `null`, which the schema allows.
         let mut nulls = valid.clone();
@@ -1823,6 +1902,25 @@ mod tests {
             (
                 serde_json::json!({"golden": {"path": "a.png", "sha256": "0".repeat(64)}}),
                 InconsistentCase::MissingGoldenHash,
+            ),
+            (
+                serde_json::json!({"golden": {"path": "linux-x86_64/a.png", "fallback": "a.png"}}),
+                InconsistentCase::Fallback,
+            ),
+            (
+                serde_json::json!({
+                    "outcome": "match", "metrics": metrics,
+                    "golden": {"path": "a.png", "sha256": "1".repeat(64)}
+                }),
+                InconsistentCase::Artifacts,
+            ),
+            (
+                serde_json::json!({
+                    "outcome": "match", "metrics": metrics,
+                    "golden": {"path": "linux-x86_64/a.png", "fallback": "a.png", "sha256": "1".repeat(64)},
+                    "artifacts": {"golden": ".gleon/runs/latest/artifacts/a/golden.png", "candidate": ".gleon/runs/latest/artifacts/a/candidate.png"}
+                }),
+                InconsistentCase::Artifacts,
             ),
             (
                 serde_json::json!({"outcome": "identical", "golden": {"path": "a.png", "sha256": "1".repeat(64)}}),

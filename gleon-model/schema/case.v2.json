@@ -363,6 +363,14 @@
             }
           ]
         },
+        "fallback": {
+          "description": "The golden compared in place of `path`, which does not exist yet: the shared golden of the\nworkspace (its `fallback_platform`; integrations with per-platform goldens). `sha256`, `width`\nand `height` describe it; `path` is still where `gleon approve` writes, also from a pass,\nwhich keeps its candidate for that.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
+        },
         "height": {
           "description": "Height in pixels; absent if the PNG header could not be read.",
           "type": [
@@ -783,7 +791,7 @@
       ]
     },
     "TextTolerance": {
-      "description": "How much text may differ, in pixel and exact mode.\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared strictly.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking\nit: layout stays exact, text content is not compared. Lower values compare text, at the\nrisk of failing on another OS's rendering.",
+      "description": "How much text may differ, in pixel and exact mode.\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared strictly.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking\nit: layout stays exact, text content is not compared. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",
       "type": "number",
       "format": "double",
       "maximum": 1.0,

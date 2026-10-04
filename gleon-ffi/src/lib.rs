@@ -60,7 +60,7 @@ use session::{ArtifactNames, Integration, Session, SessionOptions};
 
 /// Version of the C contract. Bumped on any breaking change so the caller can refuse a
 /// mismatched native library instead of misreading it.
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;
 
 /// Session flag: goldens belong to workspaces, each golden to the nearest directory above it with
 /// `.gleon/gleon.yaml` (without, every golden compares exactly and nothing is recorded).
@@ -427,6 +427,11 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 /// Compares `candidate` against the golden file (`mode` 0), or writes it there (`mode` 1,
 /// update mode, PNG only).
 ///
+/// `golden_path` is the shared golden. When the `.gleon/gleon.yaml` of its workspace names the
+/// `fallback_platform` the shared goldens were recorded on and this process runs on another,
+/// its own golden `<dir>/<os>-<arch>/<file>` is written and compared instead, and the shared one
+/// only while the own one does not exist.
+///
 /// The strings are `lengths_count` (4) UTF-8 strings packed into `strings`, `lengths` giving
 /// their byte lengths, in this order: `golden_path` (the file), `golden_uri` (the key shown in
 /// messages), `failures_dir` (the directory for failure artifacts, shown verbatim), `test_name`
@@ -440,7 +445,8 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 /// `[x, y, width, height]` are at `masks`. `text_region_count` text regions `[x, y, width,
 /// height]` (candidate pixels) are at `text_regions`, compared in pixel and exact mode under
 /// `text_tolerance`: the largest share of differing pixels in any tile of text, `[0, 1]` (NaN:
-/// the rule's `text_tolerance`, else 1, so text never fails).
+/// the rule's `text_tolerance`, else 0.05 against a golden of this platform and 1, so text never
+/// fails, against any other).
 ///
 /// # Safety
 /// Each `(ptr, len)` pair must describe a readable buffer of `len` elements (bytes for

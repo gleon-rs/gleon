@@ -9,8 +9,8 @@ use std::{
 };
 
 use futures::StreamExt as _;
+use gleon_model::fs::Durability;
 use object_store::{ObjectStore, ObjectStoreExt, parse_url_opts, path::Path as ObjPath};
-use tempfile::NamedTempFile;
 use tracing::{debug, instrument, warn};
 
 use super::{BlobMetadata, StorageError, blob_key};
@@ -550,6 +550,15 @@ pub struct RemoteObject {
     pub version: Option<String>,
 }
 
+/// The version of a remote object (no contents), for a conditional put over it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectVersion {
+    /// `ETag` identifier from remote storage, if supported.
+    pub e_tag: Option<String>,
+    /// Version identifier from remote storage, if supported.
+    pub version: Option<String>,
+}
+
 impl ObjectStoreAdapter {
     /// Checks if a blob exists on remote storage without downloading it.
     ///
@@ -568,21 +577,32 @@ impl ObjectStoreAdapter {
         }
     }
 
-    /// Downloads a single blob from remote storage at `blob_key(hash)` to `dest_path` atomically.
+    /// Downloads a single blob from remote storage at `blob_key(hash)` to `dest_path` atomically
+    /// and durably ([`gleon_model::fs::write_atomically_with`]), streamed: a large blob never sits
+    /// in memory whole. The content is checked against its hash before it is kept, so a truncated
+    /// or wrong download never becomes a baseline; a blob of a scheme that cannot be checked
+    /// (only `sha256` can) is not downloaded.
     ///
     /// # Errors
-    /// Returns [`StorageError::BlobNotFound`] if the hash does not exist on remote storage,
-    /// or [`StorageError::Io`] / [`StorageError::PersistFailed`] if atomic write fails.
+    /// Returns [`StorageError::UnsupportedHashScheme`] for a hash that cannot be checked,
+    /// [`StorageError::BlobNotFound`] if the hash does not exist on remote storage,
+    /// [`StorageError::Store`] if the download fails, [`StorageError::HashMismatch`] if the
+    /// content is not the blob's, or [`StorageError::Io`] if writing it fails.
     #[instrument(skip(self, dest_path), level = "debug")]
     pub async fn download_blob(
         &self,
         hash: &crate::manifest::ImageHash,
         dest_path: &Path,
     ) -> Result<(), StorageError> {
-        let key = blob_key(hash);
+        use sha2::Digest as _;
 
-        let get_result = self.store.get(&key).await;
-        let get_output = match get_result {
+        if hash.scheme() != "sha256" {
+            return Err(StorageError::UnsupportedHashScheme(
+                hash.scheme().to_owned(),
+            ));
+        }
+        let key = blob_key(hash);
+        let get_output = match self.store.get(&key).await {
             Ok(output) => output,
             Err(object_store::Error::NotFound { .. }) => {
                 return Err(StorageError::BlobNotFound(hash.value().to_string()));
@@ -590,36 +610,58 @@ impl ObjectStoreAdapter {
             Err(err) => return Err(StorageError::Store { source: err }),
         };
 
-        let bytes = get_output
-            .bytes()
-            .await
-            .map_err(|source| StorageError::Store { source })?;
-
-        let dest_path_buf = dest_path.to_path_buf();
-        tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
-            let parent_dir = dest_path_buf.parent().unwrap_or_else(|| Path::new("."));
-
-            std::fs::create_dir_all(parent_dir)?;
-
-            let mut temp_file = NamedTempFile::new_in(parent_dir)?;
-            temp_file.write_all(&bytes)?;
-            temp_file.as_file().sync_all()?;
-            temp_file
-                .persist(&dest_path_buf)
-                .map_err(|e| StorageError::PersistFailed {
-                    path: dest_path_buf.display().to_string(),
-                    source: e,
-                })?;
-
-            if let Ok(dir_file) = std::fs::File::open(parent_dir) {
-                let _ = dir_file.sync_all();
+        // Chunks go to one blocking writer; `Err` aborts it, so an interrupted download leaves
+        // nothing behind.
+        let (chunks_tx, mut chunks_rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, ()>>(8);
+        let expected = hash.value().to_owned();
+        let dest = dest_path.to_path_buf();
+        let writer = tokio::task::spawn_blocking(move || {
+            let mut actual = None;
+            let written =
+                gleon_model::fs::write_atomically_with(&dest, Durability::Durable, |file| {
+                    let mut digest = sha2::Sha256::new();
+                    while let Some(chunk) = chunks_rx.blocking_recv() {
+                        let chunk =
+                            chunk.map_err(|()| std::io::Error::other("download interrupted"))?;
+                        digest.update(&chunk);
+                        file.write_all(&chunk)?;
+                    }
+                    let digest = hex::encode(digest.finalize());
+                    if digest.eq_ignore_ascii_case(&expected) {
+                        Ok(())
+                    } else {
+                        actual = Some(digest);
+                        Err(std::io::Error::from(std::io::ErrorKind::InvalidData))
+                    }
+                });
+            (written, actual)
+        });
+        let mut stream = get_output.into_stream();
+        let mut failed = None;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                failed = Some(e);
+            });
+            let stop = chunk.is_err();
+            // A closed channel means the writer failed: its error is reported below.
+            if chunks_tx.send(chunk).await.is_err() || stop {
+                break;
             }
-            Ok(())
-        })
-        .await
-        .map_err(|e| StorageError::Io {
+        }
+        drop(chunks_tx);
+        let (written, actual) = writer.await.map_err(|e| StorageError::Io {
             source: std::io::Error::other(e),
-        })??;
+        })?;
+        if let Some(source) = failed {
+            return Err(StorageError::Store { source });
+        }
+        if let Some(actual) = actual {
+            return Err(StorageError::HashMismatch {
+                expected: hash.value().to_owned(),
+                actual,
+            });
+        }
+        written?;
 
         debug!(hash = %hash.value(), path = %dest_path.display(), "Successfully downloaded blob from remote storage");
         Ok(())
@@ -793,6 +835,26 @@ impl ObjectStoreAdapter {
                     version,
                 }))
             }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(source) => Err(StorageError::Store { source }),
+        }
+    }
+
+    /// The version of the object at `relative_path` without downloading it; `Ok(None)` if it
+    /// does not exist.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the check fails for reasons other than `NotFound`.
+    #[instrument(skip(self), level = "debug")]
+    pub async fn head_object(
+        &self,
+        relative_path: &str,
+    ) -> Result<Option<ObjectVersion>, StorageError> {
+        match self.store.head(&ObjPath::from(relative_path)).await {
+            Ok(meta) => Ok(Some(ObjectVersion {
+                e_tag: meta.e_tag,
+                version: meta.version,
+            })),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(source) => Err(StorageError::Store { source }),
         }
@@ -1210,8 +1272,17 @@ mod tests {
             .await
             .unwrap();
 
-        let retrieved = adapter.get_object("history.json").await.unwrap();
-        assert_eq!(retrieved.map(|r| r.bytes), Some(content.clone()));
+        let retrieved = adapter.get_object("history.json").await.unwrap().unwrap();
+        assert_eq!(retrieved.bytes, content);
+        assert_eq!(
+            adapter.head_object("history.json").await.unwrap(),
+            Some(ObjectVersion {
+                e_tag: retrieved.e_tag,
+                version: retrieved.version,
+            }),
+            "the version without the contents"
+        );
+        assert_eq!(adapter.head_object("missing.json").await.unwrap(), None);
 
         // 3. Put object with empty/invalid content-type filters it out cleanly
         adapter

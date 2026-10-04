@@ -599,8 +599,8 @@ mod tests {
         let gleon_dir = base_path.join(".gleon");
         std::fs::create_dir_all(&gleon_dir).unwrap();
 
-        let linux_key = "5:linux-6:x86_64";
-        let macos_key = "5:macos-7:aarch64";
+        let linux_key = "linux-x86_64";
+        let macos_key = "macos-aarch64";
 
         let mut ctx = ResolvedContext {
             base_dir: base_path.to_path_buf(),

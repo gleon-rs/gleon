@@ -237,17 +237,24 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Clean local screenshot files, untrack them from Git, and update .gitignore
+    /// Remove the .gleon/runs cache; with --screenshots also delete the screenshot files, untrack
+    /// them from Git and add the rules to .gitignore
     Clean {
         /// Preview changes without deleting files or modifying Git state
         #[arg(long)]
         dry_run: bool,
 
-        /// Skip appending ignore rules to .gitignore
+        /// Also delete the screenshots the rules match, untrack them and gitignore them (for
+        /// baselines kept in manifests; never in an integration's workspace, where they are the
+        /// committed goldens)
+        #[arg(long)]
+        screenshots: bool,
+
+        /// Skip appending ignore rules to .gitignore (with --screenshots)
         #[arg(long)]
         skip_gitignore: bool,
 
-        /// Skip deleting .gleon/runs and .gleon/diffs temporary directories
+        /// Skip deleting the .gleon/runs temporary directory
         #[arg(long)]
         keep_runs: bool,
     },
@@ -571,13 +578,19 @@ mod tests {
 
     #[test]
     fn test_parse_approve_command() -> Result<(), clap::Error> {
-        let args = ["gleon", "approve", "--from", ".gleon/diffs", "auth/login"];
+        let args = [
+            "gleon",
+            "approve",
+            "--from",
+            "downloads/latest",
+            "auth/login",
+        ];
         let cli = Cli::try_parse_from(args)?;
         assert_eq!(
             cli.command,
             Commands::Approve {
                 paths: vec![std::path::PathBuf::from("auth/login")],
-                from: vec![std::path::PathBuf::from(".gleon/diffs")],
+                from: vec![std::path::PathBuf::from("downloads/latest")],
             }
         );
         let several = Cli::try_parse_from(["gleon", "approve", "--from", "a", "--from", "b"])?;

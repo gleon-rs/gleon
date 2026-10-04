@@ -61,7 +61,7 @@ Generate golden screenshots using your existing test suite (e.g. `flutter test` 
 gleon stage
 ```
 
-`gleon stage` computes cryptographic hashes, copies the image files into local content-addressable storage, and writes deterministic JSON manifests into `.gleon/manifests/<platform>/`.
+`gleon stage` computes cryptographic hashes, copies the image files into local content-addressable storage, and writes deterministic JSON manifests into `.gleon/manifests/<platform>/` (`<os>-<arch>`, e.g. `macos-aarch64`, then `+<renderer>` and `+<key>=<value>` per label when set).
 
 Commit these manifest files to Git:
 
@@ -110,7 +110,7 @@ gleon dashboard
 | `gleon approve [NAMES...]` | Accepts the candidates of failed cases as new baselines.                                    | `gleon approve`<br>`gleon approve auth/login`                                   |
 | `gleon pull`               | Downloads missing baseline blobs from remote object storage to local storage.               | `gleon pull`<br>`gleon pull --all`                                              |
 | `gleon push`               | Uploads locally staged baseline blobs to remote object storage.                             | `gleon push`                                                                    |
-| `gleon clean`              | Removes ephemeral diff artifacts and orphaned files.                                        | `gleon clean`<br>`gleon clean --dry-run`                                        |
+| `gleon clean`              | Removes `.gleon/runs/`; `--screenshots` also deletes, untracks and ignores screenshots.     | `gleon clean`<br>`gleon clean --screenshots --dry-run`                          |
 | `gleon lint`               | Verifies integrity and schema compliance of all manifests and configs.                      | `gleon lint`                                                                    |
 | `gleon resolve`            | Interactively or automatically resolves Git merge conflicts in baseline manifests.          | `gleon resolve`                                                                 |
 
@@ -149,10 +149,11 @@ screenshots:
       color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
     # Optional, 'pixel' only: integrations that report the text of a screenshot (the Flutter package)
     # compare it under this tolerance and everything else strictly: the text passes while every
-    # 16x16 square of it has at most this share of differing pixels [0.0 - 1.0]. Default 1: text
-    # never fails, because operating systems rasterize glyphs differently (about 40% of a square),
-    # more than a changed character does; lower it only for goldens of one OS (per-platform
-    # goldens). `gleon diff` sees no text.
+    # 16x16 square of it has at most this share of differing pixels [0.0 - 1.0]. Unset, the default
+    # depends on the golden: 0.05 against a golden of the platform the test runs on (see
+    # `fallback_platform`), else 1 (text never fails, because operating systems rasterize glyphs
+    # differently, about 40% of a square, more than a changed character does). A value set here
+    # always applies: 1 turns text comparison off everywhere. `gleon diff` sees no text.
     text_tolerance: 1.0
     masks:
       # Optional: Ignore dynamic regions (clocks, avatars, blinking cursors)
@@ -171,6 +172,10 @@ exclude:
 
 # Optional: Fallback platform for Sparse Multi-Platform Baselines
 # When secondary platforms render identically to the fallback, no duplicate manifests are stored.
+# For integrations with golden files (Flutter) it is the platform of the shared goldens
+# `<dir>/<file>` (OS and architecture, with the names a process reports: `macos-aarch64`, not
+# `macos-arm64`): there text is compared by default, every other platform keeps its own goldens
+# in `<dir>/<os>-<arch>/<file>` (e.g. `linux-x86_64`).
 fallback_platform:
   os: macos
   arch: aarch64
@@ -215,6 +220,39 @@ steps:
 ```
 
 On Windows `gleon test -- flutter test` finds `flutter.bat` like a shell does.
+
+#### Per-platform goldens of integrations
+
+Integrations commit goldens as PNG files, one per test, recorded on one platform: name it with
+`fallback_platform`, with the names a process reports (`std::env::consts`: `macos-aarch64`,
+`linux-x86_64`, `windows-x86_64`; `macos-arm64` or `darwin` are config errors, since they would
+never match). On that platform the shared goldens `<dir>/<file>` are its own, so text is compared
+by default (`text_tolerance` 0.05: a pixel of font-engine noise per 16x16 square passes, a
+changed digit fails). Every other platform has its own goldens in `<dir>/<os>-<arch>/<file>`
+(`linux-x86_64`, `linux-aarch64`, `windows-x86_64`, `macos-x86_64`): `--update-goldens` writes
+them there, and until one exists the shared golden is compared with text under the default 1
+(text ignored, layout exact). A `text_tolerance` set in the rule or the call applies on every
+platform, so `1` turns text comparison off on the goldens' platform too.
+
+A case compared with the shared golden names the own golden in `golden.path` and the compared
+one in `golden.fallback`; with metrics on, a pass that differs from it keeps its candidate.
+Approving the runs of a CI matrix therefore records one golden per platform, from failures and
+passes alike (a pass without differences is copied from the shared golden), without conflicts; a
+plain `gleon approve` does so for every such case, and a path filter may name the shared golden
+the test printed. Only goldens a rule matches follow this layout: an excluded or unmatched golden
+stays one file for every platform.
+
+```bash
+gleon approve --from metrics-linux-x64 --from metrics-windows-x64
+gleon approve --from metrics-linux-x64 test/goldens/a.png
+```
+
+The platform is the test process's: an x86_64 Flutter under Rosetta on Apple silicon runs as
+`macos-x86_64` and keeps its own goldens there.
+
+Without `fallback_platform` every platform compares the shared goldens with text under
+`text_tolerance` (default 1). The case `name` and rule matching use the shared golden on every
+platform.
 
 ---
 
@@ -325,24 +363,6 @@ jobs:
     with:
       trigger-workflow: "visual-tests.yml" # Optional: auto-rerun CI after baseline approval
     secrets: inherit
-```
-
-### Ephemeral Diff Branch Cleanup
-
-When visual diffs occur, ephemeral branches (`gleon/diffs/pr-<PR_NUMBER>`) store diff artifacts. To automatically delete them when a PR is merged or closed, add `.github/workflows/gleon-cleanup.yml`:
-
-```yaml
-name: Gleon Ephemeral Branch Cleanup
-
-on:
-  pull_request_target:
-    types: [closed]
-
-jobs:
-  cleanup:
-    permissions:
-      contents: write
-    uses: gleon-rs/gleon/.github/workflows/cleanup.yml@main
 ```
 
 ---

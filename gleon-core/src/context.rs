@@ -474,10 +474,7 @@ mod tests {
 
         // 1. Resolve from config
         let ctx = ResolvedContext::resolve(&options, root_dir, &EmptyEnv).unwrap();
-        assert_eq!(
-            ctx.fallback_platform_key.as_deref(),
-            Some("5:linux-6:x86_64")
-        );
+        assert_eq!(ctx.fallback_platform_key.as_deref(), Some("linux-x86_64"));
 
         // 2. Resolve from env (overrides config)
         let env = MapEnv(std::collections::HashMap::from([(
@@ -487,7 +484,27 @@ mod tests {
         let ctx_env = ResolvedContext::resolve(&options, root_dir, &env).unwrap();
         assert_eq!(
             ctx_env.fallback_platform_key.as_deref(),
-            Some("5:macos-7:aarch64")
+            Some("macos-aarch64")
+        );
+
+        // 3. An opaque value in the config names the manifests of the resolved platform.
+        std::fs::write(
+            &config_path,
+            yaml_content.replace(
+                "fallback_platform:\n  os: linux\n  arch: x86_64",
+                "fallback_platform: linux-x86_64",
+            ),
+        )
+        .unwrap();
+        let linux = ContextOptions {
+            os: Some("linux".to_owned()),
+            arch: Some("x86_64".to_owned()),
+            ..ContextOptions::default()
+        };
+        let ctx = ResolvedContext::resolve(&linux, root_dir, &EmptyEnv).unwrap();
+        assert_eq!(
+            ctx.fallback_platform_key,
+            Some(ctx.platform.to_key().unwrap())
         );
     }
 

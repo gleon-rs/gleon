@@ -35,9 +35,6 @@ fn test_clean_workspace_full_flow_with_git_untracking() {
     let runs_dir = gleon_dir.join("runs");
     fs::create_dir_all(&runs_dir).unwrap();
     fs::write(runs_dir.join("run_metadata.json"), b"{}").unwrap();
-    let diffs_dir = gleon_dir.join("diffs");
-    fs::create_dir_all(&diffs_dir).unwrap();
-    fs::write(diffs_dir.join("diff.png"), b"diff").unwrap();
 
     let config_yaml = r#"
 required_version: ">=0.1.0"
@@ -82,14 +79,16 @@ screenshots:
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
     // 5. Run clean
-    let opts = CleanOptions::default();
+    let opts = CleanOptions {
+        screenshots: true,
+        ..CleanOptions::default()
+    };
     let res = clean_workspace(&ctx, &opts).unwrap();
 
     assert_eq!(res.deleted_files.len(), 1);
     assert_eq!(res.untracked_files.len(), 1);
     assert!(!golden_file.exists());
     assert!(!runs_dir.exists());
-    assert!(!diffs_dir.exists());
 
     // 6. Verify entry was removed from Git index
     let index_after = repo.open_index().unwrap();
@@ -131,6 +130,7 @@ screenshots:
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
     let opts = CleanOptions {
+        screenshots: true,
         dry_run: true,
         skip_gitignore: false,
         keep_runs: false,
@@ -166,7 +166,10 @@ screenshots:
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-    let opts = CleanOptions::default();
+    let opts = CleanOptions {
+        screenshots: true,
+        ..CleanOptions::default()
+    };
     let res = clean_workspace(&ctx, &opts).unwrap();
 
     assert_eq!(res.deleted_files.len(), 1);
@@ -215,7 +218,14 @@ screenshots:
     index.write(gix::index::write::Options::default()).unwrap();
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    let res = clean_workspace(&ctx, &CleanOptions::default()).unwrap();
+    let res = clean_workspace(
+        &ctx,
+        &CleanOptions {
+            screenshots: true,
+            ..CleanOptions::default()
+        },
+    )
+    .unwrap();
 
     assert_eq!(res.deleted_files.len(), 1, "file removed from disk");
     assert_eq!(
