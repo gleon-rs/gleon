@@ -275,14 +275,14 @@ fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
 
 /// `path` absolute with symbolic links resolved.
 #[cfg(not(windows))]
-fn canonical(path: &Path) -> io::Result<PathBuf> {
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
     std::fs::canonicalize(path)
 }
 
 /// `path` absolute with symbolic links resolved, without the `\\?\` verbatim prefix of
 /// `canonicalize` (which Dart never shows).
 #[cfg(windows)]
-fn canonical(path: &Path) -> io::Result<PathBuf> {
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = std::fs::canonicalize(path)?;
     let text = resolved.to_string_lossy();
     Ok(text.strip_prefix(r"\\?\UNC\").map_or_else(

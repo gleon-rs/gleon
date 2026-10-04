@@ -594,8 +594,6 @@ impl ObjectStoreAdapter {
         hash: &crate::manifest::ImageHash,
         dest_path: &Path,
     ) -> Result<(), StorageError> {
-        use sha2::Digest as _;
-
         if hash.scheme() != "sha256" {
             return Err(StorageError::UnsupportedHashScheme(
                 hash.scheme().to_owned(),
@@ -610,58 +608,7 @@ impl ObjectStoreAdapter {
             Err(err) => return Err(StorageError::Store { source: err }),
         };
 
-        // Chunks go to one blocking writer; `Err` aborts it, so an interrupted download leaves
-        // nothing behind.
-        let (chunks_tx, mut chunks_rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, ()>>(8);
-        let expected = hash.value().to_owned();
-        let dest = dest_path.to_path_buf();
-        let writer = tokio::task::spawn_blocking(move || {
-            let mut actual = None;
-            let written =
-                gleon_model::fs::write_atomically_with(&dest, Durability::Durable, |file| {
-                    let mut digest = sha2::Sha256::new();
-                    while let Some(chunk) = chunks_rx.blocking_recv() {
-                        let chunk =
-                            chunk.map_err(|()| std::io::Error::other("download interrupted"))?;
-                        digest.update(&chunk);
-                        file.write_all(&chunk)?;
-                    }
-                    let digest = hex::encode(digest.finalize());
-                    if digest.eq_ignore_ascii_case(&expected) {
-                        Ok(())
-                    } else {
-                        actual = Some(digest);
-                        Err(std::io::Error::from(std::io::ErrorKind::InvalidData))
-                    }
-                });
-            (written, actual)
-        });
-        let mut stream = get_output.into_stream();
-        let mut failed = None;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| {
-                failed = Some(e);
-            });
-            let stop = chunk.is_err();
-            // A closed channel means the writer failed: its error is reported below.
-            if chunks_tx.send(chunk).await.is_err() || stop {
-                break;
-            }
-        }
-        drop(chunks_tx);
-        let (written, actual) = writer.await.map_err(|e| StorageError::Io {
-            source: std::io::Error::other(e),
-        })?;
-        if let Some(source) = failed {
-            return Err(StorageError::Store { source });
-        }
-        if let Some(actual) = actual {
-            return Err(StorageError::HashMismatch {
-                expected: hash.value().to_owned(),
-                actual,
-            });
-        }
-        written?;
+        write_verified(get_output.into_stream(), dest_path, hash.value()).await?;
 
         debug!(hash = %hash.value(), path = %dest_path.display(), "Successfully downloaded blob from remote storage");
         Ok(())
@@ -964,6 +911,70 @@ impl ObjectStoreAdapter {
         self.put_object_conditional(relative_path, data, content_type, None, None, false)
             .await
     }
+}
+
+/// Streams `chunks` into `dest` atomically and durably, kept only if the stream ends and its
+/// content hashes to `expected` (sha256).
+async fn write_verified(
+    mut chunks: impl futures::Stream<Item = object_store::Result<bytes::Bytes>> + Unpin,
+    dest: &Path,
+    expected: &str,
+) -> Result<(), StorageError> {
+    use sha2::Digest as _;
+
+    // Chunks go to one blocking writer; `None` marks the end of the stream, and a channel closed
+    // without it (a failed stream, or this future dropped) aborts the write: nothing is left.
+    let (chunks_tx, mut chunks_rx) = tokio::sync::mpsc::channel::<Option<bytes::Bytes>>(8);
+    let (dest, expected) = (dest.to_path_buf(), expected.to_owned());
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut actual = None;
+        let written = gleon_model::fs::write_atomically_with(&dest, Durability::Durable, |file| {
+            let mut digest = sha2::Sha256::new();
+            while let Some(chunk) = chunks_rx.blocking_recv() {
+                let Some(chunk) = chunk else {
+                    let digest = hex::encode(digest.finalize());
+                    if digest.eq_ignore_ascii_case(&expected) {
+                        return Ok(());
+                    }
+                    actual = Some(digest);
+                    return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+                };
+                digest.update(&chunk);
+                file.write_all(&chunk)?;
+            }
+            Err(std::io::Error::other("download interrupted"))
+        });
+        (written, actual, expected)
+    });
+    let mut failed = None;
+    while let Some(chunk) = chunks.next().await {
+        match chunk {
+            Ok(chunk) => {
+                // A closed channel means the writer failed: its error is reported below.
+                if chunks_tx.send(Some(chunk)).await.is_err() {
+                    break;
+                }
+            }
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    if failed.is_none() {
+        let _ = chunks_tx.send(None).await;
+    }
+    drop(chunks_tx);
+    let (written, actual, expected) = writer.await.map_err(|e| StorageError::Io {
+        source: std::io::Error::other(e),
+    })?;
+    if let Some(source) = failed {
+        return Err(StorageError::Store { source });
+    }
+    if let Some(actual) = actual {
+        return Err(StorageError::HashMismatch { expected, actual });
+    }
+    Ok(written?)
 }
 
 #[cfg(all(test, not(miri)))]
@@ -1409,5 +1420,75 @@ mod tests {
             )
             .await;
         assert!(matches!(res, Err(StorageError::Store { .. })));
+    }
+
+    /// Writes `chunks` to `dir/blob`, expecting the hash of the chunks that are not errors.
+    async fn write_chunks(
+        dir: &Path,
+        chunks: Vec<object_store::Result<bytes::Bytes>>,
+    ) -> Result<(), StorageError> {
+        use sha2::Digest as _;
+        let whole: Vec<u8> = chunks.iter().flatten().flat_map(|c| c.to_vec()).collect();
+        let expected = hex::encode(sha2::Sha256::digest(&whole));
+        write_verified(futures::stream::iter(chunks), &dir.join("blob"), &expected).await
+    }
+
+    fn files_in(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().count()
+    }
+
+    #[tokio::test]
+    async fn test_a_download_is_kept_only_when_its_stream_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk = |bytes: &'static [u8]| Ok(bytes::Bytes::from_static(bytes));
+        write_chunks(dir.path(), vec![chunk(b"a"), chunk(b"b")])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("blob")).unwrap(), b"ab");
+        std::fs::remove_file(dir.path().join("blob")).unwrap();
+
+        // A stream that fails after a chunk: its error, and nothing written.
+        let reset = object_store::Error::Generic {
+            store: "test",
+            source: "connection reset".into(),
+        };
+        let err = write_chunks(dir.path(), vec![chunk(b"a"), Err(reset), chunk(b"b")])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::Store { .. }), "{err:?}");
+        assert_eq!(files_in(dir.path()), 0, "no file, no temporary file");
+
+        // A writer that cannot write: its error, with the stream left unread.
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let many = (0..32).map(|_| chunk(b"x")).collect();
+        let err = write_chunks(&file, many).await.unwrap_err();
+        assert!(matches!(err, StorageError::Io { .. }), "{err:?}");
+    }
+
+    /// A download dropped halfway (e.g. a cancelled pull) never commits the chunks it got, even
+    /// when they hash as expected.
+    #[tokio::test]
+    async fn test_an_abandoned_download_writes_nothing() {
+        use sha2::Digest as _;
+        let dir = tempfile::tempdir().unwrap();
+        let first = futures::stream::iter([Ok(bytes::Bytes::from_static(b"a"))]);
+        let stalled = first.chain(futures::stream::pending());
+        let dest = dir.path().join("blob");
+        let expected = hex::encode(sha2::Sha256::digest(b"a"));
+        let write = write_verified(stalled, &dest, &expected);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), write)
+                .await
+                .is_err()
+        );
+        // The blocking writer finishes on its own once the channel closes.
+        for _ in 0..500 {
+            if files_in(dir.path()) == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(files_in(dir.path()), 0);
     }
 }

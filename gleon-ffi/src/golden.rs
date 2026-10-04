@@ -816,7 +816,8 @@ mod tests {
     impl Fixture {
         fn new(yaml: Option<&str>) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let root = fs::canonicalize(dir.path()).unwrap();
+            // Without the `\\?\` prefix of Windows, which takes no `/` separators.
+            let root = crate::session::canonical(dir.path()).unwrap();
             if let Some(yaml) = yaml {
                 fs::create_dir_all(root.join(".gleon")).unwrap();
                 fs::write(root.join(".gleon/gleon.yaml"), yaml).unwrap();

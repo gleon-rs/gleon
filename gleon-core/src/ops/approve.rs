@@ -292,13 +292,6 @@ fn golden_file(base_dir: &Path, report: &CaseReport) -> Result<PathBuf, ApproveE
     use std::io::Read as _;
 
     let path = Path::new(&report.golden.path);
-    let is_png = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
-    let is_hidden = path.components().any(|component| {
-        matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('.'))
-    });
     let file = base_dir.join(path);
     let is_link = std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink());
     // The PNG header (signature and size) is enough to tell.
@@ -306,7 +299,11 @@ fn golden_file(base_dir: &Path, report: &CaseReport) -> Result<PathBuf, ApproveE
     let replaces_no_png = std::fs::File::open(&file)
         .and_then(|file| file.take(24).read_to_end(&mut head))
         .is_ok_and(|_| case::png_size(&head).is_none());
-    if !is_png || is_hidden || is_link || replaces_no_png || !resolves_inside(base_dir, &file) {
+    if !is_png_outside_hidden_dirs(path)
+        || is_link
+        || replaces_no_png
+        || !resolves_inside(base_dir, &file)
+    {
         return Err(ApproveError::UnsafeGoldenPath {
             name: report.name.clone(),
             path: report.golden.path.clone(),
@@ -315,12 +312,26 @@ fn golden_file(base_dir: &Path, report: &CaseReport) -> Result<PathBuf, ApproveE
     Ok(file)
 }
 
+/// Whether `path` names a `.png` file outside hidden directories.
+fn is_png_outside_hidden_dirs(path: &Path) -> bool {
+    let is_png = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
+    is_png
+        && !path.components().any(|component| {
+            matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('.'))
+        })
+}
+
 /// The golden `report` was compared with, inside the workspace at `base_dir`: the source of a
-/// per-platform golden approved from a pass without differences.
+/// per-platform golden approved from a pass without differences. Like [`golden_file`], a `.png`
+/// outside hidden directories and not a symlink, so a report never copies another file.
 fn compared_golden(base_dir: &Path, report: &CaseReport) -> Result<PathBuf, ApproveError> {
-    let file = base_dir.join(report.golden.compared());
+    let path = Path::new(report.golden.compared());
+    let file = base_dir.join(path);
     let is_link = std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink());
-    if is_link || !resolves_inside(base_dir, &file) {
+    if !is_png_outside_hidden_dirs(path) || is_link || !resolves_inside(base_dir, &file) {
         return Err(ApproveError::UnsafeGoldenPath {
             name: report.name.clone(),
             path: report.golden.compared().to_owned(),
@@ -1105,6 +1116,45 @@ mod tests {
             Err(ApproveError::CandidateChanged { .. })
         ));
         assert!(!own.exists());
+    }
+
+    /// The compared golden of a seed is checked like the golden it writes: a report never makes
+    /// approve copy a hidden file, a file that is not a PNG, or a symlink, even with its hash (a
+    /// path out of the workspace fails the report's validation).
+    #[test]
+    fn test_approve_seeds_only_from_png_goldens_outside_hidden_directories() {
+        let (temp, ctx) = workspace();
+        let run = temp.path().join("download/metrics-windows-x64");
+        let mut compared = vec![".secret/a.png", "notes.txt"];
+        std::fs::create_dir_all(temp.path().join(".secret")).unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(temp.path().join("test/goldens")).unwrap();
+            std::os::unix::fs::symlink(
+                "../../.secret/a.png",
+                temp.path().join("test/goldens/link.png"),
+            )
+            .unwrap();
+            compared.push("test/goldens/link.png");
+        }
+        for path in compared {
+            let file = temp.path().join(path);
+            if !file.exists() {
+                std::fs::write(&file, png(5)).unwrap();
+            }
+            let mut seed = report("test/goldens/a", CaseOutcome::Match);
+            seed.source.tool = "gleon_flutter".to_owned();
+            seed.golden.path = "test/goldens/windows-x86_64/a.png".to_owned();
+            seed.golden.fallback = Some(path.to_owned());
+            seed.golden.sha256 = Some(Sha256Hex::of(&png(5)));
+            write_case(&run, &seed);
+            let err = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap_err();
+            assert!(
+                matches!(&err, ApproveError::UnsafeGoldenPath { path: unsafe_path, .. } if unsafe_path == path),
+                "{path}: {err}"
+            );
+        }
+        assert!(!temp.path().join("test/goldens/windows-x86_64").exists());
     }
 
     /// Case reports may come from CI artifacts of untrusted code: they never pick another file.
