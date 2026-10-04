@@ -31,7 +31,7 @@ ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 base64 = "0.23.1"
 futures = "0.3.33"
 getrandom = "0.4.3"
-gix = { version = "0.87.1", default-features = false, features = ["sha1", "revision", "index"] }
+gix = { version = "0.88.0", default-features = false, features = ["sha1", "revision", "index"] }
 globset = "0.4.19"
 hex = "0.4.3"
 http = "1.2.0"
