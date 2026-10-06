@@ -26,7 +26,7 @@ impl super::ReportGenerator {
             .failures_by_severity()
             .into_iter()
             .take(Self::MAX_MARKDOWN_DIFF_ROWS)
-            .filter_map(|report| report.golden.blob.as_ref())
+            .filter_map(|(_, report)| report.golden.blob.as_ref())
             .collect();
 
         let mut signed_urls = HashMap::new();

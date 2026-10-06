@@ -1,12 +1,12 @@
 //! Markdown report/PR-comment generation.
 
-use gleon_model::case::CaseReport;
+use gleon_model::{case::CaseReport, platform::PlatformKey};
 use minijinja::context;
 use serde::Serialize;
 
 use super::{
     MarkdownReportOptions, RenderTarget,
-    format::{CaseSummary, status},
+    format::{CaseSummary, case_name, status},
 };
 use crate::cases::Cases;
 
@@ -96,9 +96,14 @@ struct MarkdownRow {
     result: String,
 }
 
-fn build_row(report: &CaseReport, options: &MarkdownReportOptions) -> MarkdownRow {
+fn build_row(
+    cases: &Cases,
+    key: &PlatformKey,
+    report: &CaseReport,
+    options: &MarkdownReportOptions,
+) -> MarkdownRow {
     MarkdownRow {
-        name: CodeSpanEscape(&report.name).to_string(),
+        name: CodeSpanEscape(&case_name(cases, key, report)).to_string(),
         baseline: baseline_cell(report, options),
         result: MarkdownEscape(&CaseSummary(report).to_string()).to_string(),
     }
@@ -136,7 +141,7 @@ impl super::ReportGenerator {
         let rows: Vec<MarkdownRow> = failures
             .into_iter()
             .take(Self::MAX_MARKDOWN_DIFF_ROWS)
-            .map(|report| build_row(report, options))
+            .map(|(key, report)| build_row(cases, key, report, options))
             .collect();
 
         let has_baselines = rows.iter().any(|row| row.baseline.is_some());
@@ -205,7 +210,7 @@ impl super::ReportGenerator {
 
         out.push_str("| Test Case | Screenshot | Status |\n|---|---|---|\n");
 
-        for report in cases.reports() {
+        for (key, report) in cases.keyed() {
             let mark = if report.outcome.is_failure() {
                 "❌"
             } else {
@@ -218,7 +223,7 @@ impl super::ReportGenerator {
             writeln!(
                 out,
                 "| {} | {} | {mark} {} |",
-                MarkdownEscape(&report.name),
+                MarkdownEscape(&case_name(cases, key, report)),
                 MarkdownEscape(report.golden.compared()),
                 status(report.outcome)
             )
@@ -241,11 +246,11 @@ impl super::ReportGenerator {
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
-    use gleon_model::case::CaseOutcome;
+    use gleon_model::{case::CaseOutcome, platform::PlatformConfig};
 
     use super::*;
     use crate::{
-        cases::fixtures::{every_outcome, report},
+        cases::fixtures::{every_outcome, report, report_on},
         manifest::ImageHash,
         report::ReportGenerator,
     };
@@ -405,6 +410,33 @@ mod tests {
              | test/mismatch | test/mismatch.png | ❌ Mismatch |\n\
              | test/missing | test/missing.png | ❌ Missing Baseline |\n\
              | test/updated | test/updated.png | ✅ Pass |\n"
+        );
+    }
+
+    /// A run of two platforms names the platform of each case in the comment and the summary.
+    #[test]
+    fn test_markdown_names_the_platforms_of_a_joint_run() {
+        let platform = |key: &str| PlatformConfig::Opaque(key.to_owned());
+        let cases = Cases::new(
+            "runs/latest",
+            vec![
+                report_on("a", CaseOutcome::Mismatch, platform("macos-aarch64")),
+                report_on("a", CaseOutcome::Match, platform("linux-x86_64")),
+            ],
+        );
+        let comment = ReportGenerator::render_pr_comment(&cases, &MarkdownReportOptions::default());
+        assert!(
+            comment.contains("| `a (macos-aarch64)` | Mismatch: 5.00% (5 of 100px) differ |"),
+            "{comment}"
+        );
+        assert!(!comment.contains("linux-x86_64"), "{comment}");
+        let md = ReportGenerator::generate_markdown(&cases);
+        assert!(
+            md.ends_with(
+                "| a (linux-x86_64) | a.png | ✅ Pass |\n\
+                 | a (macos-aarch64) | a.png | ❌ Mismatch |\n"
+            ),
+            "{md}"
         );
     }
 }

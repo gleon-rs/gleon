@@ -67,7 +67,7 @@
     }
   ],
   "artifacts": {
-    "candidate": ".gleon/runs/latest/artifacts/test/goldens/counter_initial/candidate.png"
+    "candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/goldens/counter_initial/candidate.png"
   },
   "timings_ms": {
     "total": 2.456,

@@ -310,13 +310,13 @@
             
             {% if run.summary.failed > 0 %}
             <rect x="{{ x }}" y="{{ 15 }}" width="14" height="{{ failed_h }}" rx="2" fill="#ef4444">
-                <title>{{ run.branch }} ({{ run.platform }}): {{ run.summary.failed }} failed</title>
+                <title>{{ run.branch }} ({{ run.platforms|join(", ") }}): {{ run.summary.failed }} failed</title>
             </rect>
             {% endif %}
             
             {% if passed > 0 %}
             <rect x="{{ x }}" y="{{ 15 + failed_h }}" width="14" height="{{ passed_h }}" rx="2" fill="#10b981">
-                <title>{{ run.branch }} ({{ run.platform }}): {{ passed }} passed</title>
+                <title>{{ run.branch }} ({{ run.platforms|join(", ") }}): {{ passed }} passed</title>
             </rect>
             {% endif %}
             
@@ -353,14 +353,14 @@
     <section class="run-list" id="run-list-container">
         {% if runs %}
             {% for run in runs|reverse %}
-            <details class="run-card" data-branch="{{ run.branch }}" data-platform="{{ run.platform }}" data-status="{% if run.summary.failed == 0 %}passed{% else %}failed{% endif %}" data-commit="{{ run.commit_sha|default('') }}">
+            <details class="run-card" data-branch="{{ run.branch }}" data-platforms="{{ run.platforms|join(" ") }}" data-status="{% if run.summary.failed == 0 %}passed{% else %}failed{% endif %}" data-commit="{{ run.commit_sha|default('') }}">
                 <summary class="run-summary">
                     <div class="run-left">
                         <span class="badge {% if run.summary.failed == 0 %}badge-success{% else %}badge-danger{% endif %}">
                             {% if run.summary.failed == 0 %}PASSED{% else %}FAILED{% endif %}
                         </span>
                         <span class="run-branch">{{ run.branch }}</span>
-                        <span class="badge badge-neutral">{{ run.platform }}</span>
+                        <span class="badge badge-neutral">{{ run.platforms|join(", ") }}</span>
                         {% if run.commit_sha %}
                         <span class="badge badge-neutral" style="font-family: monospace;">{{ run.commit_sha[:7] }}</span>
                         {% endif %}
@@ -386,7 +386,7 @@
                         <tbody>
                             {% for t in run.failures %}
                             <tr>
-                                <td><code>{{ t.name }}</code></td>
+                                <td><code>{{ t.name }}</code>{% if run.platforms|length > 1 %} <span class="badge badge-neutral failure-platform">{{ t.platform }}</span>{% endif %}</td>
                                 <td>
                                     <span class="badge badge-danger">
                                         {{ t.outcome }}{% if t.error_kind %} ({{ t.error_kind }}){% endif %}
@@ -438,12 +438,13 @@
             const cards = document.querySelectorAll('.run-card');
             cards.forEach(card => {
                 const cardBranch = (card.getAttribute('data-branch') || '').toLowerCase();
-                const cardPlatform = (card.getAttribute('data-platform') || '').toLowerCase();
+                // A joint run lists every platform it ran on.
+                const cardPlatforms = (card.getAttribute('data-platforms') || '').toLowerCase().split(' ');
                 const cardStatus = (card.getAttribute('data-status') || '').toLowerCase();
                 const cardCommit = (card.getAttribute('data-commit') || '').toLowerCase();
 
                 const matchBranch = !branch || cardBranch === branch;
-                const matchPlatform = !platform || cardPlatform === platform;
+                const matchPlatform = !platform || cardPlatforms.includes(platform);
                 const matchStatus = !status || cardStatus === status;
                 const matchSearch = !search || cardBranch.includes(search) || cardCommit.includes(search);
 

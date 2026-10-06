@@ -1,6 +1,8 @@
 use crate::{
     config::{ConfigError, GleonConfig},
-    platform::{PlatformEnv, PlatformError, PlatformInfo, PlatformOverrides, PlatformResolver},
+    platform::{
+        PlatformEnv, PlatformError, PlatformInfo, PlatformKey, PlatformOverrides, PlatformResolver,
+    },
 };
 
 /// Errors that can occur while resolving a `ResolvedContext` from CLI arguments.
@@ -60,7 +62,7 @@ pub struct ResolvedContext {
     /// The resolved platform identity used for baseline isolation.
     pub platform: PlatformInfo,
     /// The resolved fallback platform key, if a fallback platform was configured.
-    pub fallback_platform_key: Option<String>,
+    pub fallback_platform_key: Option<PlatformKey>,
     /// The resolved current branch name.
     pub branch: String,
     /// The resolved target branch name to compare against.
@@ -167,11 +169,11 @@ impl ResolvedContext {
                 |_| crate::platform::PlatformConfig::Opaque(fb_env.clone()),
                 crate::platform::PlatformConfig::Structured,
             );
-            Some(plat_cfg.to_key().map_err(ContextError::Platform)?)
+            Some(plat_cfg.key().map_err(ContextError::Platform)?)
         } else if let Some(ref cfg) = config {
             cfg.fallback_platform
                 .as_ref()
-                .map(|fb_cfg| fb_cfg.to_key().map_err(ContextError::Platform))
+                .map(|fb_cfg| fb_cfg.key().map_err(ContextError::Platform))
                 .transpose()?
         } else {
             None
@@ -474,7 +476,7 @@ mod tests {
 
         // 1. Resolve from config
         let ctx = ResolvedContext::resolve(&options, root_dir, &EmptyEnv).unwrap();
-        assert_eq!(ctx.fallback_platform_key.as_deref(), Some("linux-x86_64"));
+        assert_eq!(ctx.fallback_platform_key.unwrap(), "linux-x86_64");
 
         // 2. Resolve from env (overrides config)
         let env = MapEnv(std::collections::HashMap::from([(
@@ -482,10 +484,7 @@ mod tests {
             "macos-aarch64",
         )]));
         let ctx_env = ResolvedContext::resolve(&options, root_dir, &env).unwrap();
-        assert_eq!(
-            ctx_env.fallback_platform_key.as_deref(),
-            Some("macos-aarch64")
-        );
+        assert_eq!(ctx_env.fallback_platform_key.unwrap(), "macos-aarch64");
 
         // 3. An opaque value in the config names the manifests of the resolved platform.
         std::fs::write(
@@ -502,10 +501,7 @@ mod tests {
             ..ContextOptions::default()
         };
         let ctx = ResolvedContext::resolve(&linux, root_dir, &EmptyEnv).unwrap();
-        assert_eq!(
-            ctx.fallback_platform_key,
-            Some(ctx.platform.to_key().unwrap())
-        );
+        assert_eq!(ctx.fallback_platform_key, Some(ctx.platform.key().unwrap()));
     }
 
     #[test]

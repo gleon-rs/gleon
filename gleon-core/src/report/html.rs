@@ -1,19 +1,25 @@
 //! HTML report generation.
 
-use gleon_model::case::{CaseErrorKind, CaseReport, Metrics};
+use std::borrow::Cow;
+
+use gleon_model::{
+    case::{CaseErrorKind, CaseReport, Metrics},
+    platform::PlatformKey,
+};
 use minijinja::context;
 use serde::Serialize;
 
 use super::{
     ReportError,
-    format::{CaseSummary, image_link},
+    format::{CaseSummary, case_name, image_link},
 };
 use crate::cases::Cases;
 
 /// Flat view of a single failed case for the HTML report template.
 #[derive(Serialize)]
 struct HtmlFailureDto<'a> {
-    name: &'a str,
+    /// The test name, with its platform in a run of several ([`case_name`]).
+    name: Cow<'a, str>,
     image: &'a str,
     /// The outcome (`mismatch`, `dimension_mismatch`, `missing`, `error`); the template shows the
     /// images a case kept.
@@ -35,6 +41,7 @@ fn size(width: Option<u32>, height: Option<u32>) -> Option<String> {
 
 fn html_failure_dto<'a>(
     cases: &Cases,
+    key: &PlatformKey,
     report: &'a CaseReport,
     report_dir: &std::path::Path,
 ) -> HtmlFailureDto<'a> {
@@ -44,7 +51,7 @@ fn html_failure_dto<'a>(
     let baseline_path = image(artifacts.and_then(|a| a.golden.as_ref()));
     let diff_path = image(artifacts.and_then(|a| a.diff.as_ref()));
     HtmlFailureDto {
-        name: &report.name,
+        name: case_name(cases, key, report),
         image: report.golden.compared(),
         outcome: report.outcome.as_str(),
         error_kind: report.error_kind.map(CaseErrorKind::as_str),
@@ -102,7 +109,7 @@ impl super::ReportGenerator {
         let failures: Vec<_> = cases
             .failures_by_severity()
             .into_iter()
-            .map(|report| html_failure_dto(cases, report, report_dir))
+            .map(|(key, report)| html_failure_dto(cases, key, report, report_dir))
             .collect();
 
         let ctx = context! {
@@ -132,11 +139,14 @@ impl super::ReportGenerator {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use gleon_model::case::CaseOutcome;
+    use gleon_model::{
+        case::CaseOutcome,
+        platform::{PlatformConfig, PlatformKey},
+    };
 
     use super::*;
     use crate::{
-        cases::fixtures::{every_outcome, report},
+        cases::fixtures::{every_outcome, report, report_on},
         report::ReportGenerator,
     };
 
@@ -172,11 +182,16 @@ mod tests {
         let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
             .unwrap()
             .unwrap();
+        let host = PlatformKey::host();
         assert!(
-            html.contains("artifacts&#x2f;billing&#x2f;form&#x2f;candidate.png"),
+            html.contains(&format!(
+                "artifacts&#x2f;{host}&#x2f;billing&#x2f;form&#x2f;candidate.png"
+            )),
             "{html}"
         );
-        assert!(html.contains("artifacts&#x2f;billing&#x2f;form&#x2f;diff.png"));
+        assert!(html.contains(&format!(
+            "artifacts&#x2f;{host}&#x2f;billing&#x2f;form&#x2f;diff.png"
+        )));
         assert!(html.contains("Mismatch: 5.00% (5 of 100px) differ"));
         assert!(html.contains("(5 diffs)"));
         assert!(!html.contains("&#x2f;w&#x2f;"), "paths are relative");
@@ -237,7 +252,10 @@ mod tests {
             !html.contains(&cwd_str),
             "absolute paths must be relativized against the report dir"
         );
-        assert!(html.contains(".gleon&#x2f;runs&#x2f;latest&#x2f;artifacts&#x2f;billing"));
+        assert!(html.contains(&format!(
+            ".gleon&#x2f;runs&#x2f;latest&#x2f;artifacts&#x2f;{}&#x2f;billing",
+            PlatformKey::host()
+        )));
     }
 
     #[test]
@@ -255,7 +273,10 @@ mod tests {
         assert!(html.contains("Missing Baseline: no golden yet"));
         // The candidate of a new golden is shown.
         assert!(html.contains("New screenshot (10x10)"));
-        assert!(html.contains("artifacts&#x2f;test&#x2f;missing&#x2f;candidate.png"));
+        assert!(html.contains(&format!(
+            "artifacts&#x2f;{}&#x2f;test&#x2f;missing&#x2f;candidate.png",
+            PlatformKey::host()
+        )));
         assert!(!html.contains("test&#x2f;identical"));
         assert!(!html.contains("test&#x2f;updated"));
     }
@@ -288,5 +309,34 @@ mod tests {
         assert!(!html.contains("Diff Image"), "{html}");
         assert!(html.contains("Actual</div>"), "{html}");
         assert!(!html.contains("None"), "{html}");
+    }
+
+    /// A run of two platforms names the platform of each case; a run of one does not.
+    #[test]
+    fn test_generate_html_names_the_platforms_of_a_joint_run() {
+        let linux = PlatformConfig::Opaque("linux-x86_64".to_owned());
+        let macos = PlatformConfig::Opaque("macos-aarch64".to_owned());
+        let cases = Cases::new(
+            "/w/.gleon/runs/latest",
+            vec![
+                report_on("a", CaseOutcome::Mismatch, macos),
+                report_on("a", CaseOutcome::Mismatch, linux.clone()),
+            ],
+        );
+        let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
+            .unwrap()
+            .unwrap();
+        assert!(html.contains("a (linux-x86_64)"), "{html}");
+        assert!(html.contains("a (macos-aarch64)"), "{html}");
+        assert!(html.contains("artifacts&#x2f;macos-aarch64&#x2f;a&#x2f;diff.png"));
+
+        let one = Cases::new(
+            "/w/.gleon/runs/latest",
+            vec![report_on("a", CaseOutcome::Mismatch, linux)],
+        );
+        let html = ReportGenerator::generate_html(&one, Path::new("/w/.gleon/runs/latest"))
+            .unwrap()
+            .unwrap();
+        assert!(!html.contains("(linux-x86_64)"), "{html}");
     }
 }

@@ -2,7 +2,7 @@
 <testsuites name="gleon Tests" tests="{{ total_tests }}" failures="{{ failed_tests }}" errors="{{ error_tests }}">
   <testsuite name="gleon" tests="{{ total_tests }}" failures="{{ failed_tests }}" errors="{{ error_tests }}">
 {% for tc in test_cases %}
-    <testcase name="{{ tc.name | escape }}" classname="gleon" file="{{ tc.image | escape }}">
+    <testcase name="{{ tc.name | escape }}" classname="{{ tc.classname | escape }}" file="{{ tc.image | escape }}">
       {% if tc.status == "failure" %}
       <failure message="{{ tc.message | escape }}">{{ tc.message | escape }}</failure>
       {% elif tc.status == "error" %}

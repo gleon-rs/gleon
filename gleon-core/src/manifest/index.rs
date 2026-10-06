@@ -56,7 +56,8 @@ impl WorkspaceIndex {
         };
         // Reading and parsing the files dominates, so it runs in parallel; the checks below go in
         // walk order, so the first error is the one a sequential load would hit.
-        let loaded = read_all(&listing.files, |file| SingleTestManifest::load(&file.path));
+        let loaded =
+            crate::io::map_files(&listing.files, |file| SingleTestManifest::load(&file.path));
         let mut index = Self::new();
         for (file, manifest) in listing.files.into_iter().zip(loaded) {
             if index.entries.contains_key(&file.key) {
@@ -214,51 +215,6 @@ struct Listing {
     files: Vec<Listed>,
     /// Why the walk stopped early.
     error: Option<ManifestError>,
-}
-
-/// Most threads reading small files (manifests here, case reports in [`crate::cases`]): beyond a
-/// few, file opens contend in the kernel. Loading 50k manifests (`tests/manifest_scale.rs`, M3 Max, 14 cores) takes:
-/// - macOS on APFS: 1.03 s on one thread, 0.57-0.62 s on three, 0.59-0.70 s on four, 0.87 s on
-///   six and 1.8 s on fourteen;
-/// - Linux 7.0 on ext4 (Docker VM on the same machine): 158 ms on one thread, 91 ms on three,
-///   78 ms on four, 70 ms on six, 69 ms on eight and 168 ms on fourteen.
-///
-/// Windows is not measured yet and keeps the cautious macOS value.
-#[cfg(target_os = "linux")]
-const READ_THREADS: usize = 6;
-/// See the Linux value.
-#[cfg(not(target_os = "linux"))]
-const READ_THREADS: usize = 3;
-
-/// Fewest files per reader thread: starting a thread costs tens of microseconds, reading 64 small
-/// files about a millisecond.
-const MIN_FILES_PER_THREAD: usize = 64;
-
-/// `read` of every item of `files`, in their order, on up to [`READ_THREADS`] threads (on this
-/// one for a few files).
-pub(crate) fn read_all<F: Sync, T: Send>(files: &[F], read: impl Fn(&F) -> T + Sync) -> Vec<T> {
-    let read_chunk = |chunk: &[F]| -> Vec<T> { chunk.iter().map(&read).collect() };
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get().min(READ_THREADS))
-        .min(files.len().div_ceil(MIN_FILES_PER_THREAD));
-    if threads <= 1 {
-        return read_chunk(files);
-    }
-    std::thread::scope(|scope| {
-        // Collected: every worker must be spawned before the first is joined.
-        let workers: Vec<_> = files
-            .chunks(files.len().div_ceil(threads))
-            .map(|chunk| scope.spawn(move || read_chunk(chunk)))
-            .collect();
-        workers
-            .into_iter()
-            .flat_map(|worker| {
-                worker
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
-    })
 }
 
 /// Lists the manifest files under `manifest_dir`; `None` if the directory does not exist.
@@ -498,7 +454,7 @@ mod tests {
     fn test_workspace_index_load_on_threads() {
         let temp = tempdir().unwrap();
         let manifest_dir = temp.path().join("macos-aarch64");
-        let count = MIN_FILES_PER_THREAD * READ_THREADS + 1;
+        let count = crate::io::MIN_FILES_PER_THREAD * crate::io::FILE_THREADS + 1;
         for dir in 0..7 {
             fs::create_dir_all(manifest_dir.join(format!("dir_{dir}"))).unwrap();
         }

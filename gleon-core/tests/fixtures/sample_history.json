@@ -1,11 +1,13 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "runs": [
     {
       "id": "run-0001",
       "timestamp": "2026-09-01T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -16,7 +18,9 @@
       "id": "run-0002",
       "timestamp": "2026-09-01T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -27,7 +31,9 @@
       "id": "run-0003",
       "timestamp": "2026-09-01T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -38,7 +44,9 @@
       "id": "run-0004",
       "timestamp": "2026-09-01T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -49,7 +57,9 @@
       "id": "run-0005",
       "timestamp": "2026-09-01T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -60,7 +70,9 @@
       "id": "run-0006",
       "timestamp": "2026-09-01T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -71,7 +83,9 @@
       "id": "run-0007",
       "timestamp": "2026-09-01T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -82,7 +96,9 @@
       "id": "run-0008",
       "timestamp": "2026-09-01T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -93,7 +109,9 @@
       "id": "run-0009",
       "timestamp": "2026-09-01T09:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -104,7 +122,9 @@
       "id": "run-0010",
       "timestamp": "2026-09-01T10:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -115,7 +135,9 @@
       "id": "run-0011",
       "timestamp": "2026-09-01T11:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -126,7 +148,9 @@
       "id": "run-0012",
       "timestamp": "2026-09-01T12:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -137,7 +161,9 @@
       "id": "run-0013",
       "timestamp": "2026-09-01T13:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -148,7 +174,9 @@
       "id": "run-0014",
       "timestamp": "2026-09-01T14:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -159,7 +187,9 @@
       "id": "run-0015",
       "timestamp": "2026-09-01T15:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -170,7 +200,9 @@
       "id": "run-0016",
       "timestamp": "2026-09-01T16:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -181,7 +213,9 @@
       "id": "run-0017",
       "timestamp": "2026-09-01T17:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -192,7 +226,9 @@
       "id": "run-0018",
       "timestamp": "2026-09-01T18:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -203,7 +239,9 @@
       "id": "run-0019",
       "timestamp": "2026-09-01T19:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -214,7 +252,9 @@
       "id": "run-0020",
       "timestamp": "2026-09-01T20:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -225,7 +265,9 @@
       "id": "run-0021",
       "timestamp": "2026-09-01T21:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -236,7 +278,9 @@
       "id": "run-0022",
       "timestamp": "2026-09-01T22:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -247,7 +291,9 @@
       "id": "run-0023",
       "timestamp": "2026-09-01T23:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -258,7 +304,9 @@
       "id": "run-0024",
       "timestamp": "2026-09-02T00:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -269,7 +317,9 @@
       "id": "run-0025",
       "timestamp": "2026-09-02T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "commit_sha": "0000000000000000000000000000000000000019",
       "summary": {
         "total": 40,
@@ -278,6 +328,7 @@
       "failures": [
         {
           "name": "cart/checkout",
+          "platform": "linux-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "pixel",
@@ -290,6 +341,7 @@
         },
         {
           "name": "cart/header",
+          "platform": "linux-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "ssim",
@@ -308,17 +360,20 @@
         },
         {
           "name": "cart/item",
+          "platform": "linux-x86_64",
           "outcome": "dimension_mismatch",
           "message": "golden is 100x60px, test image is 100x61px"
         },
         {
           "name": "profile/avatar",
+          "platform": "linux-x86_64",
           "outcome": "error",
           "error_kind": "image",
           "message": "candidate image: invalid PNG signature"
         },
         {
           "name": "settings/theme",
+          "platform": "linux-x86_64",
           "outcome": "missing",
           "message": "no baseline is staged for this screenshot"
         }
@@ -328,7 +383,9 @@
       "id": "run-0026",
       "timestamp": "2026-09-02T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -339,7 +396,9 @@
       "id": "run-0027",
       "timestamp": "2026-09-02T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -350,7 +409,9 @@
       "id": "run-0028",
       "timestamp": "2026-09-02T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -361,7 +422,9 @@
       "id": "run-0029",
       "timestamp": "2026-09-02T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -372,7 +435,9 @@
       "id": "run-0030",
       "timestamp": "2026-09-02T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -383,7 +448,9 @@
       "id": "run-0031",
       "timestamp": "2026-09-02T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -394,7 +461,9 @@
       "id": "run-0032",
       "timestamp": "2026-09-02T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -405,7 +474,9 @@
       "id": "run-0033",
       "timestamp": "2026-09-02T09:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -416,7 +487,9 @@
       "id": "run-0034",
       "timestamp": "2026-09-02T10:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -427,7 +500,9 @@
       "id": "run-0035",
       "timestamp": "2026-09-02T11:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -438,7 +513,9 @@
       "id": "run-0036",
       "timestamp": "2026-09-02T12:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -449,7 +526,9 @@
       "id": "run-0037",
       "timestamp": "2026-09-02T13:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -460,7 +539,9 @@
       "id": "run-0038",
       "timestamp": "2026-09-02T14:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -471,7 +552,9 @@
       "id": "run-0039",
       "timestamp": "2026-09-02T15:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -482,7 +565,9 @@
       "id": "run-0040",
       "timestamp": "2026-09-02T16:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -493,7 +578,9 @@
       "id": "run-0041",
       "timestamp": "2026-09-02T17:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -504,7 +591,9 @@
       "id": "run-0042",
       "timestamp": "2026-09-02T18:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -515,7 +604,9 @@
       "id": "run-0043",
       "timestamp": "2026-09-02T19:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -526,7 +617,9 @@
       "id": "run-0044",
       "timestamp": "2026-09-02T20:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -537,7 +630,9 @@
       "id": "run-0045",
       "timestamp": "2026-09-02T21:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -548,7 +643,9 @@
       "id": "run-0046",
       "timestamp": "2026-09-02T22:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -559,7 +656,9 @@
       "id": "run-0047",
       "timestamp": "2026-09-02T23:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -570,7 +669,9 @@
       "id": "run-0048",
       "timestamp": "2026-09-03T00:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -581,7 +682,9 @@
       "id": "run-0049",
       "timestamp": "2026-09-03T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -592,7 +695,9 @@
       "id": "run-0050",
       "timestamp": "2026-09-03T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "commit_sha": "0000000000000000000000000000000000000032",
       "summary": {
         "total": 40,
@@ -601,6 +706,7 @@
       "failures": [
         {
           "name": "cart/checkout",
+          "platform": "windows-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "pixel",
@@ -613,6 +719,7 @@
         },
         {
           "name": "cart/header",
+          "platform": "windows-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "ssim",
@@ -631,17 +738,20 @@
         },
         {
           "name": "cart/item",
+          "platform": "windows-x86_64",
           "outcome": "dimension_mismatch",
           "message": "golden is 100x60px, test image is 100x61px"
         },
         {
           "name": "profile/avatar",
+          "platform": "windows-x86_64",
           "outcome": "error",
           "error_kind": "image",
           "message": "candidate image: invalid PNG signature"
         },
         {
           "name": "settings/theme",
+          "platform": "windows-x86_64",
           "outcome": "missing",
           "message": "no baseline is staged for this screenshot"
         }
@@ -651,7 +761,9 @@
       "id": "run-0051",
       "timestamp": "2026-09-03T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -662,7 +774,9 @@
       "id": "run-0052",
       "timestamp": "2026-09-03T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -673,7 +787,9 @@
       "id": "run-0053",
       "timestamp": "2026-09-03T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -684,7 +800,9 @@
       "id": "run-0054",
       "timestamp": "2026-09-03T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -695,7 +813,9 @@
       "id": "run-0055",
       "timestamp": "2026-09-03T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -706,7 +826,9 @@
       "id": "run-0056",
       "timestamp": "2026-09-03T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -717,7 +839,9 @@
       "id": "run-0057",
       "timestamp": "2026-09-03T09:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -728,7 +852,9 @@
       "id": "run-0058",
       "timestamp": "2026-09-03T10:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -739,7 +865,9 @@
       "id": "run-0059",
       "timestamp": "2026-09-03T11:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -750,7 +878,9 @@
       "id": "run-0060",
       "timestamp": "2026-09-03T12:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -761,7 +891,9 @@
       "id": "run-0061",
       "timestamp": "2026-09-03T13:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -772,7 +904,9 @@
       "id": "run-0062",
       "timestamp": "2026-09-03T14:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -783,7 +917,9 @@
       "id": "run-0063",
       "timestamp": "2026-09-03T15:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -794,7 +930,9 @@
       "id": "run-0064",
       "timestamp": "2026-09-03T16:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -805,7 +943,9 @@
       "id": "run-0065",
       "timestamp": "2026-09-03T17:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -816,7 +956,9 @@
       "id": "run-0066",
       "timestamp": "2026-09-03T18:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -827,7 +969,9 @@
       "id": "run-0067",
       "timestamp": "2026-09-03T19:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -838,7 +982,9 @@
       "id": "run-0068",
       "timestamp": "2026-09-03T20:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -849,7 +995,9 @@
       "id": "run-0069",
       "timestamp": "2026-09-03T21:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -860,7 +1008,9 @@
       "id": "run-0070",
       "timestamp": "2026-09-03T22:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -871,7 +1021,9 @@
       "id": "run-0071",
       "timestamp": "2026-09-03T23:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -882,7 +1034,9 @@
       "id": "run-0072",
       "timestamp": "2026-09-04T00:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -893,7 +1047,9 @@
       "id": "run-0073",
       "timestamp": "2026-09-04T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -904,7 +1060,9 @@
       "id": "run-0074",
       "timestamp": "2026-09-04T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -915,7 +1073,9 @@
       "id": "run-0075",
       "timestamp": "2026-09-04T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "commit_sha": "000000000000000000000000000000000000004b",
       "summary": {
         "total": 40,
@@ -924,6 +1084,7 @@
       "failures": [
         {
           "name": "cart/checkout",
+          "platform": "macos-aarch64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "pixel",
@@ -936,6 +1097,7 @@
         },
         {
           "name": "cart/header",
+          "platform": "macos-aarch64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "ssim",
@@ -954,17 +1116,20 @@
         },
         {
           "name": "cart/item",
+          "platform": "macos-aarch64",
           "outcome": "dimension_mismatch",
           "message": "golden is 100x60px, test image is 100x61px"
         },
         {
           "name": "profile/avatar",
+          "platform": "macos-aarch64",
           "outcome": "error",
           "error_kind": "image",
           "message": "candidate image: invalid PNG signature"
         },
         {
           "name": "settings/theme",
+          "platform": "macos-aarch64",
           "outcome": "missing",
           "message": "no baseline is staged for this screenshot"
         }
@@ -974,7 +1139,9 @@
       "id": "run-0076",
       "timestamp": "2026-09-04T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -985,7 +1152,9 @@
       "id": "run-0077",
       "timestamp": "2026-09-04T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -996,7 +1165,9 @@
       "id": "run-0078",
       "timestamp": "2026-09-04T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1007,7 +1178,9 @@
       "id": "run-0079",
       "timestamp": "2026-09-04T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1018,7 +1191,9 @@
       "id": "run-0080",
       "timestamp": "2026-09-04T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1029,7 +1204,9 @@
       "id": "run-0081",
       "timestamp": "2026-09-04T09:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1040,7 +1217,9 @@
       "id": "run-0082",
       "timestamp": "2026-09-04T10:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1051,7 +1230,9 @@
       "id": "run-0083",
       "timestamp": "2026-09-04T11:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1062,7 +1243,9 @@
       "id": "run-0084",
       "timestamp": "2026-09-04T12:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1073,7 +1256,9 @@
       "id": "run-0085",
       "timestamp": "2026-09-04T13:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1084,7 +1269,9 @@
       "id": "run-0086",
       "timestamp": "2026-09-04T14:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1095,7 +1282,9 @@
       "id": "run-0087",
       "timestamp": "2026-09-04T15:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1106,7 +1295,9 @@
       "id": "run-0088",
       "timestamp": "2026-09-04T16:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1117,7 +1308,9 @@
       "id": "run-0089",
       "timestamp": "2026-09-04T17:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1128,7 +1321,9 @@
       "id": "run-0090",
       "timestamp": "2026-09-04T18:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1139,7 +1334,9 @@
       "id": "run-0091",
       "timestamp": "2026-09-04T19:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1150,7 +1347,9 @@
       "id": "run-0092",
       "timestamp": "2026-09-04T20:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1161,7 +1360,9 @@
       "id": "run-0093",
       "timestamp": "2026-09-04T21:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1172,7 +1373,9 @@
       "id": "run-0094",
       "timestamp": "2026-09-04T22:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1183,7 +1386,9 @@
       "id": "run-0095",
       "timestamp": "2026-09-04T23:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1194,7 +1399,9 @@
       "id": "run-0096",
       "timestamp": "2026-09-05T00:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1205,7 +1412,9 @@
       "id": "run-0097",
       "timestamp": "2026-09-05T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1216,7 +1425,9 @@
       "id": "run-0098",
       "timestamp": "2026-09-05T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1227,7 +1438,9 @@
       "id": "run-0099",
       "timestamp": "2026-09-05T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1238,7 +1451,9 @@
       "id": "run-0100",
       "timestamp": "2026-09-05T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "commit_sha": "0000000000000000000000000000000000000064",
       "summary": {
         "total": 40,
@@ -1247,6 +1462,7 @@
       "failures": [
         {
           "name": "cart/checkout",
+          "platform": "linux-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "pixel",
@@ -1259,6 +1475,7 @@
         },
         {
           "name": "cart/header",
+          "platform": "linux-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "ssim",
@@ -1277,17 +1494,20 @@
         },
         {
           "name": "cart/item",
+          "platform": "linux-x86_64",
           "outcome": "dimension_mismatch",
           "message": "golden is 100x60px, test image is 100x61px"
         },
         {
           "name": "profile/avatar",
+          "platform": "linux-x86_64",
           "outcome": "error",
           "error_kind": "image",
           "message": "candidate image: invalid PNG signature"
         },
         {
           "name": "settings/theme",
+          "platform": "linux-x86_64",
           "outcome": "missing",
           "message": "no baseline is staged for this screenshot"
         }
@@ -1297,7 +1517,9 @@
       "id": "run-0101",
       "timestamp": "2026-09-05T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1308,7 +1530,9 @@
       "id": "run-0102",
       "timestamp": "2026-09-05T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1319,7 +1543,9 @@
       "id": "run-0103",
       "timestamp": "2026-09-05T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1330,7 +1556,9 @@
       "id": "run-0104",
       "timestamp": "2026-09-05T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1341,7 +1569,9 @@
       "id": "run-0105",
       "timestamp": "2026-09-05T09:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1352,7 +1582,9 @@
       "id": "run-0106",
       "timestamp": "2026-09-05T10:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1363,7 +1595,9 @@
       "id": "run-0107",
       "timestamp": "2026-09-05T11:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1374,7 +1608,9 @@
       "id": "run-0108",
       "timestamp": "2026-09-05T12:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1385,7 +1621,9 @@
       "id": "run-0109",
       "timestamp": "2026-09-05T13:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1396,7 +1634,9 @@
       "id": "run-0110",
       "timestamp": "2026-09-05T14:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1407,7 +1647,9 @@
       "id": "run-0111",
       "timestamp": "2026-09-05T15:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1418,7 +1660,9 @@
       "id": "run-0112",
       "timestamp": "2026-09-05T16:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1429,7 +1673,9 @@
       "id": "run-0113",
       "timestamp": "2026-09-05T17:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1440,7 +1686,9 @@
       "id": "run-0114",
       "timestamp": "2026-09-05T18:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1451,7 +1699,9 @@
       "id": "run-0115",
       "timestamp": "2026-09-05T19:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1462,7 +1712,9 @@
       "id": "run-0116",
       "timestamp": "2026-09-05T20:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1473,7 +1725,9 @@
       "id": "run-0117",
       "timestamp": "2026-09-05T21:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1484,7 +1738,9 @@
       "id": "run-0118",
       "timestamp": "2026-09-05T22:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1495,7 +1751,9 @@
       "id": "run-0119",
       "timestamp": "2026-09-05T23:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1506,7 +1764,9 @@
       "id": "run-0120",
       "timestamp": "2026-09-06T00:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1517,7 +1777,9 @@
       "id": "run-0121",
       "timestamp": "2026-09-06T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1528,7 +1790,9 @@
       "id": "run-0122",
       "timestamp": "2026-09-06T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1539,7 +1803,9 @@
       "id": "run-0123",
       "timestamp": "2026-09-06T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1550,7 +1816,9 @@
       "id": "run-0124",
       "timestamp": "2026-09-06T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1561,7 +1829,9 @@
       "id": "run-0125",
       "timestamp": "2026-09-06T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "commit_sha": "000000000000000000000000000000000000007d",
       "summary": {
         "total": 40,
@@ -1570,6 +1840,7 @@
       "failures": [
         {
           "name": "cart/checkout",
+          "platform": "windows-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "pixel",
@@ -1582,6 +1853,7 @@
         },
         {
           "name": "cart/header",
+          "platform": "windows-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "ssim",
@@ -1600,17 +1872,20 @@
         },
         {
           "name": "cart/item",
+          "platform": "windows-x86_64",
           "outcome": "dimension_mismatch",
           "message": "golden is 100x60px, test image is 100x61px"
         },
         {
           "name": "profile/avatar",
+          "platform": "windows-x86_64",
           "outcome": "error",
           "error_kind": "image",
           "message": "candidate image: invalid PNG signature"
         },
         {
           "name": "settings/theme",
+          "platform": "windows-x86_64",
           "outcome": "missing",
           "message": "no baseline is staged for this screenshot"
         }
@@ -1620,7 +1895,9 @@
       "id": "run-0126",
       "timestamp": "2026-09-06T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1631,7 +1908,9 @@
       "id": "run-0127",
       "timestamp": "2026-09-06T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1642,7 +1921,9 @@
       "id": "run-0128",
       "timestamp": "2026-09-06T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1653,7 +1934,9 @@
       "id": "run-0129",
       "timestamp": "2026-09-06T09:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1664,7 +1947,9 @@
       "id": "run-0130",
       "timestamp": "2026-09-06T10:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1675,7 +1960,9 @@
       "id": "run-0131",
       "timestamp": "2026-09-06T11:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1686,7 +1973,9 @@
       "id": "run-0132",
       "timestamp": "2026-09-06T12:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1697,7 +1986,9 @@
       "id": "run-0133",
       "timestamp": "2026-09-06T13:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1708,7 +1999,9 @@
       "id": "run-0134",
       "timestamp": "2026-09-06T14:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1719,7 +2012,9 @@
       "id": "run-0135",
       "timestamp": "2026-09-06T15:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1730,7 +2025,9 @@
       "id": "run-0136",
       "timestamp": "2026-09-06T16:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1741,7 +2038,9 @@
       "id": "run-0137",
       "timestamp": "2026-09-06T17:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1752,7 +2051,9 @@
       "id": "run-0138",
       "timestamp": "2026-09-06T18:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1763,7 +2064,9 @@
       "id": "run-0139",
       "timestamp": "2026-09-06T19:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1774,7 +2077,9 @@
       "id": "run-0140",
       "timestamp": "2026-09-06T20:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1785,7 +2090,9 @@
       "id": "run-0141",
       "timestamp": "2026-09-06T21:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1796,7 +2103,9 @@
       "id": "run-0142",
       "timestamp": "2026-09-06T22:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1807,7 +2116,9 @@
       "id": "run-0143",
       "timestamp": "2026-09-06T23:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1818,7 +2129,9 @@
       "id": "run-0144",
       "timestamp": "2026-09-07T00:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1829,7 +2142,9 @@
       "id": "run-0145",
       "timestamp": "2026-09-07T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1840,7 +2155,9 @@
       "id": "run-0146",
       "timestamp": "2026-09-07T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1851,7 +2168,9 @@
       "id": "run-0147",
       "timestamp": "2026-09-07T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1862,7 +2181,9 @@
       "id": "run-0148",
       "timestamp": "2026-09-07T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1873,7 +2194,9 @@
       "id": "run-0149",
       "timestamp": "2026-09-07T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1884,7 +2207,9 @@
       "id": "run-0150",
       "timestamp": "2026-09-07T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "commit_sha": "0000000000000000000000000000000000000096",
       "summary": {
         "total": 40,
@@ -1893,6 +2218,7 @@
       "failures": [
         {
           "name": "cart/checkout",
+          "platform": "macos-aarch64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "pixel",
@@ -1905,6 +2231,7 @@
         },
         {
           "name": "cart/header",
+          "platform": "macos-aarch64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "ssim",
@@ -1923,17 +2250,20 @@
         },
         {
           "name": "cart/item",
+          "platform": "macos-aarch64",
           "outcome": "dimension_mismatch",
           "message": "golden is 100x60px, test image is 100x61px"
         },
         {
           "name": "profile/avatar",
+          "platform": "macos-aarch64",
           "outcome": "error",
           "error_kind": "image",
           "message": "candidate image: invalid PNG signature"
         },
         {
           "name": "settings/theme",
+          "platform": "macos-aarch64",
           "outcome": "missing",
           "message": "no baseline is staged for this screenshot"
         }
@@ -1943,7 +2273,9 @@
       "id": "run-0151",
       "timestamp": "2026-09-07T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1954,7 +2286,9 @@
       "id": "run-0152",
       "timestamp": "2026-09-07T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1965,7 +2299,9 @@
       "id": "run-0153",
       "timestamp": "2026-09-07T09:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1976,7 +2312,9 @@
       "id": "run-0154",
       "timestamp": "2026-09-07T10:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1987,7 +2325,9 @@
       "id": "run-0155",
       "timestamp": "2026-09-07T11:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -1998,7 +2338,9 @@
       "id": "run-0156",
       "timestamp": "2026-09-07T12:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2009,7 +2351,9 @@
       "id": "run-0157",
       "timestamp": "2026-09-07T13:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2020,7 +2364,9 @@
       "id": "run-0158",
       "timestamp": "2026-09-07T14:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2031,7 +2377,9 @@
       "id": "run-0159",
       "timestamp": "2026-09-07T15:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2042,7 +2390,9 @@
       "id": "run-0160",
       "timestamp": "2026-09-07T16:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2053,7 +2403,9 @@
       "id": "run-0161",
       "timestamp": "2026-09-07T17:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2064,7 +2416,9 @@
       "id": "run-0162",
       "timestamp": "2026-09-07T18:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2075,7 +2429,9 @@
       "id": "run-0163",
       "timestamp": "2026-09-07T19:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2086,7 +2442,9 @@
       "id": "run-0164",
       "timestamp": "2026-09-07T20:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2097,7 +2455,9 @@
       "id": "run-0165",
       "timestamp": "2026-09-07T21:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2108,7 +2468,9 @@
       "id": "run-0166",
       "timestamp": "2026-09-07T22:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2119,7 +2481,9 @@
       "id": "run-0167",
       "timestamp": "2026-09-07T23:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2130,7 +2494,9 @@
       "id": "run-0168",
       "timestamp": "2026-09-08T00:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2141,7 +2507,9 @@
       "id": "run-0169",
       "timestamp": "2026-09-08T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2152,7 +2520,9 @@
       "id": "run-0170",
       "timestamp": "2026-09-08T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2163,7 +2533,9 @@
       "id": "run-0171",
       "timestamp": "2026-09-08T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2174,7 +2546,9 @@
       "id": "run-0172",
       "timestamp": "2026-09-08T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2185,7 +2559,9 @@
       "id": "run-0173",
       "timestamp": "2026-09-08T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2196,7 +2572,9 @@
       "id": "run-0174",
       "timestamp": "2026-09-08T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2207,7 +2585,9 @@
       "id": "run-0175",
       "timestamp": "2026-09-08T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "commit_sha": "00000000000000000000000000000000000000af",
       "summary": {
         "total": 40,
@@ -2216,6 +2596,7 @@
       "failures": [
         {
           "name": "cart/checkout",
+          "platform": "linux-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "pixel",
@@ -2228,6 +2609,7 @@
         },
         {
           "name": "cart/header",
+          "platform": "linux-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "ssim",
@@ -2246,17 +2628,20 @@
         },
         {
           "name": "cart/item",
+          "platform": "linux-x86_64",
           "outcome": "dimension_mismatch",
           "message": "golden is 100x60px, test image is 100x61px"
         },
         {
           "name": "profile/avatar",
+          "platform": "linux-x86_64",
           "outcome": "error",
           "error_kind": "image",
           "message": "candidate image: invalid PNG signature"
         },
         {
           "name": "settings/theme",
+          "platform": "linux-x86_64",
           "outcome": "missing",
           "message": "no baseline is staged for this screenshot"
         }
@@ -2266,7 +2651,9 @@
       "id": "run-0176",
       "timestamp": "2026-09-08T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2277,7 +2664,9 @@
       "id": "run-0177",
       "timestamp": "2026-09-08T09:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2288,7 +2677,9 @@
       "id": "run-0178",
       "timestamp": "2026-09-08T10:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2299,7 +2690,9 @@
       "id": "run-0179",
       "timestamp": "2026-09-08T11:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2310,7 +2703,9 @@
       "id": "run-0180",
       "timestamp": "2026-09-08T12:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2321,7 +2716,9 @@
       "id": "run-0181",
       "timestamp": "2026-09-08T13:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2332,7 +2729,9 @@
       "id": "run-0182",
       "timestamp": "2026-09-08T14:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2343,7 +2742,9 @@
       "id": "run-0183",
       "timestamp": "2026-09-08T15:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2354,7 +2755,9 @@
       "id": "run-0184",
       "timestamp": "2026-09-08T16:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2365,7 +2768,9 @@
       "id": "run-0185",
       "timestamp": "2026-09-08T17:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2376,7 +2781,9 @@
       "id": "run-0186",
       "timestamp": "2026-09-08T18:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2387,7 +2794,9 @@
       "id": "run-0187",
       "timestamp": "2026-09-08T19:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2398,7 +2807,9 @@
       "id": "run-0188",
       "timestamp": "2026-09-08T20:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2409,7 +2820,9 @@
       "id": "run-0189",
       "timestamp": "2026-09-08T21:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2420,7 +2833,9 @@
       "id": "run-0190",
       "timestamp": "2026-09-08T22:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2431,7 +2846,9 @@
       "id": "run-0191",
       "timestamp": "2026-09-08T23:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2442,7 +2859,9 @@
       "id": "run-0192",
       "timestamp": "2026-09-09T00:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2453,7 +2872,9 @@
       "id": "run-0193",
       "timestamp": "2026-09-09T01:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2464,7 +2885,9 @@
       "id": "run-0194",
       "timestamp": "2026-09-09T02:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2475,7 +2898,9 @@
       "id": "run-0195",
       "timestamp": "2026-09-09T03:00:00Z",
       "branch": "feature/checkout",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2486,7 +2911,9 @@
       "id": "run-0196",
       "timestamp": "2026-09-09T04:00:00Z",
       "branch": "main",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2497,7 +2924,9 @@
       "id": "run-0197",
       "timestamp": "2026-09-09T05:00:00Z",
       "branch": "feature/checkout",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2508,7 +2937,9 @@
       "id": "run-0198",
       "timestamp": "2026-09-09T06:00:00Z",
       "branch": "main",
-      "platform": "macos-aarch64",
+      "platforms": [
+        "macos-aarch64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2519,7 +2950,9 @@
       "id": "run-0199",
       "timestamp": "2026-09-09T07:00:00Z",
       "branch": "feature/checkout",
-      "platform": "linux-x86_64",
+      "platforms": [
+        "linux-x86_64"
+      ],
       "summary": {
         "total": 40,
         "failed": 0
@@ -2530,7 +2963,9 @@
       "id": "run-0200",
       "timestamp": "2026-09-09T08:00:00Z",
       "branch": "main",
-      "platform": "windows-x86_64",
+      "platforms": [
+        "windows-x86_64"
+      ],
       "commit_sha": "00000000000000000000000000000000000000c8",
       "summary": {
         "total": 40,
@@ -2539,6 +2974,7 @@
       "failures": [
         {
           "name": "cart/checkout",
+          "platform": "windows-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "pixel",
@@ -2551,6 +2987,7 @@
         },
         {
           "name": "cart/header",
+          "platform": "windows-x86_64",
           "outcome": "mismatch",
           "metrics": {
             "kind": "ssim",
@@ -2569,17 +3006,20 @@
         },
         {
           "name": "cart/item",
+          "platform": "windows-x86_64",
           "outcome": "dimension_mismatch",
           "message": "golden is 100x60px, test image is 100x61px"
         },
         {
           "name": "profile/avatar",
+          "platform": "windows-x86_64",
           "outcome": "error",
           "error_kind": "image",
           "message": "candidate image: invalid PNG signature"
         },
         {
           "name": "settings/theme",
+          "platform": "windows-x86_64",
           "outcome": "missing",
           "message": "no baseline is staged for this screenshot"
         }

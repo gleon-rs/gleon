@@ -580,6 +580,8 @@ pub fn gleon_result_free(result: Option<repr_c::Box<GleonResult>>) {
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
+    use gleon_model::platform::PlatformKey;
+
     use super::*;
 
     const FLUTTER_ARTIFACTS: [&str; 3] = [
@@ -1090,7 +1092,10 @@ mod tests {
         let failures = root.join("test/failures").display().to_string();
         let strings = [path.as_str(), "goldens/counter.png", failures.as_str(), "t"];
         let case = || -> serde_json::Value {
-            let file = root.join(".gleon/runs/latest/cases/test/goldens/counter.json");
+            let file = root
+                .join(".gleon/runs/latest/cases")
+                .join(PlatformKey::host())
+                .join("test/goldens/counter.json");
             serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
         };
 
@@ -1123,9 +1128,12 @@ mod tests {
         );
         assert_eq!(case()["comparison"]["tolerance"]["kind"], "ssim");
         assert_eq!(std::fs::read_dir(&failures).unwrap().count(), 3);
-        let diff = ".gleon/runs/latest/artifacts/test/goldens/counter/diff.png";
-        assert_eq!(case()["artifacts"]["diff"], diff);
-        assert!(root.join(diff).is_file());
+        let diff = format!(
+            ".gleon/runs/latest/artifacts/{}/test/goldens/counter/diff.png",
+            PlatformKey::host()
+        );
+        assert_eq!(case()["artifacts"]["diff"], diff.as_str());
+        assert!(root.join(&diff).is_file());
 
         // A whole-image mask through the ABI hides everything; the call's pixel tolerance wins.
         let masks = [0, 0, 360, 640, 350, 630, 20, 20];

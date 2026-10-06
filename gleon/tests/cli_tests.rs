@@ -846,11 +846,20 @@ fn case(name: &str, outcome: &str, extra: serde_json::Value) -> serde_json::Valu
     report
 }
 
-/// Writes `reports` into `<dir>/.gleon/runs/latest/cases/` and returns that directory.
+/// Writes `reports` into `<dir>/.gleon/runs/latest/cases/<os>-<arch>/` (the key of their
+/// platform) and returns `cases/`.
 fn write_cases(dir: &std::path::Path, reports: &[serde_json::Value]) -> std::path::PathBuf {
     let cases = dir.join(".gleon/runs/latest/cases");
     for report in reports {
-        let file = cases.join(format!("{}.json", report["name"].as_str().unwrap()));
+        let platform = &report["platform"];
+        let key = format!(
+            "{}-{}",
+            platform["os"].as_str().unwrap(),
+            platform["arch"].as_str().unwrap()
+        );
+        let file = cases
+            .join(key)
+            .join(format!("{}.json", report["name"].as_str().unwrap()));
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, report.to_string()).unwrap();
     }
@@ -1207,9 +1216,11 @@ fn test_test_runs_the_command_as_one_run() {
     let run_id = run["run_id"].as_str().unwrap();
     assert!(run_id.starts_with("run-"), "{run}");
     assert_eq!(run["command"][1], "diff");
-    let report: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(latest.join("cases/shots/new.json")).unwrap())
-            .unwrap();
+    let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(latest.join("cases").join(host).join("shots/new.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(report["run_id"], run_id);
 
     // A run id given by CI is kept.
@@ -1265,7 +1276,7 @@ fn test_from_paths_are_relative_to_the_working_directory() {
     std::fs::create_dir_all(&sub).unwrap();
     let run = sub.join("dl/linux/latest");
     let case = mismatch("a", 1);
-    let file = run.join("cases/a.json");
+    let file = run.join("cases/linux-x86_64/a.json");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(file, case.to_string()).unwrap();
 
@@ -1473,4 +1484,168 @@ fn test_test_report_approve_end_to_end() {
         .success()
         .stderr(predicate::str::contains("Approved 2 screenshot(s)"));
     run().assert().success();
+}
+
+/// `gleon approve` takes `<platform>/<test name>` filters, and a bare platform key approves every
+/// case of that platform; it lists what it approved as `<platform>/<test name>`.
+#[test]
+fn test_approve_filters_by_platform() {
+    let dir = init_temp_dir();
+    copy_fixture("baseline_100x100.png", &dir.path().join("login/button.png"));
+    copy_fixture("200x100.png", &dir.path().join("login/card.png"));
+    std::fs::write(
+        dir.path().join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"login/*.png\"\n",
+    )
+    .unwrap();
+    let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let joint = |args: &[&str]| {
+        let mut cmd = gleon();
+        cmd.current_dir(dir.path())
+            .env("GLEON_RUN_ID", "joint-1")
+            .args(args);
+        cmd
+    };
+    // Two platforms of one run, no baselines yet.
+    joint(&["diff"]).assert().code(1);
+    joint(&["--platform", "freebsd-riscv64", "diff"])
+        .assert()
+        .code(1);
+
+    joint(&["approve", "freebsd-riscv64/login/button"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "Approved 1 screenshot(s): freebsd-riscv64/login/button.",
+        ));
+    joint(&["approve", &host])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(format!(
+            "Approved 2 screenshot(s): {host}/login/button, {host}/login/card."
+        )));
+    assert!(
+        dir.path()
+            .join(".gleon/manifests/freebsd-riscv64/login/button.json")
+            .is_file()
+    );
+    assert!(
+        !dir.path()
+            .join(".gleon/manifests/freebsd-riscv64/login/card.json")
+            .exists()
+    );
+}
+
+/// `gleon diff --platform <a>`, then `gleon diff` on this platform, then `gleon report`: the
+/// reports and images of both platforms stay on disk, each `gleon diff` renders its own run, and
+/// `gleon report` reads the latest run of each platform, warning that they are two runs.
+#[test]
+fn test_diffs_of_two_platforms_then_report() {
+    let dir = init_temp_dir();
+    copy_fixture("baseline_100x100.png", &dir.path().join("login/button.png"));
+    std::fs::write(
+        dir.path().join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"login/*.png\"\n",
+    )
+    .unwrap();
+    let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let latest = dir.path().join(".gleon/runs/latest");
+    gleon()
+        .current_dir(dir.path())
+        .args(["diff", "--platform", "freebsd-riscv64"])
+        .assert()
+        .code(1);
+    gleon().current_dir(dir.path()).arg("diff").assert().code(1);
+
+    for key in ["freebsd-riscv64", host.as_str()] {
+        assert!(
+            latest
+                .join("cases")
+                .join(key)
+                .join("login/button.json")
+                .is_file(),
+            "{key}"
+        );
+        assert!(
+            latest
+                .join("artifacts")
+                .join(key)
+                .join("login/button/candidate.png")
+                .is_file(),
+            "{key}"
+        );
+    }
+    let own = std::fs::read_to_string(latest.join("report.md")).unwrap();
+    assert!(own.contains("**Total Tests:** 1\n"), "its own run: {own}");
+
+    gleon()
+        .current_dir(dir.path())
+        .args(["report", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "`login/button ({host})`"
+        )))
+        .stdout(predicates::str::contains(
+            "`login/button (freebsd-riscv64)`",
+        ))
+        .stdout(predicates::str::contains(
+            "platforms come from different runs",
+        ));
+}
+
+/// A platform with a renderer and labels names its directories with `+` and `=`: `gleon diff`
+/// records under that key and the HTML report links images that exist.
+#[test]
+fn test_diff_and_report_of_a_labeled_platform() {
+    let dir = init_temp_dir();
+    copy_fixture("baseline_100x100.png", &dir.path().join("login/button.png"));
+    std::fs::write(
+        dir.path().join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"login/*.png\"\n",
+    )
+    .unwrap();
+    let platform = [
+        "--os",
+        "ios-sim",
+        "--arch",
+        "arm",
+        "--renderer",
+        "flutter-3.47",
+        "--label",
+        "theme=dark",
+    ];
+    let key = "os=ios-sim+arch=arm+flutter-3.47+theme=dark";
+    gleon()
+        .current_dir(dir.path())
+        .args(platform)
+        .arg("diff")
+        .assert()
+        .code(1);
+    let latest = dir.path().join(".gleon/runs/latest");
+    assert!(
+        latest
+            .join("cases")
+            .join(key)
+            .join("login/button.json")
+            .is_file()
+    );
+
+    gleon()
+        .current_dir(dir.path())
+        .args(["report", "html", "--out", "report.html"])
+        .assert()
+        .success();
+    let html = std::fs::read_to_string(dir.path().join("report.html")).unwrap();
+    let src = html
+        .split("src=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("no image: {html}"))
+        .replace("&#x2f;", "/");
+    assert!(src.contains(key), "{src}");
+    assert!(
+        dir.path().join(&src).is_file(),
+        "relative to the page: {src}"
+    );
 }

@@ -1720,6 +1720,7 @@ dependencies = [
  "gleon-engine",
  "globset",
  "image",
+ "regex",
  "schemars",
  "semver",
  "serde",

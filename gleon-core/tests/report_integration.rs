@@ -18,7 +18,11 @@ use gleon_core::{
     cases::Cases,
     context::{ContextOptions, ResolvedContext},
     dashboard::RunHistoryEntry,
-    ops::{approve_workspace, diff::DiffOptions, init_workspace, run_diff, stage_workspace},
+    ops::{
+        ApproveResult, approve_workspace, diff::DiffOptions, init_workspace, run_diff,
+        stage_workspace,
+    },
+    platform::PlatformKey,
     report::{MarkdownReportOptions, ReportGenerator},
 };
 
@@ -38,6 +42,11 @@ fn copy_tree(from: &Path, to: &Path) {
             fs::copy(entry.path(), target).unwrap();
         }
     }
+}
+
+/// The approved cases as `<platform>/<name>`.
+fn approved_names(result: &ApproveResult) -> Vec<String> {
+    result.approved.iter().map(ToString::to_string).collect()
 }
 
 /// The case reports of a real `flutter test` run in CI (the `metrics-linux-x64` artifact of the
@@ -85,12 +94,11 @@ fn test_reports_of_a_real_flutter_run() {
     );
 
     let entry = RunHistoryEntry::from_cases(
-        "run",
         cases.recorded_at().unwrap(),
         "main",
-        "linux-x86_64",
         None,
         &cases,
+        &PlatformKey::parse("linux-x86_64").unwrap(),
     );
     assert_eq!((entry.summary.total, entry.summary.failed), (2, 0));
     assert!(entry.failures.is_empty(), "passing tests are only counted");
@@ -140,7 +148,7 @@ const FLUTTER_MISSING_CASE: &str = r#"{
   "outcome": "missing",
   "regions": [],
   "artifacts": {
-    "candidate": ".gleon/runs/latest/artifacts/test/goldens/counter_three_taps/candidate.png"
+    "candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/goldens/counter_three_taps/candidate.png"
   },
   "timings_ms": {
     "total": 0.3
@@ -159,10 +167,11 @@ fn test_reports_and_approval_of_a_real_flutter_failure() {
     fs::create_dir_all(&run).unwrap();
     // The report as the integration wrote it, its candidate stored as `.png.bin` so the fixtures
     // hold no stray screenshot.
-    let report = run.join("cases/test/goldens/counter_three_taps.json");
+    let report = run.join("cases/macos-aarch64/test/goldens/counter_three_taps.json");
     fs::create_dir_all(report.parent().unwrap()).unwrap();
     fs::write(report, FLUTTER_MISSING_CASE).unwrap();
-    let candidate = run.join("artifacts/test/goldens/counter_three_taps/candidate.png");
+    let candidate =
+        run.join("artifacts/macos-aarch64/test/goldens/counter_three_taps/candidate.png");
     fs::create_dir_all(candidate.parent().unwrap()).unwrap();
     fs::copy(
         fixtures().join("flutter_missing_candidate.png.bin"),
@@ -188,17 +197,17 @@ fn test_reports_and_approval_of_a_real_flutter_failure() {
     );
     assert!(html.contains("New screenshot (360x640)"));
     assert!(html.contains(
-        "src=\"artifacts&#x2f;test&#x2f;goldens&#x2f;counter_three_taps&#x2f;candidate.png\""
+        "src=\"artifacts&#x2f;macos-aarch64&#x2f;test&#x2f;goldens&#x2f;counter_three_taps&#x2f;candidate.png\""
     ));
 
     let approved = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
     assert_eq!(
-        approved.approved_test_cases,
-        ["test/goldens/counter_three_taps"]
+        approved_names(&approved),
+        ["macos-aarch64/test/goldens/counter_three_taps"]
     );
     assert_eq!(
         fs::read(root.join("test/goldens/counter_three_taps.png")).unwrap(),
-        fs::read(run.join("artifacts/test/goldens/counter_three_taps/candidate.png")).unwrap()
+        fs::read(candidate).unwrap()
     );
 }
 
@@ -251,9 +260,14 @@ fn test_a_real_run_against_the_fallback_seeds_per_platform_goldens() {
         "{xml}"
     );
     assert!(
-        xml.contains(r#"file="test&#x2f;goldens&#x2f;counter_initial.png""#)
-            && !xml.contains("macos-aarch64"),
+        xml.contains(
+            r#"<testcase name="test&#x2f;goldens&#x2f;counter_initial" classname="macos-aarch64" file="test&#x2f;goldens&#x2f;counter_initial.png">"#
+        ),
         "the compared golden, not the own one that does not exist yet: {xml}"
+    );
+    assert!(
+        !xml.contains("goldens&#x2f;macos-aarch64"),
+        "the own golden does not exist yet: {xml}"
     );
 
     let approved = approve_workspace(
@@ -264,12 +278,13 @@ fn test_a_real_run_against_the_fallback_seeds_per_platform_goldens() {
     )
     .unwrap();
     assert_eq!(
-        approved.approved_test_cases,
-        ["test/goldens/counter_initial"]
+        approved_names(&approved),
+        ["macos-aarch64/test/goldens/counter_initial"]
     );
     assert_eq!(
         fs::read(root.join("test/goldens/macos-aarch64/counter_initial.png")).unwrap(),
-        fs::read(run.join("artifacts/test/goldens/counter_initial/candidate.png")).unwrap()
+        fs::read(run.join("artifacts/macos-aarch64/test/goldens/counter_initial/candidate.png"))
+            .unwrap()
     );
     assert!(
         !root.join("test/goldens/counter_initial.png").exists(),
@@ -365,6 +380,181 @@ screenshots:
     );
 }
 
+/// The real Linux run and the same run on macOS in one `latest/` (a macOS host and a Linux
+/// container on one checkout sharing `GLEON_RUN_ID`): one run of four cases, every golden once
+/// per platform, and the reports name the platforms.
+#[test]
+fn test_reports_of_two_platforms_in_one_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = temp.path().join("latest");
+    fs::create_dir_all(&run).unwrap();
+    copy_tree(&fixtures().join("cases/flutter-linux-x64"), &run);
+    let linux = run.join("cases/linux-x86_64/test/goldens");
+    let macos = run.join("cases/macos-aarch64/test/goldens");
+    fs::create_dir_all(&macos).unwrap();
+    for entry in fs::read_dir(&linux).unwrap() {
+        let path = entry.unwrap().path();
+        let mut report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        report["platform"] = serde_json::json!({"os": "macos", "arch": "aarch64"});
+        fs::write(macos.join(path.file_name().unwrap()), report.to_string()).unwrap();
+    }
+
+    let cases = Cases::load(&run, None).unwrap();
+    assert_eq!(cases.run_id().unwrap().as_str(), "36918116203-1");
+    assert!(cases.spans_platforms());
+    let keys: Vec<_> = cases
+        .reports()
+        .iter()
+        .map(|r| format!("{}/{}", r.platform_key().unwrap(), r.name))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "linux-x86_64/test/goldens/counter_initial",
+            "macos-aarch64/test/goldens/counter_initial",
+            "linux-x86_64/test/goldens/counter_three_taps",
+            "macos-aarch64/test/goldens/counter_three_taps",
+        ]
+    );
+
+    ReportGenerator::generate_all(&run, &cases).unwrap();
+    let xml = fs::read_to_string(run.join("junit.xml")).unwrap();
+    assert!(xml.contains(r#"tests="4" failures="0""#), "{xml}");
+    for platform in ["linux-x86_64", "macos-aarch64"] {
+        assert!(
+            xml.contains(&format!(
+                r#"<testcase name="test&#x2f;goldens&#x2f;counter_initial" classname="{platform}""#
+            )),
+            "{xml}"
+        );
+    }
+    let md = fs::read_to_string(run.join("report.md")).unwrap();
+    assert!(md.contains("**Total Tests:** 4\n**Failed:** 0"), "{md}");
+    for platform in ["linux-x86_64", "macos-aarch64"] {
+        assert!(
+            md.contains(&format!(
+                "| test/goldens/counter_three_taps ({platform}) | test/goldens/counter_three_taps.png | ✅ Pass |"
+            )),
+            "{md}"
+        );
+    }
+}
+
+/// Two platforms that ran apart into one `latest/` (the real Linux CI run and the real macOS run
+/// against the fallback, each its own run id): both are read, each its own run, with a warning;
+/// the reports name the platforms, `gleon approve` approves from both, and one run id reads one.
+#[test]
+fn test_two_platforms_of_different_runs_in_one_latest() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = temp.path().join("latest");
+    fs::create_dir_all(&run).unwrap();
+    copy_run(&fixtures().join("cases/flutter-linux-x64"), &run);
+    copy_run(&fixtures().join("cases/flutter-macos-fallback"), &run);
+
+    let cases = Cases::load(&run, None).unwrap();
+    let keyed: Vec<_> = cases
+        .keyed()
+        .map(|(key, report)| format!("{key}/{}", report.name))
+        .collect();
+    assert_eq!(
+        keyed,
+        [
+            "linux-x86_64/test/goldens/counter_initial",
+            "macos-aarch64/test/goldens/counter_initial",
+            "linux-x86_64/test/goldens/counter_three_taps",
+        ]
+    );
+    assert_eq!(cases.run_id(), None, "two runs");
+    let warning = "platforms come from different runs (linux-x86_64: 36918116203-1, \
+                   macos-aarch64: fallback-fixture-1): set one GLEON_RUN_ID for every platform \
+                   to read them as one run";
+    assert_eq!(cases.warnings(), [warning]);
+
+    ReportGenerator::generate_all(&run, &cases).unwrap();
+    let md = fs::read_to_string(run.join("report.md")).unwrap();
+    assert!(md.contains("**Total Tests:** 3\n**Failed:** 0"), "{md}");
+    assert!(md.contains("platforms come from different runs"), "{md}");
+    assert!(
+        md.contains("| test/goldens/counter_initial (macos-aarch64) |"),
+        "{md}"
+    );
+    let xml = fs::read_to_string(run.join("junit.xml")).unwrap();
+    assert!(
+        xml.contains(
+            r#"<testcase name="test&#x2f;goldens&#x2f;counter_initial" classname="macos-aarch64""#
+        ),
+        "{xml}"
+    );
+
+    let root = temp.path().join("app");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
+    init_workspace(&ctx).unwrap();
+    let approved = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
+    assert_eq!(
+        approved_names(&approved),
+        ["macos-aarch64/test/goldens/counter_initial"],
+        "the Linux run passed against its own goldens"
+    );
+    assert_eq!(approved.warnings, [warning]);
+    assert!(
+        root.join("test/goldens/macos-aarch64/counter_initial.png")
+            .is_file()
+    );
+
+    let linux = gleon_core::case::RunId::new("36918116203-1").unwrap();
+    let one = Cases::load(&run, Some(&linux)).unwrap();
+    assert_eq!(one.reports().len(), 2);
+    assert!(!one.spans_platforms());
+    assert!(one.warnings().is_empty());
+}
+
+/// Two platforms of one integration run in one `latest/` (the real macOS run against the
+/// fallback, and the same case recorded on Linux), each comparing the shared golden: approving
+/// writes each platform's own golden.
+#[test]
+fn test_approve_writes_the_goldens_of_two_platforms_of_an_integration() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = temp.path().join("latest");
+    fs::create_dir_all(&run).unwrap();
+    copy_run(&fixtures().join("cases/flutter-macos-fallback"), &run);
+    let name = "test/goldens/counter_initial";
+    let macos_report = run.join(format!("cases/macos-aarch64/{name}.json"));
+    let mut linux: serde_json::Value =
+        serde_json::from_slice(&fs::read(&macos_report).unwrap()).unwrap();
+    linux["platform"] = serde_json::json!({"os": "linux", "arch": "x86_64"});
+    linux["golden"]["path"] = "test/goldens/linux-x86_64/counter_initial.png".into();
+    linux["artifacts"]["candidate"] =
+        format!(".gleon/runs/latest/artifacts/linux-x86_64/{name}/candidate.png").into();
+    let linux_report = run.join(format!("cases/linux-x86_64/{name}.json"));
+    fs::create_dir_all(linux_report.parent().unwrap()).unwrap();
+    fs::write(&linux_report, linux.to_string()).unwrap();
+    let candidate = |key: &str| run.join(format!("artifacts/{key}/{name}/candidate.png"));
+    fs::create_dir_all(candidate("linux-x86_64").parent().unwrap()).unwrap();
+    fs::copy(candidate("macos-aarch64"), candidate("linux-x86_64")).unwrap();
+
+    let root = temp.path().join("app");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
+    init_workspace(&ctx).unwrap();
+    let approved = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
+    assert_eq!(
+        approved_names(&approved),
+        [
+            "linux-x86_64/test/goldens/counter_initial",
+            "macos-aarch64/test/goldens/counter_initial"
+        ]
+    );
+    assert!(approved.warnings.is_empty(), "{:?}", approved.warnings);
+    for key in ["linux-x86_64", "macos-aarch64"] {
+        assert_eq!(
+            fs::read(root.join(format!("test/goldens/{key}/counter_initial.png"))).unwrap(),
+            fs::read(candidate(key)).unwrap(),
+            "{key}"
+        );
+    }
+    assert!(!root.join("test/goldens/counter_initial.png").exists());
+}
+
 /// Every committed case report fixture is a valid report of this schema version.
 #[test]
 fn test_case_report_fixtures_are_valid() {
@@ -381,41 +571,4 @@ fn test_case_report_fixtures_are_valid() {
         }
     }
     assert!(reports > 0);
-}
-
-/// Load time of a large run (`Cases::load`), measured on demand:
-/// `cargo test --release -p gleon-core --test report_integration -- --ignored --nocapture`.
-///
-/// 50k case reports of the real Flutter fixture (~2 KB each) in 100 directories, M3 Max (14
-/// cores), macOS on APFS, 3 reader threads (`manifest::index::READ_THREADS`): 0.91 s (50k manifests: 0.6 s).
-#[test]
-#[ignore = "benchmark: writes 50k files, run with --ignored --nocapture"]
-fn test_loads_50k_case_reports() {
-    const REPORTS: usize = 50_000;
-    let temp = tempfile::tempdir().unwrap();
-    let runs_latest = temp.path().join(".gleon/runs/latest");
-    let template: serde_json::Value = serde_json::from_slice(
-        &fs::read(
-            fixtures().join("cases/flutter-linux-x64/cases/test/goldens/counter_three_taps.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    for i in 0..REPORTS {
-        let name = format!("test/dir_{:03}/golden_{i:05}", i % 100);
-        let mut report = template.clone();
-        report["name"] = name.clone().into();
-        let file = runs_latest.join("cases").join(format!("{name}.json"));
-        fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(file, report.to_string()).unwrap();
-    }
-    let _warm_up = Cases::load(&runs_latest, None).unwrap();
-    let started = std::time::Instant::now();
-    let cases = Cases::load(&runs_latest, None).unwrap();
-    println!(
-        "loaded {} case reports in {:?}",
-        cases.reports().len(),
-        started.elapsed()
-    );
-    assert_eq!(cases.reports().len(), REPORTS);
 }

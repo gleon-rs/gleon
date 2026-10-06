@@ -63,13 +63,13 @@ fn register_current_platform_with_fallback(
     let plat_idx = WorkspaceIndex::load(&plat_dir).map_err(CoreError::Manifest)?;
 
     for manifest in plat_idx.entries().values() {
-        register_blob(&manifest.hash, &platform_key);
+        register_blob(&manifest.hash, platform_key.as_str());
     }
 
-    if let Some(ref fallback_key) = context
+    if let Some(fallback_key) = context
         .fallback_platform_key
-        .as_deref()
-        .filter(|&k| k != platform_key)
+        .as_ref()
+        .filter(|&k| *k != platform_key)
     {
         let fb_dir = manifests_root.join(fallback_key);
         let fb_idx = WorkspaceIndex::load(&fb_dir).map_err(CoreError::Manifest)?;
@@ -81,7 +81,7 @@ fn register_current_platform_with_fallback(
             );
             for (test_name, manifest) in fb_idx.entries() {
                 if !plat_idx.entries().contains_key(test_name) {
-                    register_blob(&manifest.hash, fallback_key);
+                    register_blob(&manifest.hash, fallback_key.as_str());
                 }
             }
         }
@@ -198,6 +198,8 @@ pub async fn pull_blobs(
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
+    use gleon_model::platform::PlatformKey;
+
     use super::*;
     use crate::{context::ContextError, platform::PlatformError};
 
@@ -348,7 +350,7 @@ mod tests {
         ctx.platform.os = "linux".to_string();
         ctx.platform.arch = Some("x86_64".to_string());
         ctx.platform.renderer = None;
-        ctx.fallback_platform_key = Some(fb_key.to_string());
+        ctx.fallback_platform_key = Some(PlatformKey::parse(fb_key).unwrap());
         ctx.base_dir = temp.path().to_path_buf();
 
         let cfg = StorageConfig::new("memory://");
@@ -431,7 +433,7 @@ mod tests {
 
         let ctx = ResolvedContext {
             base_dir: temp.path().to_path_buf(),
-            fallback_platform_key: Some("fallback-platform".to_string()),
+            fallback_platform_key: Some(PlatformKey::parse("fallback-platform").unwrap()),
             ..Default::default()
         };
 
@@ -487,7 +489,7 @@ mod tests {
                 renderer: None,
                 labels: std::collections::BTreeMap::new(),
             },
-            fallback_platform_key: Some(macos_key.to_string()),
+            fallback_platform_key: Some(PlatformKey::parse(macos_key).unwrap()),
             ..Default::default()
         };
 

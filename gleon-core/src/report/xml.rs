@@ -1,24 +1,30 @@
 //! `JUnit` XML report generation.
 
-use gleon_model::case::{CaseOutcome, CaseReport};
+use gleon_model::{
+    case::{CaseOutcome, CaseReport},
+    platform::PlatformKey,
+};
 use minijinja::context;
 use serde::Serialize;
 
 use super::{ReportError, format::CaseSummary};
 use crate::cases::Cases;
 
-/// One case as a `JUnit` test case (all in one suite, named after the case, with its golden as
-/// `file`): `failure` for a failed comparison, `error` when the case could not be compared at all.
+/// One case as a `JUnit` test case (all in one suite): its platform key as the class and its test
+/// name as the name, the same in every run (CI tools track a test case by both), with its golden
+/// as `file`; `failure` for a failed comparison, `error` when the case could not be compared at
+/// all.
 #[derive(Serialize)]
 struct XmlCase<'a> {
     name: &'a str,
+    classname: &'a str,
     image: &'a str,
     status: &'static str,
     message: Option<String>,
 }
 
 impl<'a> XmlCase<'a> {
-    fn of(report: &'a CaseReport) -> Self {
+    fn of(key: &'a PlatformKey, report: &'a CaseReport) -> Self {
         let status = match report.outcome {
             CaseOutcome::Error => "error",
             outcome if outcome.is_failure() => "failure",
@@ -26,6 +32,7 @@ impl<'a> XmlCase<'a> {
         };
         Self {
             name: &report.name,
+            classname: key.as_str(),
             image: report.golden.compared(),
             status,
             message: report
@@ -58,7 +65,10 @@ impl super::ReportGenerator {
     /// # Errors
     /// Returns [`ReportError::Render`] if template rendering fails.
     pub fn generate_junit_xml(cases: &Cases) -> Result<String, ReportError> {
-        let test_cases: Vec<_> = cases.reports().iter().map(XmlCase::of).collect();
+        let test_cases: Vec<_> = cases
+            .keyed()
+            .map(|(key, report)| XmlCase::of(key, report))
+            .collect();
         let count = |status| test_cases.iter().filter(|tc| tc.status == status).count();
 
         #[expect(
@@ -95,9 +105,11 @@ impl super::ReportGenerator {
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
+    use gleon_model::platform::{PlatformConfig, PlatformKey};
+
     use super::*;
     use crate::{
-        cases::fixtures::{every_outcome, report},
+        cases::fixtures::{every_outcome, report, report_on},
         report::ReportGenerator,
     };
 
@@ -106,39 +118,41 @@ mod tests {
     fn test_generate_junit_xml_tells_failures_from_errors() {
         let cases = Cases::new("runs/latest", every_outcome());
         let xml = ReportGenerator::generate_junit_xml(&cases).unwrap();
+        let host = PlatformKey::host();
         let lines: Vec<_> = xml
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect();
-        assert_eq!(
-            lines,
-            [
+        let expected: Vec<_> = [
                 r#"<?xml version="1.0" encoding="UTF-8"?>"#,
                 r#"<testsuites name="gleon Tests" tests="7" failures="3" errors="1">"#,
                 r#"<testsuite name="gleon" tests="7" failures="3" errors="1">"#,
-                r#"<testcase name="test&#x2f;dimension_mismatch" classname="gleon" file="test&#x2f;dimension_mismatch.png">"#,
+                r#"<testcase name="test&#x2f;dimension_mismatch" classname="{host}" file="test&#x2f;dimension_mismatch.png">"#,
                 r#"<failure message="Dimension Mismatch: golden is 10x10px, test image is 20x10px">Dimension Mismatch: golden is 10x10px, test image is 20x10px</failure>"#,
                 "</testcase>",
-                r#"<testcase name="test&#x2f;error" classname="gleon" file="test&#x2f;error.png">"#,
+                r#"<testcase name="test&#x2f;error" classname="{host}" file="test&#x2f;error.png">"#,
                 r#"<error message="Error (image): candidate image: corrupt">Error (image): candidate image: corrupt</error>"#,
                 "</testcase>",
-                r#"<testcase name="test&#x2f;identical" classname="gleon" file="test&#x2f;identical.png">"#,
+                r#"<testcase name="test&#x2f;identical" classname="{host}" file="test&#x2f;identical.png">"#,
                 "</testcase>",
-                r#"<testcase name="test&#x2f;match" classname="gleon" file="test&#x2f;match.png">"#,
+                r#"<testcase name="test&#x2f;match" classname="{host}" file="test&#x2f;match.png">"#,
                 "</testcase>",
-                r#"<testcase name="test&#x2f;mismatch" classname="gleon" file="test&#x2f;mismatch.png">"#,
+                r#"<testcase name="test&#x2f;mismatch" classname="{host}" file="test&#x2f;mismatch.png">"#,
                 r#"<failure message="Mismatch: 5.00% (5 of 100px) differ">Mismatch: 5.00% (5 of 100px) differ</failure>"#,
                 "</testcase>",
-                r#"<testcase name="test&#x2f;missing" classname="gleon" file="test&#x2f;missing.png">"#,
+                r#"<testcase name="test&#x2f;missing" classname="{host}" file="test&#x2f;missing.png">"#,
                 r#"<failure message="Missing Baseline: no golden yet">Missing Baseline: no golden yet</failure>"#,
                 "</testcase>",
-                r#"<testcase name="test&#x2f;updated" classname="gleon" file="test&#x2f;updated.png">"#,
+                r#"<testcase name="test&#x2f;updated" classname="{host}" file="test&#x2f;updated.png">"#,
                 "</testcase>",
                 "</testsuite>",
                 "</testsuites>",
-            ]
-        );
+        ]
+        .iter()
+        .map(|line| line.replace("{host}", host.as_str()))
+        .collect();
+        assert_eq!(lines, expected);
     }
 
     #[test]
@@ -156,5 +170,27 @@ mod tests {
             !xml.chars().any(|c| c.is_control() && !c.is_whitespace()),
             "XML 1.0 forbids control characters: {xml:?}"
         );
+    }
+
+    /// A test case is identified the same way in every run: its platform as the class, its test
+    /// name as the name, also in a run of several platforms.
+    #[test]
+    fn test_generate_junit_xml_names_the_platforms_of_a_joint_run() {
+        let platform = |key: &str| PlatformConfig::Opaque(key.to_owned());
+        let cases = Cases::new(
+            "runs/latest",
+            vec![
+                report_on("a", CaseOutcome::Match, platform("macos-aarch64")),
+                report_on("a", CaseOutcome::Mismatch, platform("linux-x86_64")),
+            ],
+        );
+        let xml = ReportGenerator::generate_junit_xml(&cases).unwrap();
+        let linux = xml.find(r#"<testcase name="a" classname="linux-x86_64" file="a.png">"#);
+        let macos = xml.find(r#"<testcase name="a" classname="macos-aarch64" file="a.png">"#);
+        assert!(
+            linux.is_some_and(|linux| macos.is_some_and(|macos| linux < macos)),
+            "{xml}"
+        );
+        assert!(xml.contains(r#"tests="2" failures="1""#), "{xml}");
     }
 }

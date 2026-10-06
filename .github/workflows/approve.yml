@@ -157,9 +157,10 @@ jobs:
             done <<< "$NAMES"
           done <<< "$RUNS"
 
-      # Each artifact is the `.gleon/runs/` of one CI job: approved as its own run, so the cases of
-      # different platforms never overwrite each other (each goes to its platform's manifests).
-      # Passed as a JSON array, so paths with spaces (matrix job names) stay whole.
+      # Each artifact is the `.gleon/runs/` of one CI job, which is one run of its own (its own run
+      # id, picked as a whole): each is passed with its own `--from` and read as it is, and every
+      # case goes to its platform's manifests or golden. Passed as a JSON array, so paths with
+      # spaces (matrix job names) stay whole.
       - name: Collect Runs
         id: runs
         shell: bash

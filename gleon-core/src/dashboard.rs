@@ -5,15 +5,15 @@
 //! branches and platforms without requiring external server hosting.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
 use gleon_model::{
-    case::{CaseErrorKind, CaseOutcome, CaseReport, Metrics, text},
-    platform::PlatformConfig,
+    case::{CaseErrorKind, CaseOutcome, CaseReport, Metrics, RunId, text},
+    platform::{PlatformError, PlatformKey},
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -28,7 +28,7 @@ use crate::{
 
 /// The schema version of `history.json` this gleon reads and writes; other versions are rejected
 /// (start a new history by moving the old file away).
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 3;
 
 /// Errors that can occur during history tracking or dashboard compilation.
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +56,10 @@ pub enum DashboardError {
     /// The case reports of the run cannot be read.
     #[error(transparent)]
     Cases(#[from] CasesError),
+
+    /// The platform of a run without case reports (the context's) has no key.
+    #[error("the platform of the run has no key: {0}")]
+    Platform(#[from] PlatformError),
 
     /// The history has another schema version than this version of gleon.
     #[error(
@@ -103,6 +107,9 @@ pub const MAX_FAILURES_PER_RUN: usize = 100;
 pub struct TestHistoryEntry {
     /// Canonical test name.
     pub name: String,
+    /// The key of the platform the case ran on: a joint run of several platforms keeps a failure
+    /// of one golden per platform.
+    pub platform: PlatformKey,
     /// Outcome of the case.
     pub outcome: CaseOutcome,
     /// Class of an `error` outcome.
@@ -116,10 +123,11 @@ pub struct TestHistoryEntry {
     pub message: Option<String>,
 }
 
-impl From<&CaseReport> for TestHistoryEntry {
-    fn from(report: &CaseReport) -> Self {
+impl From<(&PlatformKey, &CaseReport)> for TestHistoryEntry {
+    fn from((platform, report): (&PlatformKey, &CaseReport)) -> Self {
         Self {
             name: report.name.clone(),
+            platform: platform.clone(),
             outcome: report.outcome,
             error_kind: report.error_kind,
             metrics: report.metrics,
@@ -139,14 +147,19 @@ impl From<&CaseReport> for TestHistoryEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunHistoryEntry {
-    /// Unique identifier for this run (on this platform).
+    /// Unique identifier of this entry: `<run id>/<platform keys joined by ",">`, or a hash of
+    /// the branch, the platforms and the time for a run without a run id.
     pub id: String,
     /// When the run recorded its newest case.
     pub timestamp: DateTime<Utc>,
     /// Git branch context.
     pub branch: String,
-    /// The platform of the run, e.g. `macos-aarch64`.
-    pub platform: String,
+    /// The keys of the platforms of the run (sorted, each once), e.g. `["macos-aarch64"]`; a joint
+    /// run of several platforms has several.
+    pub platforms: Vec<PlatformKey>,
+    /// The run id (`GLEON_RUN_ID`), when the reports name one run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<RunId>,
     /// Optional Git commit SHA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
@@ -157,22 +170,36 @@ pub struct RunHistoryEntry {
 }
 
 impl RunHistoryEntry {
-    /// Constructs a `RunHistoryEntry` from the case reports of a run and run metadata.
+    /// The entry of the run of `cases` on `branch`, recorded at `timestamp`: the platforms of its
+    /// reports (`platform`, the context's, for a run without reports), its run id, failures and
+    /// totals; its id follows from them ([`Self::id`]).
     #[must_use]
     pub fn from_cases(
-        id: impl Into<String>,
         timestamp: DateTime<Utc>,
         branch: impl Into<String>,
-        platform: impl Into<String>,
         commit_sha: Option<String>,
         cases: &Cases,
+        platform: &PlatformKey,
     ) -> Self {
+        let branch = branch.into();
+        let mut platforms: Vec<_> = cases
+            .keyed()
+            .map(|(key, _)| key)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect();
+        if platforms.is_empty() {
+            platforms.push(platform.clone());
+        }
+        let run_id = cases.run_id().cloned();
         let failures = cases.failures_by_severity();
         Self {
-            id: id.into(),
+            id: history_id(run_id.as_ref(), &platforms, timestamp, &branch),
             timestamp,
-            branch: branch.into(),
-            platform: platform.into(),
+            branch,
+            platforms,
+            run_id,
             commit_sha,
             summary: RunSummary {
                 total: cases.reports().len(),
@@ -185,32 +212,6 @@ impl RunHistoryEntry {
                 .collect(),
         }
     }
-}
-
-/// `platform` as people name it: an opaque key as is, structured fields joined with `-`
-/// (`macos-aarch64`, `linux-x86_64-chrome-126-theme=dark`).
-#[must_use]
-pub fn platform_label(platform: &PlatformConfig) -> String {
-    let fields = match platform {
-        PlatformConfig::Opaque(key) => return key.clone(),
-        PlatformConfig::Structured(fields) => fields,
-    };
-    let mut label = String::new();
-    let mut push = |parts: &[&str]| {
-        if !label.is_empty() {
-            label.push('-');
-        }
-        for part in parts {
-            label.push_str(part);
-        }
-    };
-    for part in fields.os.iter().chain(&fields.arch).chain(&fields.renderer) {
-        push(&[part]);
-    }
-    for (key, value) in fields.labels.iter().flatten() {
-        push(&[key, "=", value]);
-    }
-    label
 }
 
 /// The root schema of `history.json`.
@@ -268,7 +269,10 @@ impl DashboardHistory {
 
     /// Merges another [`DashboardHistory`] into this one and sorts all runs chronologically by
     /// `timestamp`. A run recorded twice (the same `id`) keeps its newest entry, and on equal
-    /// timestamps the entry of `other`: compiling a run again replaces what the history had.
+    /// timestamps the entry of `other`: compiling a run again replaces what the history had. An
+    /// entry of a run is also replaced by a newer-or-equal entry of the same run id on more
+    /// platforms (a joint run recorded again after its second platform arrived); entries of one
+    /// run id on other platforms (two CI jobs that each record their own) stay.
     ///
     /// If `truncate_limit` is `Some(limit)` and the merged collection exceeds `limit`,
     /// the oldest runs are dropped from the beginning.
@@ -281,6 +285,7 @@ impl DashboardHistory {
         self.runs
             .sort_by(|a, b| a.id.cmp(&b.id).then(b.timestamp.cmp(&a.timestamp)));
         self.runs.dedup_by(|a, b| a.id == b.id);
+        self.drop_superseded();
 
         // Finally sort chronologically by timestamp (zero allocation via Copy DateTime)
         self.runs.sort_by_key(|a| a.timestamp);
@@ -290,6 +295,44 @@ impl DashboardHistory {
         {
             let excess = self.runs.len() - limit.get();
             let _ = self.runs.drain(0..excess);
+        }
+    }
+}
+
+impl DashboardHistory {
+    /// Drops the entries of a run that a newer-or-equal entry of the same run id covers with more
+    /// platforms.
+    fn drop_superseded(&mut self) {
+        let mut by_run = BTreeMap::<&str, Vec<usize>>::new();
+        for (index, run) in self.runs.iter().enumerate() {
+            if let Some(run_id) = &run.run_id {
+                by_run.entry(run_id.as_str()).or_default().push(index);
+            }
+        }
+        let mut superseded = BTreeSet::new();
+        for entries in by_run.values().filter(|entries| entries.len() > 1) {
+            for &index in entries {
+                let entry = &self.runs[index];
+                let is_covered = entries.iter().any(|&other| {
+                    let other = &self.runs[other];
+                    other.platforms.len() > entry.platforms.len()
+                        && other.timestamp >= entry.timestamp
+                        && entry
+                            .platforms
+                            .iter()
+                            .all(|platform| other.platforms.contains(platform))
+                });
+                if is_covered {
+                    let _ = superseded.insert(index);
+                }
+            }
+        }
+        if !superseded.is_empty() {
+            let mut index = 0;
+            self.runs.retain(|_| {
+                index += 1;
+                !superseded.contains(&(index - 1))
+            });
         }
     }
 }
@@ -375,7 +418,7 @@ impl DashboardCompiler {
         let mut platforms = BTreeSet::new();
         for run in &history.runs {
             let _ = branches.insert(run.branch.as_str());
-            let _ = platforms.insert(run.platform.as_str());
+            platforms.extend(run.platforms.iter().map(PlatformKey::as_str));
         }
 
         let view = DashboardView {
@@ -422,13 +465,6 @@ impl DashboardCompiler {
         };
 
         let recorded_at = cases.recorded_at().unwrap_or_else(Utc::now);
-        let platform = run_platform(cases, context);
-        // One run id covers every platform of a CI run, so the platform completes the id. Without
-        // one, the newest report names the run: compiling the same results twice adds one run.
-        let run_id = cases.run_id().map_or_else(
-            || generate_run_id(recorded_at, &context.branch, &platform),
-            |run_id| format!("{}/{platform}", run_id.as_str()),
-        );
         let history_path = paths.history_file();
         let target_html_path = options
             .out_html
@@ -437,12 +473,11 @@ impl DashboardCompiler {
         // Load local history ONCE and append the current run.
         let mut base_history = load_local_history_or_default(paths)?;
         let run_entry = RunHistoryEntry::from_cases(
-            &run_id,
             recorded_at,
             &context.branch,
-            platform,
             context.commit_sha.clone(),
             cases,
+            &context.platform.key()?,
         );
         base_history.append_run(run_entry, options.truncate_limit);
 
@@ -462,21 +497,6 @@ impl DashboardCompiler {
             html_path: target_html_path,
             pushed,
         })
-    }
-}
-
-/// The platform of the run of `cases` as its reports name it (several joined with `+`, e.g. when
-/// the artifacts of several hosts were merged), or the context's when there are none.
-fn run_platform(cases: &Cases, context: &ResolvedContext) -> String {
-    let platforms: BTreeSet<_> = cases
-        .reports()
-        .iter()
-        .map(|report| platform_label(&report.platform))
-        .collect();
-    if platforms.is_empty() {
-        platform_label(&crate::cases::platform_of(&context.platform))
-    } else {
-        platforms.into_iter().collect::<Vec<_>>().join("+")
     }
 }
 
@@ -679,6 +699,29 @@ fn load_local_history_or_default(paths: &GleonPaths) -> Result<DashboardHistory,
     }
 }
 
+/// The id of the history entry of a run on `platforms` (sorted): `<run id>/<keys joined by ",">`
+/// (`,` never occurs in a key), so one run id covers every platform of a CI run and the platforms
+/// complete it. Without a run id, the newest report names the run: compiling the same results
+/// twice adds one run.
+fn history_id(
+    run_id: Option<&RunId>,
+    platforms: &[PlatformKey],
+    timestamp: DateTime<Utc>,
+    branch: &str,
+) -> String {
+    let mut keys = String::new();
+    for (index, platform) in platforms.iter().enumerate() {
+        if index > 0 {
+            keys.push(',');
+        }
+        keys.push_str(platform.as_str());
+    }
+    run_id.map_or_else(
+        || generate_run_id(timestamp, branch, &keys),
+        |run_id| format!("{}/{keys}", run_id.as_str()),
+    )
+}
+
 fn generate_run_id(timestamp: DateTime<Utc>, branch: &str, platform: &str) -> String {
     let mut hasher = sha2::Sha256::new();
     hasher.update(branch.len().to_le_bytes());
@@ -708,8 +751,14 @@ fn generate_run_id(timestamp: DateTime<Utc>, branch: &str, platform: &str) -> St
 mod tests {
     use std::num::NonZeroUsize;
 
+    use gleon_model::platform::PlatformConfig;
+
     use super::*;
-    use crate::cases::fixtures::{every_outcome, report};
+    use crate::cases::fixtures::{every_outcome, report, report_on};
+
+    fn key(key: &str) -> PlatformKey {
+        PlatformKey::parse(key).unwrap()
+    }
 
     /// A history entry; `diff_pixels` gives it pixel metrics.
     fn test_entry(
@@ -720,6 +769,7 @@ mod tests {
     ) -> TestHistoryEntry {
         TestHistoryEntry {
             name: name.to_owned(),
+            platform: key("linux-x86_64"),
             outcome,
             error_kind: None,
             metrics: diff_pixels.map(|diff_pixels| Metrics::Pixel {
@@ -736,7 +786,7 @@ mod tests {
     /// One passing case as the run `run_id`.
     fn passing_run(run_id: &str) -> Cases {
         Cases::new("runs/latest", vec![report("home", CaseOutcome::Match)])
-            .with_run_id(gleon_model::case::RunId::new(run_id).unwrap())
+            .with_run_id(RunId::new(run_id).unwrap())
     }
 
     /// A failure compared with another platform's golden says so in the history.
@@ -748,15 +798,143 @@ mod tests {
         case.message = Some("5.00% (5 of 100px) differ".to_owned());
         case.golden.fallback = Some("test/goldens/a.png".to_owned());
         assert_eq!(
-            TestHistoryEntry::from(&case).message.as_deref(),
+            TestHistoryEntry::from((PlatformKey::host(), &case))
+                .message
+                .as_deref(),
             Some(
                 "5.00% (5 of 100px) differ (compared with test/goldens/a.png of the fallback platform)"
             )
         );
         case.message = None;
         assert_eq!(
-            TestHistoryEntry::from(&case).message.as_deref(),
+            TestHistoryEntry::from((PlatformKey::host(), &case))
+                .message
+                .as_deref(),
             Some("compared with test/goldens/a.png of the fallback platform")
+        );
+    }
+
+    /// An entry of `run` on `platforms` recorded `minute` minutes after a fixed time.
+    fn joint_entry(run: &str, platforms: &[&str], minute: i64) -> RunHistoryEntry {
+        let timestamp = DateTime::parse_from_rfc3339("2026-10-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            + chrono::Duration::minutes(minute);
+        let run_id = Some(RunId::new(run).unwrap());
+        let mut platforms: Vec<_> = platforms.iter().map(|platform| key(platform)).collect();
+        platforms.sort();
+        RunHistoryEntry {
+            id: history_id(run_id.as_ref(), &platforms, timestamp, "main"),
+            timestamp,
+            branch: "main".to_owned(),
+            platforms,
+            run_id,
+            commit_sha: None,
+            summary: RunSummary::default(),
+            failures: vec![],
+        }
+    }
+
+    /// A joint run recorded again after its second platform arrived replaces its first entry,
+    /// whichever history has which; two CI jobs of one run id that record their own platform
+    /// (`gleon dashboard --from` per job) stay two entries.
+    #[test]
+    fn test_history_merges_the_platforms_of_a_joint_run() {
+        let macos = joint_entry("r", &["macos-aarch64"], 0);
+        let joint = joint_entry("r", &["macos-aarch64", "linux-x86_64"], 5);
+        assert_eq!(joint.id, "r/linux-x86_64,macos-aarch64");
+        assert_eq!(joint.platforms, [key("linux-x86_64"), key("macos-aarch64")]);
+
+        let mut history = DashboardHistory::new();
+        history.append_run(macos.clone(), None);
+        history.append_run(joint.clone(), None);
+        assert_eq!(history.runs, std::slice::from_ref(&joint));
+        let mut remote = DashboardHistory::new();
+        remote.append_run(joint.clone(), None);
+        let mut local = DashboardHistory::new();
+        local.append_run(macos.clone(), None);
+        local.merge(remote, None);
+        assert_eq!(local.runs, [joint]);
+
+        let linux = joint_entry("r", &["linux-x86_64"], 3);
+        let mut jobs = DashboardHistory::new();
+        jobs.append_run(macos.clone(), None);
+        jobs.append_run(linux.clone(), None);
+        assert_eq!(jobs.runs, [macos.clone(), linux]);
+        // Another run of the same platforms is another run.
+        jobs.append_run(
+            joint_entry("s", &["macos-aarch64", "linux-x86_64"], 9),
+            None,
+        );
+        assert_eq!(jobs.runs.len(), 3);
+        // An older entry never replaces a newer one.
+        let mut newer_first = DashboardHistory::new();
+        newer_first.append_run(joint_entry("r", &["macos-aarch64"], 10), None);
+        newer_first.append_run(
+            joint_entry("r", &["macos-aarch64", "linux-x86_64"], 5),
+            None,
+        );
+        assert_eq!(newer_first.runs.len(), 2);
+    }
+
+    /// A joint run of two platforms is one entry naming both, with the platform of each failure;
+    /// the dashboard filters it under either platform.
+    #[test]
+    fn test_history_entry_of_a_joint_run() {
+        let linux = PlatformConfig::Opaque("linux-x86_64".to_owned());
+        let macos = PlatformConfig::Opaque("macos-aarch64".to_owned());
+        let cases = Cases::new(
+            "runs/latest",
+            vec![
+                report_on("a", CaseOutcome::Mismatch, macos),
+                report_on("a", CaseOutcome::Match, linux.clone()),
+                report_on("b", CaseOutcome::Missing, linux),
+            ],
+        )
+        .with_run_id(RunId::new("ci-9").unwrap());
+        let entry = RunHistoryEntry::from_cases(Utc::now(), "main", None, &cases, &key("unknown"));
+        assert_eq!(entry.id, "ci-9/linux-x86_64,macos-aarch64");
+        assert_eq!(entry.platforms, [key("linux-x86_64"), key("macos-aarch64")]);
+        assert_eq!(entry.run_id.as_ref().map(RunId::as_str), Some("ci-9"));
+        let failures: Vec<_> = entry
+            .failures
+            .iter()
+            .map(|failure| format!("{}/{}", failure.platform, failure.name))
+            .collect();
+        assert_eq!(failures, ["macos-aarch64/a", "linux-x86_64/b"]);
+
+        let mut history = DashboardHistory::new();
+        history.append_run(entry, None);
+        history.append_run(joint_entry("other", &["windows-x86_64"], 0), None);
+        let html = DashboardCompiler::compile_dashboard(&history).unwrap();
+        assert!(
+            html.contains(r#"data-platforms="linux-x86_64 macos-aarch64""#),
+            "{html}"
+        );
+        assert!(html.contains("linux-x86_64, macos-aarch64"), "{html}");
+        assert!(html.contains("cardPlatforms.includes(platform)"), "{html}");
+        for platform in ["linux-x86_64", "macos-aarch64", "windows-x86_64"] {
+            assert!(
+                html.contains(&format!(r#"<option value="{platform}">"#)),
+                "{platform}: {html}"
+            );
+        }
+        // One platform: its failures need no platform badge.
+        let one = DashboardHistory {
+            runs: vec![RunHistoryEntry {
+                failures: vec![test_entry("lonely", CaseOutcome::Mismatch, Some(1), None)],
+                summary: RunSummary {
+                    total: 1,
+                    failed: 1,
+                },
+                ..joint_entry("solo", &["linux-x86_64"], 0)
+            }],
+            ..DashboardHistory::new()
+        };
+        let html = DashboardCompiler::compile_dashboard(&one).unwrap();
+        assert!(
+            !html.contains(r#"<span class="badge badge-neutral failure-platform">"#),
+            "{html}"
         );
     }
 
@@ -764,18 +942,18 @@ mod tests {
     fn test_history_parse_empty_and_valid() {
         // 1. Empty string yields empty DashboardHistory
         let empty = DashboardHistory::parse_or_empty("   ", "test").unwrap();
-        assert_eq!(empty.schema_version, 2);
+        assert_eq!(empty.schema_version, 3);
         assert!(empty.runs.is_empty());
 
         // 2. Valid JSON parses correctly
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "runs": [
                 {
                     "id": "run-1",
                     "timestamp": "2026-09-13T10:00:00Z",
                     "branch": "main",
-                    "platform": "linux-x86_64",
+                    "platforms": ["linux-x86_64"],
                     "summary": { "total": 2, "failed": 0 },
                     "failures": []
                 }
@@ -802,7 +980,7 @@ mod tests {
             err,
             DashboardError::UnsupportedSchemaVersion {
                 found: 99,
-                supported: 2,
+                supported: 3,
                 ..
             }
         ));
@@ -810,11 +988,16 @@ mod tests {
             err.to_string().contains("history '.gleon/history.json'"),
             "the error names the history: {err}"
         );
-        // History of the first format is not read either.
-        assert!(matches!(
-            DashboardHistory::parse_or_empty(r#"{"schema_version": 1, "runs": []}"#, "test"),
-            Err(DashboardError::UnsupportedSchemaVersion { found: 1, .. })
-        ));
+        // History of older formats is not read either.
+        for old in [1, 2] {
+            assert!(matches!(
+                DashboardHistory::parse_or_empty(
+                    &format!(r#"{{"schema_version": {old}, "runs": []}}"#),
+                    "test"
+                ),
+                Err(DashboardError::UnsupportedSchemaVersion { found, .. }) if found == old
+            ));
+        }
     }
 
     #[test]
@@ -827,7 +1010,8 @@ mod tests {
                 id: format!("run-{i}"),
                 timestamp: Utc::now(),
                 branch: "feature".to_string(),
-                platform: "macos-aarch64".to_string(),
+                platforms: vec![key("macos-aarch64")],
+                run_id: None,
                 commit_sha: None,
                 summary: RunSummary {
                     total: 1,
@@ -852,7 +1036,8 @@ mod tests {
                 id: format!("run-{i}"),
                 timestamp: Utc::now(),
                 branch: "main".to_string(),
-                platform: "linux-x86_64".to_string(),
+                platforms: vec![key("linux-x86_64")],
+                run_id: None,
                 commit_sha: None,
                 summary: RunSummary {
                     total: 1,
@@ -900,7 +1085,8 @@ mod tests {
             id: "run-1".to_string(),
             timestamp: t1,
             branch: "main".to_string(),
-            platform: "linux-x86_64".to_string(),
+            platforms: vec![key("linux-x86_64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
@@ -912,7 +1098,8 @@ mod tests {
             id: "run-2".to_string(),
             timestamp: t2,
             branch: "feature/local".to_string(),
-            platform: "macos-aarch64".to_string(),
+            platforms: vec![key("macos-aarch64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
@@ -924,7 +1111,8 @@ mod tests {
             id: "run-3".to_string(),
             timestamp: t3,
             branch: "feature/remote".to_string(),
-            platform: "windows-x86_64".to_string(),
+            platforms: vec![key("windows-x86_64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
@@ -969,7 +1157,8 @@ mod tests {
             id: "run-dup".to_string(),
             timestamp: t1,
             branch: "main".to_string(),
-            platform: "linux-x86_64".to_string(),
+            platforms: vec![key("linux-x86_64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary::default(),
             failures: vec![],
@@ -978,7 +1167,8 @@ mod tests {
             id: "run-middle".to_string(),
             timestamp: t2,
             branch: "main".to_string(),
-            platform: "linux-x86_64".to_string(),
+            platforms: vec![key("linux-x86_64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary::default(),
             failures: vec![],
@@ -987,7 +1177,8 @@ mod tests {
             id: "run-dup".to_string(),
             timestamp: t3,
             branch: "main".to_string(),
-            platform: "linux-x86_64".to_string(),
+            platforms: vec![key("linux-x86_64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary::default(),
             failures: vec![],
@@ -1041,7 +1232,8 @@ mod tests {
                 id: format!("run-{i}"),
                 timestamp: base_ts + chrono::Duration::minutes(i),
                 branch: "main".to_string(),
-                platform: "linux-x86_64".to_string(),
+                platforms: vec![key("linux-x86_64")],
+                run_id: None,
                 commit_sha: None,
                 summary: RunSummary::default(),
                 failures: vec![],
@@ -1054,7 +1246,8 @@ mod tests {
                 id: format!("run-{i}"),
                 timestamp: base_ts + chrono::Duration::minutes(i),
                 branch: "feature".to_string(),
-                platform: "macos-aarch64".to_string(),
+                platforms: vec![key("macos-aarch64")],
+                run_id: None,
                 commit_sha: None,
                 summary: RunSummary::default(),
                 failures: vec![],
@@ -1085,7 +1278,8 @@ mod tests {
             id: "run-1".to_string(),
             timestamp: t1,
             branch: "main".to_string(),
-            platform: "macos-aarch64".to_string(),
+            platforms: vec![key("macos-aarch64")],
+            run_id: None,
             commit_sha: Some("abcdef123456".to_string()),
             summary: RunSummary {
                 total: 2,
@@ -1097,7 +1291,8 @@ mod tests {
             id: "run-2".to_string(),
             timestamp: t2,
             branch: "feature/cart".to_string(),
-            platform: "linux-x86_64".to_string(),
+            platforms: vec![key("linux-x86_64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary {
                 total: 2,
@@ -1133,7 +1328,8 @@ mod tests {
             id: "run-xss".to_string(),
             timestamp: Utc::now(),
             branch: "feature/\"><script>alert(1)</script>".to_string(),
-            platform: "linux-x86_64".to_string(),
+            platforms: vec![key("linux-x86_64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
@@ -1174,7 +1370,8 @@ mod tests {
             id: "run-ssim".to_string(),
             timestamp: Utc::now(),
             branch: "main".to_string(),
-            platform: "macos-aarch64".to_string(),
+            platforms: vec![key("macos-aarch64")],
+            run_id: None,
             commit_sha: None,
             summary: RunSummary {
                 total: 1,
@@ -1206,7 +1403,8 @@ mod tests {
                 id: format!("run-{i}"),
                 timestamp: base_ts + chrono::Duration::minutes(i),
                 branch: "main".to_string(),
-                platform: "linux-x86_64".to_string(),
+                platforms: vec![key("linux-x86_64")],
+                run_id: None,
                 commit_sha: None,
                 summary: RunSummary {
                     total: 1,
@@ -1222,26 +1420,6 @@ mod tests {
         assert!(html.contains("45")); // Total runs KPI
         assert!(html.contains("Last 30 runs"));
         assert!(!html.contains("Last 45 runs"));
-    }
-
-    #[test]
-    fn test_platform_label_of_every_form() {
-        use gleon_model::platform::PlatformFields;
-
-        assert_eq!(
-            platform_label(&PlatformConfig::Opaque("ci-box".to_owned())),
-            "ci-box"
-        );
-        let labeled = PlatformConfig::Structured(PlatformFields {
-            os: Some("linux".to_owned()),
-            arch: Some("x86_64".to_owned()),
-            renderer: Some("chrome-126".to_owned()),
-            labels: Some([("theme".to_owned(), "dark".to_owned())].into()),
-        });
-        assert_eq!(
-            platform_label(&labeled),
-            "linux-x86_64-chrome-126-theme=dark"
-        );
     }
 
     /// A run without a run id or reports is named after the branch, the platform of the context
@@ -1261,7 +1439,8 @@ mod tests {
         let history = load_local_history_or_default(&paths).unwrap();
         let run = &history.runs[0];
         assert!(run.id.starts_with("run-"), "{}", run.id);
-        assert_eq!(run.platform, "unknown");
+        assert_eq!(run.platforms, [key("unknown")]);
+        assert_eq!(run.run_id, None);
     }
 
     #[tokio::test]
@@ -1346,7 +1525,8 @@ mod tests {
                 id: "run-external-ci".to_string(),
                 timestamp: ext_ts,
                 branch: "release".to_string(),
-                platform: "windows-x86_64".to_string(),
+                platforms: vec![key("windows-x86_64")],
+                run_id: None,
                 commit_sha: None,
                 summary: RunSummary {
                     total: 1,
@@ -1448,12 +1628,11 @@ mod tests {
     fn test_from_cases_every_outcome_and_error_display() {
         let cases = Cases::new("runs/latest", every_outcome());
         let entry = RunHistoryEntry::from_cases(
-            "run-variants",
             Utc::now(),
             "main",
-            "macos-aarch64",
             Some("abcdef123456".to_string()),
             &cases,
+            &key("macos-aarch64"),
         );
 
         assert_eq!(entry.summary.total, 7);
@@ -1471,12 +1650,11 @@ mod tests {
             .chain([report("z/mismatch", CaseOutcome::Mismatch)])
             .collect();
         let capped = RunHistoryEntry::from_cases(
-            "run-many",
             Utc::now(),
             "main",
-            "macos-aarch64",
             None,
             &Cases::new("runs/latest", many),
+            &key("macos-aarch64"),
         );
         assert_eq!(capped.summary.failed, MAX_FAILURES_PER_RUN + 6);
         assert_eq!(capped.failures.len(), MAX_FAILURES_PER_RUN);
@@ -1562,7 +1740,8 @@ mod tests {
                 id: "run-empty".to_string(),
                 timestamp: Utc::now(),
                 branch: "main".to_string(),
-                platform: "macos-aarch64".to_string(),
+                platforms: vec![key("macos-aarch64")],
+                run_id: None,
                 commit_sha: None,
                 summary: RunSummary::default(),
                 failures: vec![],

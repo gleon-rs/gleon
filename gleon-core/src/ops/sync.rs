@@ -95,7 +95,7 @@ pub fn resolve_platform_dirs(
     } else {
         let platform_key = super::common::platform_key(context)?;
         Ok(vec![(
-            platform_key.clone(),
+            platform_key.to_string(),
             manifests_root.join(platform_key),
         )])
     }
@@ -241,7 +241,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let manifests = temp.path().join("manifests");
         std::fs::create_dir_all(manifests.join("valid-platform")).unwrap();
-        // Keys with a renderer and labels (`PlatformInfo::to_key`).
+        // Keys with a renderer and labels (`PlatformInfo::key`).
         std::fs::create_dir_all(manifests.join("linux-x86_64+chrome+theme=dark")).unwrap();
         std::fs::create_dir_all(manifests.join("invalid platform space")).unwrap();
         std::fs::create_dir_all(manifests.join("5:linux-6:x86_64")).unwrap();

@@ -218,7 +218,17 @@ impl ArtifactsDir {
     /// `-`, other than `.` and `..`.
     pub fn new(path: impl Into<String>) -> Result<Self, InvalidArtifactsDir> {
         let path = path.into();
-        let is_valid = path == DEFAULT_ARTIFACTS_DIR
+        if Self::is_valid(&path) {
+            Ok(Self(path))
+        } else {
+            Err(InvalidArtifactsDir(path))
+        }
+    }
+
+    /// Whether `path` is a valid artifacts directory ([`Self::new`]), without taking it.
+    #[must_use]
+    pub fn is_valid(path: &str) -> bool {
+        path == DEFAULT_ARTIFACTS_DIR
             || path.strip_prefix(RUNS_DIR).is_some_and(|inside| {
                 // `latest/` is the output of one run (case-insensitive file systems included).
                 crate::naming::is_portable_relative_path(inside)
@@ -226,12 +236,7 @@ impl ArtifactsDir {
                         .split('/')
                         .next()
                         .is_some_and(|first| first.eq_ignore_ascii_case("latest"))
-            });
-        if is_valid {
-            Ok(Self(path))
-        } else {
-            Err(InvalidArtifactsDir(path))
-        }
+            })
     }
 
     /// The directory of [`ARTIFACTS_ENV`] (`env_value` is its raw value, `None` when unset): `None`
@@ -557,16 +562,23 @@ impl GleonConfig {
     /// Validates semantic invariants that serde attributes cannot express.
     fn validate(&self) -> Result<(), ConfigError> {
         // Opaque keys are validated when parsed; structured fields only when turned into a key,
-        // which would otherwise happen long after loading (at context resolution).
-        for (field, platform) in [
-            ("platform", &self.platform),
-            ("fallback_platform", &self.fallback_platform),
-        ] {
-            if let Some(platform) = platform {
-                platform
-                    .to_key()
-                    .map_err(|source| ConfigError::InvalidPlatform { field, source })?;
-            }
+        // which would otherwise happen long after loading (at context resolution). `platform`
+        // may leave fields (the OS too) to the detected platform; `fallback_platform` names one.
+        if let Some(platform) = &self.platform {
+            platform
+                .validate()
+                .map_err(|source| ConfigError::InvalidPlatform {
+                    field: "platform",
+                    source,
+                })?;
+        }
+        if let Some(fallback) = &self.fallback_platform {
+            fallback
+                .key()
+                .map_err(|source| ConfigError::InvalidPlatform {
+                    field: "fallback_platform",
+                    source,
+                })?;
         }
         if self.screenshots.is_empty() {
             return Err(ConfigError::Validation(
@@ -1193,6 +1205,7 @@ artifacts: .gleon/runs/ram
             ".gleon/runs/a\\b",
             ".gleon/runs/C:",
             ".gleon/runs/a b",
+            ".gleon/runs/os=ios-sim+arch=arm",
             ".gleon/runs/a/../b",
             ".gleon/runs/a/.",
             "/.gleon/runs/a",
@@ -1286,10 +1299,14 @@ artifacts: .gleon/runs/ram
             ))
         };
         assert!(config("platform: {os: macos, arch: aarch64, labels: {theme: dark}}").is_ok());
+        // `platform` overrides fields of the detected platform; `fallback_platform` names one.
+        assert!(config("platform: {arch: arm, renderer: chrome}").is_ok());
         for (yaml, field) in [
             ("platform: {os: 'mac os'}", "platform"),
             ("platform: {os: macos, labels: {'bad key': x}}", "platform"),
+            ("platform: {arch: con}", "platform"),
             ("fallback_platform: {arch: 'x/y'}", "fallback_platform"),
+            ("fallback_platform: {arch: x86_64}", "fallback_platform"),
         ] {
             let err = config(yaml).unwrap_err();
             assert!(

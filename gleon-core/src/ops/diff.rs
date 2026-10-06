@@ -1,9 +1,13 @@
 //! Diff operation for running visual comparison tests against baseline snapshots.
 //!
-//! Every screenshot gets a case report (`.gleon/runs/latest/cases/<name>.json`, `source.tool`
-//! [`CLI_TOOL`]) and, when it fails, its images in the artifacts directory, exactly like the
-//! integrations record theirs; the reports of the run (`report.md`, ...) are rendered from these
-//! case reports, so they always agree with the exit code.
+//! Every screenshot gets a case report (`.gleon/runs/latest/cases/<platform>/<name>.json`,
+//! `source.tool` [`CLI_TOOL`]) and, when it fails, its images in the artifacts directory
+//! (`<artifacts dir>/<platform>/<name>/`), exactly like the integrations record theirs.
+//!
+//! The exit code counts the cases of this process. The reports of the run (`report.md`, ...) are
+//! rendered from the case reports of `gleon diff` in its run: the joint run of every platform that
+//! shares its run id (`GLEON_RUN_ID`, e.g. a container on the same checkout), its own cases
+//! otherwise.
 
 use std::{io, path::Path, time::Instant};
 
@@ -16,7 +20,7 @@ use gleon_model::{
     },
     compare::{self, Compared},
     config::ArtifactsDir,
-    platform::PlatformConfig,
+    platform::{PlatformConfig, PlatformKey},
     tolerance::Tolerance,
 };
 use thiserror::Error;
@@ -156,6 +160,8 @@ struct DiffRun<'a> {
     artifacts: ArtifactsDir,
     source: Source,
     platform: PlatformConfig,
+    /// The key of `platform`: the directory of its case reports and images.
+    platform_key: &'a PlatformKey,
     run_id: RunId,
 }
 
@@ -202,8 +208,14 @@ impl DiffRun<'_> {
             },
             _ => ArtifactImages::default(),
         };
-        let artifacts = case::write_artifacts(self.root, &self.artifacts, &case.name, images)
-            .map_err(record_error)?;
+        let artifacts = case::write_artifacts(
+            self.root,
+            &self.artifacts,
+            self.platform_key,
+            &case.name,
+            images,
+        )
+        .map_err(record_error)?;
         let mut golden = GoldenImage::of(
             golden_path,
             judged.golden.as_deref(),
@@ -324,17 +336,19 @@ impl DiffRun<'_> {
     }
 }
 
-/// Removes the output of the previous `gleon diff` from `runs_latest`: its rendered reports and
-/// its case reports with their images. Case reports of other tools (test runs of integrations)
-/// and the run file stay.
-fn clear_previous_run(runs_latest: &Path) -> Result<(), DiffOpError> {
+/// Removes the output of the previous `gleon diff` on the platform `platform_key` from
+/// `runs_latest`: the rendered reports (rendered again from the case reports of the run) and its
+/// case reports with their images. Case reports of other tools (test runs of integrations) and of
+/// other platforms (another `gleon diff --platform`, a container on the same checkout) and the run
+/// file stay.
+fn clear_previous_run(runs_latest: &Path, platform_key: &PlatformKey) -> Result<(), DiffOpError> {
     for output in ReportGenerator::OUTPUT_FILES {
         match std::fs::remove_file(runs_latest.join(output)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(CoreError::Io(e).into()),
             _ => {}
         }
     }
-    remove_reports_of(runs_latest, CLI_TOOL)?;
+    remove_reports_of(runs_latest, CLI_TOOL, platform_key)?;
     Ok(())
 }
 
@@ -343,9 +357,10 @@ fn clear_previous_run(runs_latest: &Path) -> Result<(), DiffOpError> {
 /// # Errors
 ///
 /// Returns an error if the workspace is not initialized, if the platform key cannot be
-/// resolved, if manifests fail to load, if no screenshot matches the rules (after clearing the previous run), if the previous run's output cannot be cleared, if
-/// screenshots cannot be scanned or read, if a case report or its images cannot be written, or if
-/// reading the case reports back or rendering the reports fails.
+/// resolved, if manifests fail to load, if no screenshot matches the rules (after clearing the
+/// previous run), if the previous run's output cannot be cleared, if screenshots cannot be scanned
+/// or read, if a case report or its images cannot be written, or if reading the case reports of
+/// the run back or rendering the reports fails.
 pub fn run_diff(
     context: &ResolvedContext,
     options: &DiffOptions,
@@ -358,14 +373,14 @@ pub fn run_diff(
     let workspace_index = load_merged_index_with_fallback(
         &paths,
         &platform_key,
-        context.fallback_platform_key.as_deref(),
+        context.fallback_platform_key.as_ref(),
     )?;
 
     // Scanned first: a workspace that cannot be scanned keeps the previous run (and its candidates
     // for `gleon approve`).
     let test_cases = load_config_and_scan(context)?;
     let runs_dir = paths.runs_latest();
-    clear_previous_run(&runs_dir)?;
+    clear_previous_run(&runs_dir, &platform_key)?;
     // After clearing: a workspace without screenshots has no current run to approve from either.
     if test_cases.is_empty() {
         return Err(DiffOpError::NoScreenshots);
@@ -384,6 +399,7 @@ pub fn run_diff(
             renderer: context.platform.renderer.clone(),
         },
         platform: platform_of(&context.platform),
+        platform_key: &platform_key,
         run_id: options
             .run_id
             .clone()
@@ -414,14 +430,20 @@ pub fn run_diff(
             }
         }
     }
-    let cases = Cases::new(&runs_dir, reports).with_run_id(run.run_id);
-    ReportGenerator::generate_all(&runs_dir, &cases)?;
+    // The run of every platform sharing the run id, `gleon diff`'s cases only: the reports tell
+    // what `gleon diff` compared, never an integration's cases under a shared CI run id.
+    let joint =
+        Cases::load(&runs_dir, Some(&run.run_id))?.retain(|report| report.source.tool == CLI_TOOL);
+    ReportGenerator::generate_all(&runs_dir, &joint)?;
     if let Some(e) = first_error {
         return Err(e);
     }
     Ok(DiffReportResult {
-        total_tests: cases.reports().len(),
-        failed_tests: cases.failures().count(),
+        total_tests: reports.len(),
+        failed_tests: reports
+            .iter()
+            .filter(|report| report.outcome.is_failure())
+            .count(),
         runs_dir,
     })
 }
@@ -467,8 +489,16 @@ mod tests {
     }
 
     fn case_report(root: &Path, name: &str) -> CaseReport {
-        let bytes = std::fs::read(CaseReport::path(&root.join(".gleon"), name)).unwrap();
-        CaseReport::parse(&bytes).unwrap()
+        let path = CaseReport::path(&root.join(".gleon"), PlatformKey::host(), name);
+        CaseReport::parse(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// `path` under the directory of this platform in `.gleon/runs/latest/<dir>/`.
+    fn latest(root: &Path, dir: &str, path: &str) -> std::path::PathBuf {
+        root.join(".gleon/runs/latest")
+            .join(dir)
+            .join(PlatformKey::host())
+            .join(path)
     }
 
     #[test]
@@ -527,7 +557,10 @@ mod tests {
         for path in [&artifacts.golden, &artifacts.candidate, &artifacts.diff] {
             let path = path.as_deref().unwrap();
             assert!(
-                path.starts_with(".gleon/runs/latest/artifacts/shots/a/"),
+                path.starts_with(&format!(
+                    ".gleon/runs/latest/artifacts/{}/shots/a/",
+                    PlatformKey::host()
+                )),
                 "{path}"
             );
             assert!(root.join(path).is_file(), "{path}");
@@ -554,10 +587,7 @@ mod tests {
             .save(root.join("shots/gone.png"))
             .unwrap();
         run_diff(&ctx, &DiffOptions::default()).unwrap();
-        assert!(
-            root.join(".gleon/runs/latest/artifacts/shots/gone/candidate.png")
-                .is_file()
-        );
+        assert!(latest(root, "artifacts", "shots/gone/candidate.png").is_file());
 
         let mut flutter = crate::cases::fixtures::report("test/goldens/x", CaseOutcome::Match);
         flutter.golden.path = "shots/a.png".to_owned();
@@ -565,6 +595,7 @@ mod tests {
         let run_file = root.join(".gleon/runs/latest/run.json");
         crate::cases::RunInfo {
             run_id: RunId::new("earlier").unwrap(),
+            platform: PlatformKey::host().clone(),
             started_at: chrono::Utc::now() - chrono::TimeDelta::hours(1),
             command: vec!["flutter".to_owned(), "test".to_owned()],
         }
@@ -574,18 +605,52 @@ mod tests {
         std::fs::remove_file(root.join("shots/gone.png")).unwrap();
         let result = run_diff(&ctx, &DiffOptions::default()).unwrap();
         assert_eq!(result.total_tests, 1);
-        let cases = root.join(".gleon/runs/latest/cases");
         assert!(
-            !cases.join("shots/gone.json").exists(),
+            !latest(root, "cases", "shots/gone.json").exists(),
             "its screenshot is gone"
         );
+        assert!(!latest(root, "artifacts", "shots/gone/candidate.png").exists());
         assert!(
-            !root
-                .join(".gleon/runs/latest/artifacts/shots/gone/candidate.png")
-                .exists()
+            latest(root, "cases", "test/goldens/x.json").is_file(),
+            "not ours"
         );
-        assert!(cases.join("test/goldens/x.json").is_file(), "not ours");
         assert!(run_file.is_file());
+    }
+
+    /// Another platform's `gleon diff` (`--platform`, a container on the same checkout) keeps its
+    /// reports and images: a run clears only its own platform's.
+    #[test]
+    fn test_diff_clears_only_its_own_platform() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        image::RgbaImage::new(2, 2)
+            .save(root.join("shots/gone.png"))
+            .unwrap();
+        run_diff(&ctx, &DiffOptions::default()).unwrap();
+        assert!(latest(root, "cases", "shots/gone.json").is_file());
+
+        let foreign = PlatformConfig::Opaque("freebsd-riscv64".to_owned());
+        let mut other =
+            crate::cases::fixtures::report_on("shots/gone", CaseOutcome::Mismatch, foreign);
+        other.source.tool = CLI_TOOL.to_owned();
+        other.write(&root.join(".gleon")).unwrap();
+        let other_images = root.join(".gleon/runs/latest/artifacts/freebsd-riscv64/shots/gone");
+        std::fs::create_dir_all(&other_images).unwrap();
+        for file in ["golden.png", "candidate.png", "diff.png"] {
+            std::fs::write(other_images.join(file), b"png").unwrap();
+        }
+
+        std::fs::remove_file(root.join("shots/gone.png")).unwrap();
+        run_diff(&ctx, &DiffOptions::default()).unwrap();
+        assert!(
+            !latest(root, "cases", "shots/gone.json").exists(),
+            "its own previous report is removed"
+        );
+        assert!(
+            root.join(".gleon/runs/latest/cases/freebsd-riscv64/shots/gone.json")
+                .is_file()
+        );
+        assert_eq!(std::fs::read_dir(&other_images).unwrap().count(), 3);
     }
 
     /// Without `GLEON_RUN_ID` a run still has its own id: its reports are read as one run, with no
@@ -631,10 +696,58 @@ mod tests {
         let md = std::fs::read_to_string(root.join(".gleon/runs/latest/report.md")).unwrap();
         assert!(md.contains("**Total Tests:** 1\n**Failed:** 0"), "{md}");
         assert!(
-            root.join(".gleon/runs/latest/cases/test/goldens/x.json")
-                .is_file(),
+            latest(root, "cases", "test/goldens/x.json").is_file(),
             "the integration's report stays"
         );
+    }
+
+    /// Two platforms of one run (one `GLEON_RUN_ID`, a container on the same checkout): each
+    /// `gleon diff` renders the joint run, while its exit code counts its own cases only.
+    #[test]
+    fn test_diff_renders_the_joint_run_of_its_platforms() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        let options = DiffOptions {
+            run_id: Some(RunId::new("joint").unwrap()),
+            ..DiffOptions::default()
+        };
+        let foreign = ResolvedContext {
+            platform: PlatformInfo {
+                os: "freebsd".to_owned(),
+                arch: Some("riscv64".to_owned()),
+                renderer: None,
+                labels: std::collections::BTreeMap::new(),
+            },
+            ..ctx.clone()
+        };
+        // No baseline staged on the other platform: its case is missing.
+        let other = run_diff(&foreign, &options).unwrap();
+        assert_eq!((other.total_tests, other.failed_tests), (1, 1));
+
+        let own = run_diff(&ctx, &options).unwrap();
+        assert_eq!((own.total_tests, own.failed_tests), (1, 0), "its own cases");
+        let latest = root.join(".gleon/runs/latest");
+        let md = std::fs::read_to_string(latest.join("report.md")).unwrap();
+        assert!(md.contains("**Total Tests:** 2\n**Failed:** 1"), "{md}");
+        let host = PlatformKey::host();
+        assert!(
+            md.contains(&format!("| shots/a ({host}) | shots/a.png | ✅ Pass |")),
+            "{md}"
+        );
+        assert!(
+            md.contains("| shots/a (freebsd-riscv64) | shots/a.png | ❌ Missing Baseline |"),
+            "{md}"
+        );
+        let html = std::fs::read_to_string(latest.join("report.html")).unwrap();
+        assert!(html.contains("shots&#x2f;a (freebsd-riscv64)"), "{html}");
+        let xml = std::fs::read_to_string(latest.join("junit.xml")).unwrap();
+        assert!(xml.contains(r#"tests="2" failures="1""#), "{xml}");
+
+        // Another run id is another run: only its own cases.
+        let alone = run_diff(&ctx, &DiffOptions::default()).unwrap();
+        assert_eq!((alone.total_tests, alone.failed_tests), (1, 0));
+        let md = std::fs::read_to_string(latest.join("report.md")).unwrap();
+        assert!(md.contains("**Total Tests:** 1\n**Failed:** 0"), "{md}");
     }
 
     /// Bytes equal to the baseline's by hash are still checked as an image: a manifest of a file
@@ -680,7 +793,7 @@ mod tests {
             .unwrap();
         let result = run_diff(&ctx, &DiffOptions::default()).unwrap();
         assert_eq!(result.failed_tests, 1);
-        let candidate = root.join(".gleon/runs/latest/artifacts/shots/a/candidate.png");
+        let candidate = latest(root, "artifacts", "shots/a/candidate.png");
         assert!(candidate.is_file());
 
         std::fs::write(root.join("shots/bad name.png"), b"x").unwrap();
@@ -721,11 +834,22 @@ mod tests {
             ..DiffOptions::default()
         };
         assert_eq!(run_diff(&ctx, &options).unwrap().failed_tests, 1);
-        let candidate = root.join(".gleon/runs/ci/shots/a/candidate.png");
+        let host = PlatformKey::host();
+        let candidate = root
+            .join(".gleon/runs/ci")
+            .join(host)
+            .join("shots/a/candidate.png");
         assert!(candidate.is_file());
 
         let approved = crate::ops::approve_workspace(&ctx, &[], &[], None).unwrap();
-        assert_eq!(approved.approved_test_cases, ["shots/a"]);
+        assert_eq!(
+            approved
+                .approved
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [format!("{host}/shots/a")]
+        );
         assert_eq!(run_diff(&ctx, &options).unwrap().failed_tests, 0);
         assert!(!candidate.exists(), "the next run removes the images");
     }
@@ -789,7 +913,7 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let plat_key = ctx.platform.to_key().unwrap();
+        let plat_key = ctx.platform.key().unwrap();
 
         // 1. Corrupt manifest file in manifests_dir
         let manifests_dir = gleon_dir.join("manifests").join(&plat_key);
@@ -827,7 +951,7 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let plat_key = ctx.platform.to_key().unwrap();
+        let plat_key = ctx.platform.key().unwrap();
 
         // Create a valid manifest entry
         let manifests_dir = gleon_dir.join("manifests").join(&plat_key);
@@ -868,7 +992,7 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let plat_key = ctx.platform.to_key().unwrap();
+        let plat_key = ctx.platform.key().unwrap();
         let manifests_dir = gleon_dir.join("manifests").join(&plat_key);
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
@@ -993,7 +1117,7 @@ mod tests {
                 renderer: None,
                 labels: std::collections::BTreeMap::new(),
             },
-            fallback_platform_key: Some(macos_key.to_string()),
+            fallback_platform_key: Some(PlatformKey::parse(macos_key).unwrap()),
             ..Default::default()
         };
 

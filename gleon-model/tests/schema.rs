@@ -44,3 +44,37 @@ fn test_case_schema_is_current() {
 fn test_config_schema_is_current() {
     check("config.v1.json", &schemars::schema_for!(GleonConfig));
 }
+
+/// The fields of a platform are segments of its key (`[A-Za-z0-9_.-]`, lowercased): a schema
+/// validator rejects a space or a key separator (`+`, `=`) before gleon does.
+#[test]
+fn test_platform_fields_are_key_segments_in_the_schema() {
+    let schema = serde_json::to_value(schemars::schema_for!(CaseReport)).unwrap();
+    let fields = &schema["$defs"]["PlatformFields"]["properties"];
+    let pattern = |pointer: &str| {
+        let pattern = fields
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("no pattern at {pointer}: {fields}"));
+        regex::Regex::new(pattern).unwrap()
+    };
+    for pointer in [
+        "/os/pattern",
+        "/arch/pattern",
+        "/renderer/pattern",
+        "/labels/propertyNames/pattern",
+        "/labels/additionalProperties/pattern",
+    ] {
+        let pattern = pattern(pointer);
+        for good in ["macos", "x86_64", "flutter-3.47.5", "en_US"] {
+            assert!(pattern.is_match(good), "{pointer}: {good}");
+        }
+        for bad in ["mac os", "a+b", "a=b", "a/b", ""] {
+            assert!(!pattern.is_match(bad), "{pointer}: {bad:?}");
+        }
+    }
+    let description = schema["$defs"]["PlatformConfig"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(description.contains("os=<os>+arch=<arch>"), "{description}");
+}

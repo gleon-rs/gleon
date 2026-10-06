@@ -17,11 +17,17 @@ use gleon_core::{
     case::{CaseErrorKind, CaseOutcome, CaseReport},
     context::{ContextOptions, ResolvedContext},
     ops::{DiffOpError, diff::DiffOptions, init_workspace, run_diff, stage_workspace},
+    platform::PlatformKey,
 };
 
 /// The case report `gleon diff` wrote for `name` in the workspace at `root`.
 fn case_report(root: &Path, name: &str) -> CaseReport {
-    let bytes = fs::read(CaseReport::path(&root.join(".gleon"), name)).unwrap();
+    let bytes = fs::read(CaseReport::path(
+        &root.join(".gleon"),
+        PlatformKey::host(),
+        name,
+    ))
+    .unwrap();
     CaseReport::parse(&bytes).unwrap()
 }
 
@@ -213,14 +219,16 @@ screenshots:
     // The candidate is kept for `gleon approve`.
     let candidate = report
         .runs_dir
-        .join("artifacts/billing/unstaged/candidate.png");
+        .join("artifacts")
+        .join(PlatformKey::host())
+        .join("billing/unstaged/candidate.png");
     assert_eq!(fs::read(&candidate).unwrap(), baseline_png_bytes);
 
     let ctx_approve = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
     let approve_res = gleon_core::ops::approve_workspace(&ctx_approve, &[], &[], None)
         .expect("approve_workspace should succeed");
     assert_eq!(
-        approve_res.approved_test_cases.len(),
+        approve_res.approved.len(),
         1,
         "Should approve 1 missing baseline image"
     );
@@ -228,7 +236,7 @@ screenshots:
     // Verify it was actually baselined
     let manifest_path = base_path
         .join(".gleon/manifests")
-        .join(ctx_approve.platform.to_key().unwrap())
+        .join(ctx_approve.platform.key().unwrap())
         .join("billing/unstaged.json");
     assert!(
         manifest_path.exists(),
@@ -511,8 +519,8 @@ fn test_diff_fallback_platform_integration() {
 
     let ctx_macos = ResolvedContext::resolve(&options_macos, base_path, &EmptyEnv).unwrap();
     assert_eq!(
-        ctx_macos.fallback_platform_key.as_deref(),
-        Some("windows-x86_64")
+        ctx_macos.fallback_platform_key.clone().unwrap(),
+        "windows-x86_64"
     );
 
     let diff_res = run_diff(&ctx_macos, &DiffOptions::default()).unwrap();
@@ -559,7 +567,11 @@ screenshots:
     assert_ne!(report.failed_tests, 0);
     assert_eq!(report.failed_tests, 1);
 
-    let expected_diff_file = report.runs_dir.join("artifacts/auth/login/form/diff.png");
+    let expected_diff_file = report
+        .runs_dir
+        .join("artifacts")
+        .join(PlatformKey::host())
+        .join("auth/login/form/diff.png");
     assert!(
         expected_diff_file.is_file(),
         "Diff image must be created at {expected_diff_file:?}"
@@ -611,7 +623,12 @@ screenshots:
     assert_eq!(report.failed_tests, 1);
 
     // Verify the candidate was kept in the artifacts directory
-    let expected_actual_file = report.runs_dir.join("artifacts/billing/form/candidate.png");
+    let host = PlatformKey::host();
+    let expected_actual_file = report
+        .runs_dir
+        .join("artifacts")
+        .join(host)
+        .join("billing/form/candidate.png");
     assert!(
         expected_actual_file.is_file(),
         "The candidate must be kept for a missing baseline at {expected_actual_file:?}"
@@ -619,8 +636,10 @@ screenshots:
     let case = case_report(base_path, "billing/form");
     assert_eq!(case.outcome, CaseOutcome::Missing);
     assert_eq!(
-        case.artifacts.unwrap().candidate.as_deref(),
-        Some(".gleon/runs/latest/artifacts/billing/form/candidate.png")
+        case.artifacts.unwrap().candidate,
+        Some(format!(
+            ".gleon/runs/latest/artifacts/{host}/billing/form/candidate.png"
+        ))
     );
 
     // Verify the content is exactly the same as the original PNG

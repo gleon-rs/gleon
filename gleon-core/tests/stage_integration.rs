@@ -96,7 +96,7 @@ screenshots:
     );
 
     // 6. Verify per-test manifest JSON file was written
-    let platform_key = ctx.platform.to_key().unwrap();
+    let platform_key = ctx.platform.key().unwrap();
     let expected_manifest_file = base_path
         .join(".gleon/manifests")
         .join(platform_key)
@@ -241,7 +241,7 @@ screenshots:
     // Initial stage: form1 and form2
     stage_workspace(&ctx, None).expect("initial stage should succeed");
 
-    let platform_key = ctx.platform.to_key().unwrap();
+    let platform_key = ctx.platform.key().unwrap();
     let manifest2 = base_path
         .join(".gleon/manifests")
         .join(&platform_key)

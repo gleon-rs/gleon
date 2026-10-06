@@ -194,7 +194,7 @@
       ]
     },
     "PlatformConfig": {
-      "description": "A platform: an opaque key, or structured fields.",
+      "description": "A platform: an opaque key, or structured fields.\n\nIts key names its directories (manifests, case reports, failure images): `<os>-<arch>`\n(`macos-aarch64`), or `os=<os>+arch=<arch>` when the OS or architecture contains `-`\n(`os=ios-sim+arch=arm`), or `<os>` without an architecture; then `+<renderer>`, then\n`+<key>=<value>` per label, sorted by key; all lowercase. An opaque value is its own key, so\n`macos-aarch64` names the same platform as `{os: macos, arch: aarch64}`.",
       "anyOf": [
         {
           "description": "Opaque `[a-z0-9_.-]` platform key.",
@@ -216,7 +216,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "labels": {
           "description": "Arbitrary key-value label overrides.",
@@ -225,7 +226,11 @@
             "null"
           ],
           "additionalProperties": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_.-]+$"
           }
         },
         "os": {
@@ -233,14 +238,16 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "renderer": {
           "description": "Renderer identifier override.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+$"
         }
       },
       "additionalProperties": false

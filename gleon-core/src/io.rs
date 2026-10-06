@@ -116,6 +116,54 @@ pub fn save_json_atomically<T: serde::Serialize + ?Sized, P: AsRef<Path>>(
     })
 }
 
+/// Most threads working on small files (reading manifests and case reports, removing case
+/// reports): beyond a few, file operations contend in the kernel. Loading 50k manifests (`tests/manifest_scale.rs`, M3 Max, 14 cores) takes:
+/// - macOS on APFS: 1.03 s on one thread, 0.57-0.62 s on three, 0.59-0.70 s on four, 0.87 s on
+///   six and 1.8 s on fourteen;
+/// - Linux 7.0 on ext4 (Docker VM on the same machine): 158 ms on one thread, 91 ms on three,
+///   78 ms on four, 70 ms on six, 69 ms on eight and 168 ms on fourteen.
+///
+/// Removing 25k case reports (`tests/cases_scale.rs`, macOS on APFS, parsing included) takes 2.55 s
+/// on one thread, 1.71 s on three, 1.85 s on six and 2.6 s on ten.
+///
+/// Windows is not measured yet and keeps the cautious macOS value.
+#[cfg(target_os = "linux")]
+pub(crate) const FILE_THREADS: usize = 6;
+/// See the Linux value.
+#[cfg(not(target_os = "linux"))]
+pub(crate) const FILE_THREADS: usize = 3;
+
+/// Fewest files per thread: starting a thread costs tens of microseconds, reading or removing 64
+/// small files about a millisecond.
+pub(crate) const MIN_FILES_PER_THREAD: usize = 64;
+
+/// `work` on every item of `files`, results in their order, on up to [`FILE_THREADS`] threads (on
+/// this one for a few files).
+pub(crate) fn map_files<F: Sync, T: Send>(files: &[F], work: impl Fn(&F) -> T + Sync) -> Vec<T> {
+    let read_chunk = |chunk: &[F]| -> Vec<T> { chunk.iter().map(&work).collect() };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get().min(FILE_THREADS))
+        .min(files.len().div_ceil(MIN_FILES_PER_THREAD));
+    if threads <= 1 {
+        return read_chunk(files);
+    }
+    std::thread::scope(|scope| {
+        // Collected: every worker must be spawned before the first is joined.
+        let workers: Vec<_> = files
+            .chunks(files.len().div_ceil(threads))
+            .map(|chunk| scope.spawn(move || read_chunk(chunk)))
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

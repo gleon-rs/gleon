@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use gleon_core::context::ResolvedContext;
+use gleon_core::{context::ResolvedContext, ops::ApprovedCase};
 use tracing::{info, warn};
 
 use crate::{
@@ -27,8 +27,23 @@ pub fn run_approve(ctx: &ResolvedContext, paths: &[PathBuf], from: &[PathBuf]) -
     }
     info!(
         "Approved {} screenshot(s): {}.",
-        res.approved_test_cases.len(),
-        res.approved_test_cases.join(", ")
+        res.approved.len(),
+        Listed(&res.approved)
     );
     ExitCode::Success
+}
+
+/// The approved cases as `<platform>/<name>`, separated by `, `.
+struct Listed<'a>(&'a [ApprovedCase]);
+
+impl std::fmt::Display for Listed<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, case) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{case}")?;
+        }
+        Ok(())
+    }
 }

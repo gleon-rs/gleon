@@ -1,6 +1,9 @@
-//! Per-golden case report written to `.gleon/runs/latest/cases/<name>.json`, the comparison
-//! metrics it carries, and the images of a failure next to it
-//! (`<artifacts dir>/<name>/{golden,candidate,diff}.png`).
+//! Per-golden case report, the comparison metrics it carries, and the images of a failure.
+//!
+//! A report is written to `.gleon/runs/latest/cases/<platform>/<name>.json`, the images next to
+//! it to `<artifacts dir>/<platform>/<name>/{golden,candidate,diff}.png`: `<platform>` is the key
+//! of the report's platform ([`CaseReport::platform_key`], e.g. `macos-aarch64`), `<name>` the
+//! canonical name of the golden, the same on every platform.
 //!
 //! Case reports are written by the integrations (the Flutter package through `gleon-ffi`) and are
 //! meant as the one result format the gleon CLI reads too; the schema is committed as
@@ -8,10 +11,12 @@
 //! non-Rust writers never mirror Rust type names. Names and paths are checked when a report is
 //! read ([`CaseReport::parse`]), so a report never leads a reader outside its workspace.
 //!
-//! The directory holds the latest result of every golden: integrations run tests in many
-//! processes, so no single writer can reset it, and each report replaces the previous one of its
-//! golden. Reports name their run ([`RUN_ID_ENV`]), so readers can take one run whole; reports of
-//! goldens that were since removed or renamed stay behind until `gleon clean`.
+//! The directory holds the latest result of every golden on every platform: integrations run
+//! tests in many processes, so no single writer can reset it, and each report replaces the
+//! previous one of its golden on its platform. Platforms sharing one workspace (a macOS host and a
+//! Linux container on the same checkout) never overwrite each other's reports or images. Reports
+//! name their run ([`RUN_ID_ENV`]), so readers can take one run whole; reports of goldens that were
+//! since removed or renamed stay behind until `gleon clean`.
 
 use std::{
     io::{self, Write as _},
@@ -28,7 +33,7 @@ use crate::{
     fs::Durability,
     hash::ImageHash,
     naming::{is_portable_relative_path, validate_canonical_test_name},
-    platform::PlatformConfig,
+    platform::{PlatformConfig, PlatformError, PlatformKey},
     tolerance::{TextTolerance, Tolerance},
 };
 
@@ -469,39 +474,46 @@ pub fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((read(16), read(20))).filter(|&(width, height)| width > 0 && height > 0)
 }
 
-/// The images of a case, as paths relative to the workspace root (`/`-separated) under the
-/// artifacts directory: `<artifacts dir>/<name>/{golden,candidate,diff}.png`.
+/// The images of a case, as paths relative to the workspace root (`/`-separated):
+/// `<artifacts dir>/<platform key>/<name>/{golden,candidate,diff}.png`.
+///
+/// `<artifacts dir>` is an artifacts directory (`.gleon/runs/latest/artifacts` or a directory
+/// under `.gleon/runs/` outside `latest/`), the same for every image of the case;
+/// `<platform key>` is the key of the report's `platform` and `<name>` its `name`, so a report
+/// lists only its own images.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Artifacts {
-    /// A copy of the golden (mismatches and dimension mismatches).
+    /// A copy of the golden (mismatches and dimension mismatches):
+    /// `<artifacts dir>/<platform key>/<name>/golden.png`.
     #[serde(
         default,
-        deserialize_with = "optional_workspace_path",
+        deserialize_with = "optional_artifact_path",
         skip_serializing_if = "Option::is_none"
     )]
     #[schemars(regex(
-        pattern = r"^(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*$"
+        pattern = r"^\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\.\.?(/|$))[a-z0-9_.-]+(/(?!\.\.?(/|$))[a-z0-9_.-]+)*/golden\.png$"
     ))]
     pub golden: Option<String>,
-    /// The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`).
+    /// The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`):
+    /// `<artifacts dir>/<platform key>/<name>/candidate.png`.
     #[serde(
         default,
-        deserialize_with = "optional_workspace_path",
+        deserialize_with = "optional_artifact_path",
         skip_serializing_if = "Option::is_none"
     )]
     #[schemars(regex(
-        pattern = r"^(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*$"
+        pattern = r"^\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\.\.?(/|$))[a-z0-9_.-]+(/(?!\.\.?(/|$))[a-z0-9_.-]+)*/candidate\.png$"
     ))]
     pub candidate: Option<String>,
-    /// The diff visualization (mismatches only).
+    /// The diff visualization (mismatches only): `<artifacts dir>/<platform key>/<name>/diff.png`.
     #[serde(
         default,
-        deserialize_with = "optional_workspace_path",
+        deserialize_with = "optional_artifact_path",
         skip_serializing_if = "Option::is_none"
     )]
     #[schemars(regex(
-        pattern = r"^(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*$"
+        pattern = r"^\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\.\.?(/|$))[a-z0-9_.-]+(/(?!\.\.?(/|$))[a-z0-9_.-]+)*/diff\.png$"
     ))]
     pub diff: Option<String>,
 }
@@ -514,7 +526,7 @@ impl Artifacts {
     }
 }
 
-/// File names of the images inside `<artifacts dir>/<name>/`.
+/// File names of the images inside `<artifacts dir>/<platform>/<name>/`.
 pub const GOLDEN_ARTIFACT: &str = "golden.png";
 /// See [`GOLDEN_ARTIFACT`].
 pub const CANDIDATE_ARTIFACT: &str = "candidate.png";
@@ -532,14 +544,15 @@ pub struct ArtifactImages<'a> {
     pub diff: Option<&'a [u8]>,
 }
 
-/// Writes `images` to `<root>/<dir>/<name>/{golden,candidate,diff}.png` and returns their paths
-/// relative to `root`; `None` without images.
+/// Writes `images` to `<root>/<dir>/<platform>/<name>/{golden,candidate,diff}.png` and returns
+/// their paths relative to `root`; `None` without images.
 ///
 /// The files of absent images are removed, so the folder always shows the latest outcome of the
-/// golden: an image left by an earlier failure never passes for this one's. Empty folders stay
-/// (`gleon clean` removes them): removing one could race the parallel writes of a longer name
-/// inside it. The images are regenerated by every run, so they are written atomically but not
-/// flushed to disk ([`Durability::Atomic`]).
+/// golden on this platform: an image left by an earlier failure never passes for this one's. Only
+/// this platform's images are removed; another platform's folder of the same golden stays. Empty
+/// folders stay (`gleon clean` removes them): removing one could race the parallel writes of a
+/// longer name inside it. The images are regenerated by every run, so they are written atomically
+/// but not flushed to disk ([`Durability::Atomic`]).
 ///
 /// # Errors
 /// Returns [`io::ErrorKind::InvalidInput`] if `name` is not a canonical test name, or the first
@@ -547,6 +560,7 @@ pub struct ArtifactImages<'a> {
 pub fn write_artifacts(
     root: &Path,
     dir: &ArtifactsDir,
+    platform: &PlatformKey,
     name: &str,
     images: ArtifactImages<'_>,
 ) -> io::Result<Option<Artifacts>> {
@@ -554,8 +568,10 @@ pub fn write_artifacts(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let folder = name
         .split('/')
-        .fold(dir.to_path(root), |folder, segment| folder.join(segment));
-    let relative = |file: &str| format!("{}/{name}/{file}", dir.as_str());
+        .fold(dir.to_path(root).join(platform), |folder, segment| {
+            folder.join(segment)
+        });
+    let relative = |file: &str| format!("{}/{platform}/{name}/{file}", dir.as_str());
     let write = |file: &str, bytes: Option<&[u8]>| -> io::Result<Option<String>> {
         let path = folder.join(file);
         bytes.map_or_else(
@@ -802,14 +818,15 @@ pub fn millis(duration: Duration) -> f64 {
 /// One golden comparison.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(title = "gleon case report (.gleon/runs/latest/cases/<name>.json)")]
+#[schemars(title = "gleon case report (.gleon/runs/latest/cases/<platform>/<name>.json)")]
 pub struct CaseReport {
     /// Version of this format (`CASE_SCHEMA_VERSION`).
     #[serde(deserialize_with = "schema_version")]
     #[schemars(range(min = 2, max = 2))]
     pub schema_version: u32,
-    /// Canonical test name (also the case file name): the golden path relative to the workspace
-    /// root without extension, as lowercase `[a-z0-9_.-]` segments separated by `/`.
+    /// Canonical test name: the golden path relative to the workspace root without extension, as
+    /// lowercase `[a-z0-9_.-]` segments separated by `/`. It is the file name of the report under
+    /// its platform's directory, and the folder of its images; the same on every platform.
     #[serde(deserialize_with = "test_name")]
     #[schemars(regex(pattern = r"^(?!\.\.?(/|$))[a-z0-9_.-]+(/(?!\.\.?(/|$))[a-z0-9_.-]+)*$"))]
     pub name: String,
@@ -820,6 +837,8 @@ pub struct CaseReport {
     /// What produced the candidate.
     pub source: Source,
     /// Platform the candidate was rendered on: auto-detected `os` and `arch`, named like in the CLI.
+    /// Its key names the directory of the report and of its images.
+    #[serde(deserialize_with = "keyed_platform")]
     pub platform: PlatformConfig,
     /// The producing test, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -852,10 +871,23 @@ pub struct CaseReport {
 }
 
 impl CaseReport {
-    /// The file of the report named `name` in the workspace whose `.gleon/` is `gleon_dir`.
+    /// The file of the report named `name` of the platform keyed `platform`
+    /// ([`Self::platform_key`]) in the workspace whose `.gleon/` is `gleon_dir`:
+    /// `<gleon_dir>/runs/latest/cases/<platform>/<name>.json`.
     #[must_use]
-    pub fn path(gleon_dir: &Path, name: &str) -> PathBuf {
-        gleon_dir.join(CASES_DIR).join(format!("{name}.json"))
+    pub fn path(gleon_dir: &Path, platform: &PlatformKey, name: &str) -> PathBuf {
+        gleon_dir
+            .join(CASES_DIR)
+            .join(platform)
+            .join(format!("{name}.json"))
+    }
+
+    /// The key of [`Self::platform`], which names the directory of this report and of its images.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError`] for a platform without a key (never for a parsed report).
+    pub fn platform_key(&self) -> Result<PlatformKey, PlatformError> {
+        self.platform.key()
     }
 
     /// Parses a report, telling a report of another schema version apart from a broken one (a
@@ -894,7 +926,8 @@ impl CaseReport {
     /// hash for a missing golden, equal hashes for identical images, metrics only for `match`
     /// and `mismatch` and of the tolerance's mode, tolerances within their ranges, a text
     /// tolerance only beside a pixel or exact one (and text metrics only with it), images only
-    /// for failures that keep them.
+    /// for failures that keep them, each at `<artifacts dir>/<platform key>/<name>/<file>` of
+    /// this report.
     ///
     /// # Errors
     /// Returns the first [`InconsistentCase`].
@@ -965,23 +998,65 @@ impl CaseReport {
         {
             return Err(InconsistentCase::Artifacts);
         }
+        self.validate_artifact_paths()
+    }
+
+    /// Checks that every image lies at `<artifacts dir>/<platform key>/<name>/<file>` of this
+    /// report, its file named after its field, all in one artifacts directory.
+    fn validate_artifact_paths(&self) -> Result<(), InconsistentCase> {
+        let Some(artifacts) = &self.artifacts else {
+            return Ok(());
+        };
+        let key = self.platform_key().ok();
+        let mut shared_dir = None;
+        for (field, path, file) in [
+            ("golden", &artifacts.golden, GOLDEN_ARTIFACT),
+            ("candidate", &artifacts.candidate, CANDIDATE_ARTIFACT),
+            ("diff", &artifacts.diff, DIFF_ARTIFACT),
+        ] {
+            let Some(path) = path else {
+                continue;
+            };
+            let dir = key.as_ref().and_then(|key| {
+                path.strip_suffix(file)?
+                    .strip_suffix('/')?
+                    .strip_suffix(self.name.as_str())?
+                    .strip_suffix('/')?
+                    .strip_suffix(key.as_str())?
+                    .strip_suffix('/')
+            });
+            match dir {
+                Some(dir)
+                    if ArtifactsDir::is_valid(dir)
+                        && shared_dir.is_none_or(|shared| shared == dir) =>
+                {
+                    shared_dir = Some(dir);
+                }
+                _ => return Err(InconsistentCase::ArtifactPath(field)),
+            }
+        }
         Ok(())
     }
 
-    /// Writes this report to [`Self::path`] (pretty JSON and a final newline).
+    /// Writes this report to [`Self::path`] of its platform (pretty JSON and a final newline),
+    /// replacing the previous report of its golden on this platform only.
     ///
     /// Reports are regenerated by every run, so they are written atomically but not flushed to
     /// disk ([`Durability::Atomic`]).
     ///
     /// # Errors
-    /// Returns [`io::ErrorKind::InvalidInput`] if the name is not a canonical test name or the
-    /// fields are inconsistent ([`Self::validate`]), or the I/O error of writing the file.
+    /// Returns [`io::ErrorKind::InvalidInput`] if the name is not a canonical test name, the
+    /// platform has no key or the fields are inconsistent ([`Self::validate`]), or the I/O error of
+    /// writing the file.
     pub fn write(&self, gleon_dir: &Path) -> io::Result<()> {
         validate_canonical_test_name(&self.name)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         self.validate()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let file = Self::path(gleon_dir, &self.name);
+        let platform_key = self
+            .platform_key()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let file = Self::path(gleon_dir, &platform_key, &self.name);
         crate::fs::write_atomically_with(&file, Durability::Atomic, |writer| {
             serde_json::to_writer_pretty(&mut *writer, self)?;
             writer.write_all(b"\n")
@@ -1037,6 +1112,13 @@ pub enum InconsistentCase {
         "`comparison.text_tolerance` belongs to pixel and exact tolerances, text metrics to it"
     )]
     TextTolerance,
+    /// An image outside `<artifacts dir>/<platform key>/<name>/` of this report, under another
+    /// file name than its field's, or in another artifacts directory than the other images.
+    #[error(
+        "`artifacts.{0}` is not `<artifacts dir>/<platform key>/<name>/{0}.png` of this report \
+         (one artifacts dir for every image)"
+    )]
+    ArtifactPath(&'static str),
     /// Images of an outcome that keeps none.
     #[error(
         "`artifacts` belong to `mismatch`, `dimension_mismatch` and `missing`, and the candidate \
@@ -1063,6 +1145,16 @@ fn test_name<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Er
         .map_err(serde::de::Error::custom)
 }
 
+/// A platform with a key ([`PlatformConfig::key`], so with an OS): the key names the report's
+/// directory.
+fn keyed_platform<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PlatformConfig, D::Error> {
+    let platform = PlatformConfig::deserialize(deserializer)?;
+    platform
+        .key()
+        .map(|_| platform)
+        .map_err(serde::de::Error::custom)
+}
+
 fn workspace_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     checked_workspace_path(String::deserialize(deserializer)?)
 }
@@ -1085,6 +1177,36 @@ fn checked_workspace_path<E: serde::de::Error>(path: String) -> Result<String, E
              digits, `.`, `_` and `-`, without `.` or `..`"
         )))
     }
+}
+
+/// An optional image path of [`Artifacts`] (`null` is `None`): only its shape is checked here, a
+/// path inside the workspace whose names may hold the `+` and `=` of a platform key;
+/// [`CaseReport::validate`] checks where it lies.
+fn optional_artifact_path<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let is_artifact_path = |path: &str| {
+        path.split('/').all(|name| {
+            !name.is_empty()
+                && name != "."
+                && name != ".."
+                && name.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'=')
+                })
+        })
+    };
+    Option::<String>::deserialize(deserializer)?
+        .map(|path| {
+            if is_artifact_path(&path) {
+                Ok(path)
+            } else {
+                Err(serde::de::Error::custom(format!(
+                    "'{path}' is not an image path inside the workspace: `/`-separated names of \
+                     ASCII letters, digits, `.`, `_`, `-`, `+` and `=`, without `.` or `..`"
+                )))
+            }
+        })
+        .transpose()
 }
 
 /// The texts of metrics, shared by every writer and reader of case reports (the integrations'
@@ -1693,21 +1815,25 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let dir = ArtifactsDir::default();
+        let key = &PlatformKey::parse("linux-x86_64").unwrap();
         let images = ArtifactImages {
             golden: Some(b"golden"),
             candidate: Some(b"candidate"),
             diff: Some(b"diff"),
         };
-        let artifacts = write_artifacts(root, &dir, "test/goldens/a", images).unwrap();
-        let folder = root.join(".gleon/runs/latest/artifacts/test/goldens/a");
+        let artifacts = write_artifacts(root, &dir, key, "test/goldens/a", images).unwrap();
+        let folder = root.join(".gleon/runs/latest/artifacts/linux-x86_64/test/goldens/a");
+        let path = |file: &str| {
+            Some(format!(
+                ".gleon/runs/latest/artifacts/linux-x86_64/test/goldens/a/{file}"
+            ))
+        };
         assert_eq!(
             artifacts,
             Some(Artifacts {
-                golden: Some(".gleon/runs/latest/artifacts/test/goldens/a/golden.png".to_owned()),
-                candidate: Some(
-                    ".gleon/runs/latest/artifacts/test/goldens/a/candidate.png".to_owned()
-                ),
-                diff: Some(".gleon/runs/latest/artifacts/test/goldens/a/diff.png".to_owned()),
+                golden: path("golden.png"),
+                candidate: path("candidate.png"),
+                diff: path("diff.png"),
             })
         );
         assert_eq!(std::fs::read(folder.join("diff.png")).unwrap(), b"diff");
@@ -1716,7 +1842,7 @@ mod tests {
             candidate: Some(b"new"),
             ..ArtifactImages::default()
         };
-        let artifacts = write_artifacts(root, &dir, "test/goldens/a", candidate_only)
+        let artifacts = write_artifacts(root, &dir, key, "test/goldens/a", candidate_only)
             .unwrap()
             .unwrap();
         assert_eq!((artifacts.golden, artifacts.diff), (None, None));
@@ -1729,21 +1855,54 @@ mod tests {
 
         // A pass keeps nothing: the images go, the (empty) folder stays for `gleon clean`.
         let none =
-            write_artifacts(root, &dir, "test/goldens/a", ArtifactImages::default()).unwrap();
+            write_artifacts(root, &dir, key, "test/goldens/a", ArtifactImages::default()).unwrap();
         assert_eq!(none, None);
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
-        let absent = write_artifacts(root, &dir, "test/goldens/b", ArtifactImages::default());
+        let absent = write_artifacts(root, &dir, key, "test/goldens/b", ArtifactImages::default());
         assert_eq!(absent.unwrap(), None);
 
         // A directory where an image goes cannot be removed as a stale file.
         std::fs::create_dir_all(folder.join("diff.png/inside")).unwrap();
-        assert!(write_artifacts(root, &dir, "test/goldens/a", candidate_only).is_err());
+        assert!(write_artifacts(root, &dir, key, "test/goldens/a", candidate_only).is_err());
 
         for name in ["../../outside", "a/../b", "Upper", "a\\b", ""] {
-            let err = write_artifacts(root, &dir, name, candidate_only).unwrap_err();
+            let err = write_artifacts(root, &dir, key, name, candidate_only).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name}");
         }
         assert!(!root.join("outside").exists());
+    }
+
+    #[test]
+    fn test_artifacts_of_platforms_are_kept_apart() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let dir = ArtifactsDir::default();
+        let candidate = ArtifactImages {
+            candidate: Some(b"candidate"),
+            ..ArtifactImages::default()
+        };
+        let ios = PlatformKey::parse("os=ios-sim+arch=arm").unwrap();
+        let kept = write_artifacts(root, &dir, &ios, "test/goldens/a", candidate)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            kept.candidate.as_deref(),
+            Some(".gleon/runs/latest/artifacts/os=ios-sim+arch=arm/test/goldens/a/candidate.png")
+        );
+
+        // A pass on another platform removes its own images only.
+        let none = write_artifacts(
+            root,
+            &dir,
+            &PlatformKey::parse("linux-x86_64").unwrap(),
+            "test/goldens/a",
+            ArtifactImages::default(),
+        )
+        .unwrap();
+        assert_eq!(none, None);
+        let ios_candidate = root
+            .join(".gleon/runs/latest/artifacts/os=ios-sim+arch=arm/test/goldens/a/candidate.png");
+        assert_eq!(std::fs::read(ios_candidate).unwrap(), b"candidate");
     }
 
     #[test]
@@ -1795,10 +1954,15 @@ mod tests {
             inconsistent.write(&gleon_dir).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
-        let file = CaseReport::path(&gleon_dir, "test/goldens/a");
+        let key = PlatformKey::host();
+        assert_eq!(&report.platform_key().unwrap(), key);
+        let file = CaseReport::path(&gleon_dir, key, "test/goldens/a");
         assert_eq!(
             file,
-            gleon_dir.join("runs/latest/cases/test/goldens/a.json")
+            gleon_dir
+                .join("runs/latest/cases")
+                .join(key)
+                .join("test/goldens/a.json")
         );
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.ends_with("}\n"));
@@ -1808,6 +1972,168 @@ mod tests {
         assert!(json.get("artifacts").is_none());
         assert_eq!(serde_json::from_str::<CaseReport>(&text).unwrap(), report);
         assert_eq!(CaseReport::parse(text.as_bytes()).unwrap(), report);
+
+        // The same golden on another platform gets its own file; the host's stays.
+        let other = CaseReport {
+            platform: PlatformConfig::Opaque("freebsd-riscv64".to_owned()),
+            ..report.clone()
+        };
+        other.write(&gleon_dir).unwrap();
+        let other_file = CaseReport::path(
+            &gleon_dir,
+            &PlatformKey::parse("freebsd-riscv64").unwrap(),
+            "test/goldens/a",
+        );
+        assert_ne!(other_file, file);
+        assert_eq!(
+            CaseReport::parse(&std::fs::read(&other_file).unwrap()).unwrap(),
+            other
+        );
+        assert_eq!(
+            CaseReport::parse(&std::fs::read(&file).unwrap()).unwrap(),
+            report
+        );
+
+        // An OS or architecture with `-` gets the explicit form of the key, labels follow.
+        let ios = CaseReport {
+            platform: PlatformConfig::Structured(crate::platform::PlatformFields {
+                os: Some("ios-sim".to_owned()),
+                arch: Some("arm".to_owned()),
+                ..crate::platform::PlatformFields::default()
+            }),
+            ..report.clone()
+        };
+        ios.write(&gleon_dir).unwrap();
+        let ios_file = gleon_dir.join("runs/latest/cases/os=ios-sim+arch=arm/test/goldens/a.json");
+        assert_eq!(
+            CaseReport::parse(&std::fs::read(&ios_file).unwrap()).unwrap(),
+            ios
+        );
+
+        // A platform without a key names no directory.
+        let keyless = CaseReport {
+            platform: PlatformConfig::Opaque("bad key".to_owned()),
+            ..report.clone()
+        };
+        assert_eq!(
+            keyless.write(&gleon_dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    /// The images of a report lie at `<artifacts dir>/<its platform key>/<its name>/<file>`, all
+    /// in one artifacts directory: a report never lists the images of another platform or golden.
+    #[test]
+    fn test_artifact_paths_follow_the_platform_and_name_of_the_report() {
+        let mismatch = |platform: serde_json::Value, dir: &str, key: &str| {
+            let path = |file: &str| format!("{dir}/{key}/test/goldens/a/{file}");
+            serde_json::json!({
+                "schema_version": 2,
+                "name": "test/goldens/a",
+                "golden": {"path": "test/goldens/a.png", "sha256": "1".repeat(64)},
+                "candidate": {"sha256": "0".repeat(64)},
+                "source": {"tool": "gleon_flutter", "tool_version": "0.2.0"},
+                "platform": platform,
+                "comparison": {"tolerance": {"kind": "exact"}, "masks": [], "policy_version": 2},
+                "outcome": "mismatch",
+                "metrics": {
+                    "kind": "pixel", "total_pixels": 4, "diff_pixels": 1, "diff_ratio": 0.25,
+                    "headroom": -0.25
+                },
+                "regions": [],
+                "artifacts": {
+                    "golden": path("golden.png"),
+                    "candidate": path("candidate.png"),
+                    "diff": path("diff.png")
+                },
+                "timings_ms": {"total": 1.0},
+                "recorded_at": "2026-09-30T12:00:00Z"
+            })
+        };
+        let parse = |json: &serde_json::Value| CaseReport::parse(json.to_string().as_bytes());
+        let macos = serde_json::json!({"os": "macos", "arch": "aarch64"});
+        let ios = serde_json::json!({"os": "ios-sim", "arch": "arm"});
+        let default_dir = ".gleon/runs/latest/artifacts";
+        for (platform, dir, key) in [
+            (&macos, default_dir, "macos-aarch64"),
+            (&macos, ".gleon/runs/ci", "macos-aarch64"),
+            (&ios, default_dir, "os=ios-sim+arch=arm"),
+        ] {
+            let json = mismatch(platform.clone(), dir, key);
+            assert!(parse(&json).is_ok(), "{json}");
+        }
+
+        let valid = mismatch(macos.clone(), default_dir, "macos-aarch64");
+        let path = |dir: &str, key: &str, name: &str, file: &str| {
+            serde_json::Value::from(format!("{dir}/{key}/{name}/{file}"))
+        };
+        for (field, value) in [
+            // Another platform's images.
+            (
+                "golden",
+                path(default_dir, "linux-x86_64", "test/goldens/a", "golden.png"),
+            ),
+            // Another golden's images.
+            (
+                "candidate",
+                path(
+                    default_dir,
+                    "macos-aarch64",
+                    "test/goldens/b",
+                    "candidate.png",
+                ),
+            ),
+            // The image of another field.
+            (
+                "golden",
+                path(default_dir, "macos-aarch64", "test/goldens/a", "diff.png"),
+            ),
+            // Not an artifacts directory.
+            (
+                "diff",
+                path(
+                    ".gleon/runs/latest/cases",
+                    "macos-aarch64",
+                    "test/goldens/a",
+                    "diff.png",
+                ),
+            ),
+            (
+                "diff",
+                path("test", "macos-aarch64", "test/goldens/a", "diff.png"),
+            ),
+            // Two artifacts directories in one report.
+            (
+                "diff",
+                path(
+                    ".gleon/runs/ci",
+                    "macos-aarch64",
+                    "test/goldens/a",
+                    "diff.png",
+                ),
+            ),
+            // No platform directory.
+            (
+                "diff",
+                serde_json::Value::from(format!("{default_dir}/test/goldens/a/diff.png")),
+            ),
+        ] {
+            let mut broken = valid.clone();
+            broken["artifacts"][field] = value.clone();
+            let err = parse(&broken).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    CaseParseError::Inconsistent(InconsistentCase::ArtifactPath(_))
+                ),
+                "{field}: {value}: {err}"
+            );
+        }
+        assert!(
+            InconsistentCase::ArtifactPath("golden")
+                .to_string()
+                .contains("<artifacts dir>/<platform key>/<name>/golden.png")
+        );
     }
 
     #[test]
@@ -1822,12 +2148,20 @@ mod tests {
             "comparison": {"tolerance": {"kind": "exact"}, "masks": [], "policy_version": 2},
             "outcome": "missing",
             "regions": [],
-            "artifacts": {"candidate": ".gleon/runs/latest/artifacts/test/goldens/a/candidate.png"},
+            "artifacts": {"candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/goldens/a/candidate.png"},
             "timings_ms": {"total": 1.0},
             "recorded_at": "2026-09-30T12:00:00Z"
         });
         let parse = |json: &serde_json::Value| CaseReport::parse(json.to_string().as_bytes());
         assert!(parse(&valid).is_ok());
+        let mut keyed = valid.clone();
+        keyed["artifacts"]["candidate"] =
+            ".gleon/runs/latest/artifacts/os=ios-sim+arch=arm/test/goldens/a/candidate.png".into();
+        keyed["platform"] = serde_json::json!({"os": "ios-sim", "arch": "arm"});
+        assert_eq!(
+            parse(&keyed).unwrap().platform_key().unwrap(),
+            "os=ios-sim+arch=arm"
+        );
         let mut outside = valid.clone();
         outside["golden"]["fallback"] = "../a.png".into();
         assert!(matches!(parse(&outside), Err(CaseParseError::Json(_))));
@@ -1874,13 +2208,27 @@ mod tests {
             ("/golden/path", "../../.bashrc"),
             ("/golden/path", "/etc/passwd"),
             ("/golden/path", "C:/golden.png"),
+            ("/golden/path", "test/goldens/os=ios-sim+arch=arm/a.png"),
+            ("/golden/path", "test/goldens/a+b.png"),
             ("/artifacts/candidate", "/etc/passwd"),
             ("/artifacts/candidate", "a/./b.png"),
+            ("/platform/os", "Mac OS"),
+            ("/platform", "bad key"),
         ] {
             let mut broken = valid.clone();
             *broken.pointer_mut(field).unwrap() = value.into();
             let err = parse(&broken).unwrap_err();
             assert!(matches!(err, CaseParseError::Json(_)), "{field}: {value}");
+        }
+        // The key of the platform names the report's directory: it needs an OS.
+        for platform in [serde_json::json!({}), serde_json::json!({"arch": "arm"})] {
+            let mut keyless = valid.clone();
+            keyless["platform"] = platform;
+            let err = parse(&keyless).unwrap_err();
+            assert!(
+                matches!(&err, CaseParseError::Json(e) if e.to_string().contains("platform.os is required")),
+                "{err}"
+            );
         }
         assert_eq!(
             CaseParseError::UnsupportedVersion(1).to_string(),

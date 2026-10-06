@@ -164,12 +164,16 @@ mod tests {
             "outcome": "mismatch",
             "metrics": {"kind": "pixel", "total_pixels": 4, "diff_pixels": 1, "diff_ratio": 0.25, "headroom": -0.25},
             "regions": [],
-            "artifacts": {"candidate": ".gleon/runs/latest/artifacts/test/enc/candidate.png"},
+            "artifacts": {"candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/enc/candidate.png"},
             "timings_ms": {"total": 1.0},
             "recorded_at": "2026-10-01T12:00:00Z"
         });
-        std::fs::create_dir_all(cases.join("test")).unwrap();
-        std::fs::write(cases.join("test/enc.json"), report.to_string()).unwrap();
+        std::fs::create_dir_all(cases.join("macos-aarch64/test")).unwrap();
+        std::fs::write(
+            cases.join("macos-aarch64/test/enc.json"),
+            report.to_string(),
+        )
+        .unwrap();
         RunSource::Copy(temp.path().join("runs/latest"))
     }
 

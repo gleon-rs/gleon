@@ -19,6 +19,7 @@ use gleon_core::{
         ApproveError, approve_workspace, check_status, diff::DiffOptions, init_workspace, run_diff,
         stage_workspace,
     },
+    platform::PlatformKey,
 };
 
 #[test]
@@ -74,15 +75,23 @@ fn test_approve_full_flow_with_diff_failures() {
     .unwrap();
     let diff_res = run_diff(&ctx, &DiffOptions::default()).unwrap();
     assert_eq!(diff_res.failed_tests, 1);
+    let host = PlatformKey::host();
     assert!(
         base_path
-            .join(".gleon/runs/latest/artifacts/login/button/candidate.png")
+            .join(".gleon/runs/latest/artifacts")
+            .join(host)
+            .join("login/button/candidate.png")
             .is_file()
     );
 
     // 3. Run approve without --from (the case reports of the latest run)
     let approve_res = approve_workspace(&ctx, &[], &[], None).unwrap();
-    assert_eq!(approve_res.approved_test_cases, ["login/button"]);
+    let approved: Vec<_> = approve_res
+        .approved
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(approved, [format!("{host}/login/button")]);
 
     // 4. Verify status is clean and diff passes!
     assert!(check_status(&ctx).unwrap().is_clean());
@@ -115,10 +124,14 @@ fn test_approve_uses_the_test_names_of_the_scanner() {
     assert_eq!(missing.failed_tests, 1);
 
     let res = approve_workspace(&ctx, &[], &[], None).unwrap();
-    assert_eq!(res.approved_test_cases, ["auth/login.screen"]);
+    let approved: Vec<_> = res.approved.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        approved,
+        [format!("{}/auth/login.screen", PlatformKey::host())]
+    );
     let manifest = base_path
         .join(".gleon/manifests")
-        .join(ctx.platform.to_key().unwrap())
+        .join(ctx.platform.key().unwrap())
         .join("auth/login.screen.json");
     assert!(manifest.is_file(), "expected manifest at {manifest:?}");
     assert_eq!(

@@ -274,7 +274,7 @@ mod tests {
     async fn test_push_invalid_platform_key() {
         let temp = tempfile::tempdir().unwrap();
         let mut ctx = ResolvedContext::default();
-        ctx.platform.os = "invalid/os".to_string(); // Will fail to_key()
+        ctx.platform.os = "invalid/os".to_string(); // Will fail key()
         ctx.base_dir = temp.path().to_path_buf();
 
         std::fs::create_dir_all(temp.path().join(".gleon").join("manifests")).unwrap();
@@ -297,7 +297,7 @@ mod tests {
         let mut ctx = ResolvedContext::default();
         ctx.platform.os = "linux".to_string();
         ctx.base_dir = temp.path().to_path_buf();
-        let key = ctx.platform.to_key().unwrap();
+        let key = ctx.platform.key().unwrap();
 
         let plat_dir = temp.path().join(".gleon").join("manifests").join(&key);
         std::fs::create_dir_all(&plat_dir).unwrap();
@@ -316,7 +316,7 @@ mod tests {
         let mut ctx = ResolvedContext::default();
         ctx.platform.os = "linux".to_string();
         ctx.base_dir = temp.path().to_path_buf();
-        let key = ctx.platform.to_key().unwrap();
+        let key = ctx.platform.key().unwrap();
 
         let plat_dir = temp.path().join(".gleon").join("manifests").join(&key);
         std::fs::create_dir_all(&plat_dir).unwrap();
@@ -354,7 +354,7 @@ mod tests {
         let mut ctx = ResolvedContext::default();
         ctx.platform.os = "linux".to_string();
         ctx.base_dir = temp.path().to_path_buf();
-        let key = ctx.platform.to_key().unwrap();
+        let key = ctx.platform.key().unwrap();
 
         let plat_dir = temp.path().join(".gleon").join("manifests").join(&key);
         std::fs::create_dir_all(&plat_dir).unwrap();
@@ -390,7 +390,7 @@ mod tests {
         let mut ctx = ResolvedContext::default();
         ctx.platform.os = "linux".to_string();
         ctx.base_dir = temp.path().to_path_buf();
-        let key = ctx.platform.to_key().unwrap();
+        let key = ctx.platform.key().unwrap();
 
         let manifests_dir = temp.path().join(".gleon").join("manifests");
         let plat_dir = manifests_dir.join(&key);
@@ -424,7 +424,7 @@ mod tests {
         let mut ctx = ResolvedContext::default();
         ctx.platform.os = "linux".to_string();
         ctx.base_dir = temp.path().to_path_buf();
-        let key = ctx.platform.to_key().unwrap();
+        let key = ctx.platform.key().unwrap();
 
         let plat_dir = temp.path().join(".gleon").join("manifests").join(&key);
         std::fs::create_dir_all(&plat_dir).unwrap();
@@ -466,7 +466,7 @@ mod tests {
         let mut ctx = ResolvedContext::default();
         ctx.platform.os = "linux".to_string();
         ctx.base_dir = temp.path().to_path_buf();
-        let key = ctx.platform.to_key().unwrap();
+        let key = ctx.platform.key().unwrap();
 
         let plat_dir = temp.path().join(".gleon").join("manifests").join(&key);
         std::fs::create_dir_all(&plat_dir).unwrap();
@@ -498,7 +498,7 @@ mod tests {
         let mut ctx = ResolvedContext::default();
         ctx.platform.os = "linux".to_string();
         ctx.base_dir = temp.path().to_path_buf();
-        let key = ctx.platform.to_key().unwrap();
+        let key = ctx.platform.key().unwrap();
 
         let plat_dir = temp.path().join(".gleon").join("manifests").join(&key);
         std::fs::create_dir_all(&plat_dir).unwrap();

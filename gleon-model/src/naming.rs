@@ -247,7 +247,8 @@ mod tests {
             assert!(is_portable_relative_path(good), "{good}");
         }
         for bad in [
-            "", "/abs", "a//b", "a/", "./a", "a/..", "C:/x", "a\\b", "a b", "ü",
+            "", "/abs", "a//b", "a/", "./a", "a/..", "C:/x", "a\\b", "a b", "ü", "a:b", "a+b",
+            "a=b",
         ] {
             assert!(!is_portable_relative_path(bad), "{bad}");
         }

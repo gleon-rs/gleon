@@ -104,9 +104,10 @@ mod tests {
 
     /// The real Flutter run of the gleon-core fixtures, copied into the workspace at `root`.
     fn record_flutter_run(root: &Path) {
-        let from = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../gleon-core/tests/fixtures/cases/flutter-linux-x64/cases/test/goldens");
-        let to = root.join(".gleon/runs/latest/cases/test/goldens");
+        let from = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../gleon-core/tests/fixtures/cases/flutter-linux-x64/cases/linux-x86_64/test/goldens",
+        );
+        let to = root.join(".gleon/runs/latest/cases/linux-x86_64/test/goldens");
         std::fs::create_dir_all(&to).unwrap();
         for entry in std::fs::read_dir(from).unwrap() {
             let entry = entry.unwrap();

@@ -201,10 +201,11 @@ runs:
             const rest = (command[1] || '').trim();
             if (rest) {
               const tokens = rest.split(/\s+/).filter(Boolean);
-              // Test names or golden paths only: a comment never passes flags (`--from`, ...).
+              // Test names, golden paths or `<platform>/<test name>` (platform keys hold `+` and
+              // `=`) only: a comment never passes flags (`--from`, ...).
               for (const token of tokens) {
-                if (token.startsWith('-') || !/^[A-Za-z0-9._/:=-]+$/.test(token)) {
-                  console.error('::error::Invalid argument token (test names or golden paths only): ' + token);
+                if (token.startsWith('-') || !/^[A-Za-z0-9._/+=-]+$/.test(token)) {
+                  console.error('::error::Invalid argument token (test names, golden paths or <platform>/<test name> only): ' + token);
                   process.exit(1);
                 }
               }
