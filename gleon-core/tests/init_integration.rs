@@ -86,7 +86,7 @@ fn test_init_workspace_honors_cli_overrides() {
 
     init_workspace(&ctx).expect("init_workspace should succeed");
 
-    let platform_key = ctx.platform.to_key().unwrap();
+    let platform_key = ctx.platform.key().unwrap();
     assert_eq!(platform_key, "android-arm+theme=dark");
     assert!(
         base_path

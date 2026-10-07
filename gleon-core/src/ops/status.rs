@@ -174,7 +174,7 @@ pub fn check_status(context: &ResolvedContext) -> Result<StatusReport, StatusErr
     let workspace_index = load_merged_index_with_fallback(
         &paths,
         &platform_key,
-        context.fallback_platform_key.as_deref(),
+        context.fallback_platform_key.as_ref(),
     )?;
 
     let blobs_root = paths.blobs_root();
@@ -246,6 +246,7 @@ pub fn check_status(context: &ResolvedContext) -> Result<StatusReport, StatusErr
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
+    use gleon_model::platform::PlatformKey;
     use sha2::Digest;
 
     use super::*;
@@ -329,7 +330,7 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let plat_key = ctx.platform.to_key().unwrap();
+        let plat_key = ctx.platform.key().unwrap();
         let manifests_dir = gleon_dir.join("manifests").join(&plat_key);
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
@@ -356,7 +357,7 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..Default::default()
         };
-        let plat_key = ctx.platform.to_key().unwrap();
+        let plat_key = ctx.platform.key().unwrap();
         let manifests_dir = gleon_dir.join("manifests").join(&plat_key);
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
@@ -411,7 +412,7 @@ mod tests {
         let gleon_dir = temp.path().join(".gleon");
         let ctx_temp = ResolvedContext::default();
 
-        let platform_key = ctx_temp.platform.to_key().unwrap();
+        let platform_key = ctx_temp.platform.key().unwrap();
         let manifests_dir = gleon_dir.join("manifests").join(&platform_key);
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
@@ -477,7 +478,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join(".gleon")).unwrap();
 
-        // Construct an invalid platform info that fails to_key() (e.g. empty os and version)
+        // Construct an invalid platform info that fails key() (e.g. empty os and version)
         let ctx = ResolvedContext {
             base_dir: temp.path().to_path_buf(),
             platform: crate::platform::PlatformInfo {
@@ -506,7 +507,7 @@ mod tests {
             ..ResolvedContext::default()
         };
 
-        let platform_key = ctx.platform.to_key().unwrap();
+        let platform_key = ctx.platform.key().unwrap();
         let manifests_dir = gleon_dir.join("manifests").join(&platform_key);
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
@@ -553,7 +554,7 @@ mod tests {
             ..ResolvedContext::default()
         };
 
-        let platform_key = ctx.platform.to_key().unwrap();
+        let platform_key = ctx.platform.key().unwrap();
         let manifests_dir = gleon_dir.join("manifests").join(&platform_key);
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
@@ -610,7 +611,7 @@ mod tests {
                 renderer: None,
                 labels: std::collections::BTreeMap::new(),
             },
-            fallback_platform_key: Some(macos_key.to_string()),
+            fallback_platform_key: Some(PlatformKey::parse(macos_key).unwrap()),
             ..Default::default()
         };
 
@@ -701,7 +702,7 @@ screenshots:
         let gleon_dir = temp.path().join(".gleon");
         let ctx_temp = ResolvedContext::default();
 
-        let platform_key = ctx_temp.platform.to_key().unwrap();
+        let platform_key = ctx_temp.platform.key().unwrap();
         let manifests_dir = gleon_dir.join("manifests").join(&platform_key);
         let blobs_dir = gleon_dir.join("blobs").join("sha256");
         std::fs::create_dir_all(&manifests_dir).unwrap();

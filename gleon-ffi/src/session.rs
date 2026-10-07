@@ -17,7 +17,7 @@ use gleon_engine::config::Zone;
 use gleon_model::{
     case::{RUN_ID_ENV, RunId},
     config::{ArtifactsDir, GITIGNORE_LINES, GleonConfig, MetricsConfig},
-    platform::{self, PlatformConfig},
+    platform::{self, PlatformKey},
     rules::{RuleMatch, RuleSet},
     tolerance::{TextTolerance, Tolerance},
 };
@@ -138,7 +138,7 @@ enum Layout {
     /// `platform` (the key of the `fallback_platform`).
     Foreign {
         /// The `fallback_platform`, as its key.
-        platform: String,
+        platform: PlatformKey,
     },
 }
 
@@ -251,7 +251,7 @@ fn compile(text: &str, artifacts_env: Option<&ArtifactsDir>) -> Result<Arc<Compi
             Some(primary) => match primary.matches_host() {
                 Ok(true) => Layout::Primary,
                 Ok(false) => Layout::Foreign {
-                    platform: primary.to_key().map_err(|e| e.to_string())?,
+                    platform: primary.key().map_err(|e| e.to_string())?,
                 },
                 Err(e) => return Err(format!("fallback_platform: {e}")),
             },
@@ -402,7 +402,7 @@ pub struct Fallback {
     /// The file relative to the workspace root, `/`-separated.
     pub path: String,
     /// The platform it was recorded on (the key of the `fallback_platform`).
-    pub platform: String,
+    pub platform: PlatformKey,
 }
 
 impl Goldens {
@@ -430,8 +430,8 @@ impl Plan {
 pub struct InWorkspace {
     /// The workspace.
     pub workspace: Arc<Workspace>,
-    /// Canonical test name (the name of its case report and artifacts folder), of the shared
-    /// golden: the same on every platform.
+    /// Canonical test name of the shared golden, the same on every platform: the name of its case
+    /// report and artifacts folder under this platform's directory.
     pub name: String,
     /// This platform's golden ([`Goldens::target`]) relative to the root, `/`-separated.
     pub golden_path: String,
@@ -627,7 +627,7 @@ impl Session {
                 shared_path,
             ),
             Layout::Foreign { platform } => {
-                let own_path = platform::platform_golden(&shared_path, &PlatformConfig::host_dir());
+                let own_path = platform::platform_golden(&shared_path, PlatformKey::host());
                 // From the canonical path, like the one `gleon approve` writes: the integration's
                 // may lead through a symbolic link.
                 let mut target = workspace.root.clone();
@@ -968,7 +968,7 @@ metrics:
     /// stays one golden for every platform, like without the file.
     #[test]
     fn test_goldens_follow_the_fallback_platform() {
-        let host = PlatformConfig::host_dir();
+        let host = PlatformKey::host();
         let config = |platform: &str| {
             format!(
                 "required_version: \">=0.1.0\"\nfallback_platform: {platform}\n\
@@ -976,7 +976,7 @@ metrics:
                  screenshots: [{{ include: \"test/goldens/*.png\" }}]"
             )
         };
-        let (_dir, root) = workspace(&config(&host), "a.png");
+        let (_dir, root) = workspace(&config(host.as_str()), "a.png");
         let golden = root.join("test/goldens/a.png");
         let plan = session(None).plan(&golden, None, vec![], None).unwrap();
         assert_eq!(plan.goldens.target, golden);
@@ -996,7 +996,7 @@ metrics:
         assert!(plan.in_workspace.is_some());
         assert_eq!(
             plan.goldens.target,
-            root.join("test/goldens").join(&host).join("a.png")
+            root.join("test/goldens").join(host).join("a.png")
         );
         let fallback = plan.goldens.fallback.unwrap();
         assert_eq!(
@@ -1018,7 +1018,7 @@ metrics:
             ("macos-arm64", "architecture 'arm64'"),
             ("darwin-aarch64", "OS 'darwin'"),
             ("macos-aarch64-extra", "ambiguous"),
-            ("{ arch: aarch64 }", "an OS is required"),
+            ("{ arch: aarch64 }", "platform.os is required"),
         ] {
             let yaml = format!(
                 "required_version: \">=0.1.0\"\nfallback_platform: {platform}\n\
@@ -1051,11 +1051,11 @@ metrics:
             .plan(&root.join("test/goldens/a.png"), None, vec![], None)
             .unwrap();
         let golden = plan.in_workspace.unwrap();
-        let host = PlatformConfig::host_dir();
+        let host = PlatformKey::host();
         assert_eq!(golden.golden_path, format!("assets/{host}/a.png"));
         assert_eq!(
             plan.goldens.target,
-            root.join("assets").join(&host).join("a.png")
+            root.join("assets").join(host).join("a.png")
         );
     }
 

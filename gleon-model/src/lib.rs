@@ -11,8 +11,8 @@
 //! - [`tolerance`]: how much two images may differ;
 //! - [`compare`]: the comparison of a golden with a candidate (decoding, masks, engine, metrics,
 //!   diff image), the one pipeline of the CLI and the integrations;
-//! - [`case`]: the per-golden case report (`.gleon/runs/latest/cases/<name>.json`) and the
-//!   images of a failure next to it;
+//! - [`case`]: the per-golden, per-platform case report
+//!   (`.gleon/runs/latest/cases/<platform>/<name>.json`) and the images of a failure next to it;
 //! - [`hash`]: content hashes of images (`sha256:<hex>`), shared by manifests and case reports;
 //! - [`fs`]: atomic file writes.
 //!

@@ -202,7 +202,7 @@ async fn test_gc_full_lifecycle_with_storage() {
     let plat_dir = workspace_temp
         .path()
         .join(".gleon/manifests")
-        .join(ctx.platform.to_key().unwrap());
+        .join(ctx.platform.key().unwrap());
     fs::create_dir_all(&plat_dir).unwrap();
     let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
     fs::write(plat_dir.join("test_case.json"), manifest_json).unwrap();
@@ -321,7 +321,7 @@ async fn test_gc_integration_real_data_mtime() {
     };
     let plat_dir = repo_root
         .join(".gleon/manifests")
-        .join(ctx.platform.to_key().unwrap());
+        .join(ctx.platform.key().unwrap());
     fs::create_dir_all(&plat_dir).unwrap();
     fs::write(
         plat_dir.join("test_case.json"),

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 // Platform identity types live in the permissive `gleon-model` crate (shared with the Flutter
 // package through `gleon-ffi`); resolution against CLI flags and the environment stays here.
 pub use gleon_model::platform::{
-    PlatformConfig, PlatformError, PlatformFields, PlatformInfo, validate_segment,
+    PlatformConfig, PlatformError, PlatformFields, PlatformInfo, PlatformKey, validate_segment,
 };
 
 /// Platform-related values read from environment variables (`GLEON_*`).

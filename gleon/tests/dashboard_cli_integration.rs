@@ -24,8 +24,8 @@ fn core_fixtures() -> PathBuf {
 /// Puts the case reports of the real Flutter run of the fixtures into the workspace as the run
 /// `run_id`, recorded `offset_secs` after the fixture run (later runs get later offsets).
 fn record_run(workspace: &Path, run_id: &str, offset_secs: i64) {
-    let from = core_fixtures().join("cases/flutter-linux-x64/cases/test/goldens");
-    let to = workspace.join(".gleon/runs/latest/cases/test/goldens");
+    let from = core_fixtures().join("cases/flutter-linux-x64/cases/linux-x86_64/test/goldens");
+    let to = workspace.join(".gleon/runs/latest/cases/linux-x86_64/test/goldens");
     std::fs::create_dir_all(&to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
@@ -90,7 +90,8 @@ fn test_cli_dashboard_end_to_end() {
     assert!(html_content.contains("2</strong> / 2 passed"));
     let first = history(workspace);
     assert_eq!(first.runs.len(), 1);
-    assert_eq!(first.runs[0].platform, "linux-x86_64");
+    assert_eq!(first.runs[0].platforms.len(), 1);
+    assert_eq!(first.runs[0].platforms[0], "linux-x86_64");
 
     // 4. Test --truncate-history 0 fails validation
     dashboard(workspace)

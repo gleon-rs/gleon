@@ -4,7 +4,7 @@ Parameters
 
 Licensor: Roman Cinis
 
-Licensed Work: gleon (including its workspace crates: gleon and gleon-core)
+Licensed Work: gleon, consisting only of the workspace crates gleon (the CLI) and gleon-core. The workspace crates gleon-engine, gleon-model and gleon-ffi are not part of the Licensed Work: they are licensed under the MIT License or the Apache License, Version 2.0, at your option (see LICENSE-MIT and LICENSE-APACHE in their directories).
 
 Additional Use Grant: Use of the Licensed Work is free for individuals, hobbyists, non-commercial open-source repositories, and unlimited local development. Commercial CI/CD use requires a commercial license from the Licensor.
 

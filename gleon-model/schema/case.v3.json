@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "gleon case report (.gleon/runs/latest/cases/<name>.json)",
+  "title": "gleon case report (.gleon/runs/latest/cases/<platform>/<name>.json)",
   "description": "One golden comparison.",
   "type": "object",
   "properties": {
@@ -57,7 +57,7 @@
       ]
     },
     "name": {
-      "description": "Canonical test name (also the case file name): the golden path relative to the workspace\nroot without extension, as lowercase `[a-z0-9_.-]` segments separated by `/`.",
+      "description": "Canonical test name: the golden path relative to the workspace root without extension, as\nlowercase `[a-z0-9_.-]` segments separated by `/`. It is the file name of the report under\nits platform's directory, and the folder of its images; the same on every platform.",
       "type": "string",
       "pattern": "^(?!\\.\\.?(/|$))[a-z0-9_.-]+(/(?!\\.\\.?(/|$))[a-z0-9_.-]+)*$"
     },
@@ -66,7 +66,7 @@
       "$ref": "#/$defs/CaseOutcome"
     },
     "platform": {
-      "description": "Platform the candidate was rendered on: auto-detected `os` and `arch`, named like in the CLI.",
+      "description": "Platform the candidate was rendered on: auto-detected `os` and `arch`, named like in the CLI.\nIts key names the directory of the report and of its images.",
       "$ref": "#/$defs/PlatformConfig"
     },
     "recorded_at": {
@@ -96,8 +96,8 @@
       "description": "Version of this format (`CASE_SCHEMA_VERSION`).",
       "type": "integer",
       "format": "uint32",
-      "maximum": 2,
-      "minimum": 2
+      "maximum": 3,
+      "minimum": 3
     },
     "source": {
       "description": "What produced the candidate.",
@@ -135,32 +135,32 @@
   ],
   "$defs": {
     "Artifacts": {
-      "description": "The images of a case, as paths relative to the workspace root (`/`-separated) under the\nartifacts directory: `<artifacts dir>/<name>/{golden,candidate,diff}.png`.",
+      "description": "The images of a case, as paths relative to the workspace root (`/`-separated):\n`<artifacts dir>/<platform key>/<name>/{golden,candidate,diff}.png`.\n\n`<artifacts dir>` is an artifacts directory (`.gleon/runs/latest/artifacts` or a directory\nunder `.gleon/runs/` outside `latest/`), the same for every image of the case;\n`<platform key>` is the key of the report's `platform` and `<name>` its `name`, so a report\nlists only its own images.",
       "type": "object",
       "properties": {
         "candidate": {
-          "description": "The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`).",
+          "description": "The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`):\n`<artifacts dir>/<platform key>/<name>/candidate.png`.",
           "type": [
             "string",
             "null"
           ],
-          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
+          "pattern": "^\\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\\.\\.?(/|$))[a-z0-9_.-]+(/(?!\\.\\.?(/|$))[a-z0-9_.-]+)*/candidate\\.png$"
         },
         "diff": {
-          "description": "The diff visualization (mismatches only).",
+          "description": "The diff visualization (mismatches only): `<artifacts dir>/<platform key>/<name>/diff.png`.",
           "type": [
             "string",
             "null"
           ],
-          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
+          "pattern": "^\\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\\.\\.?(/|$))[a-z0-9_.-]+(/(?!\\.\\.?(/|$))[a-z0-9_.-]+)*/diff\\.png$"
         },
         "golden": {
-          "description": "A copy of the golden (mismatches and dimension mismatches).",
+          "description": "A copy of the golden (mismatches and dimension mismatches):\n`<artifacts dir>/<platform key>/<name>/golden.png`.",
           "type": [
             "string",
             "null"
           ],
-          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
+          "pattern": "^\\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\\.\\.?(/|$))[a-z0-9_.-]+(/(?!\\.\\.?(/|$))[a-z0-9_.-]+)*/golden\\.png$"
         }
       },
       "additionalProperties": false
@@ -552,7 +552,7 @@
       ]
     },
     "PlatformConfig": {
-      "description": "A platform: an opaque key, or structured fields.",
+      "description": "A platform: an opaque key, or structured fields.\n\nIts key names its directories (manifests, case reports, failure images): `<os>-<arch>`\n(`macos-aarch64`), or `os=<os>+arch=<arch>` when the OS or architecture contains `-`\n(`os=ios-sim+arch=arm`), or `<os>` without an architecture; then `+<renderer>`, then\n`+<key>=<value>` per label, sorted by key; all lowercase. An opaque value is its own key, so\n`macos-aarch64` names the same platform as `{os: macos, arch: aarch64}`.",
       "anyOf": [
         {
           "description": "Opaque `[a-z0-9_.-]` platform key.",
@@ -574,7 +574,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "labels": {
           "description": "Arbitrary key-value label overrides.",
@@ -583,7 +584,11 @@
             "null"
           ],
           "additionalProperties": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_.-]+$"
           }
         },
         "os": {
@@ -591,14 +596,16 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "renderer": {
           "description": "Renderer identifier override.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+$"
         }
       },
       "additionalProperties": false

@@ -29,7 +29,7 @@ use gleon_model::{
     },
     compare::{Candidate, Compared, Comparison, Text},
     fs::Durability,
-    platform::{self, PlatformConfig},
+    platform::{self, PlatformConfig, PlatformKey},
     tolerance::{TextTolerance, Tolerance},
 };
 
@@ -444,9 +444,11 @@ impl Call<'_> {
     /// The key of this platform's own golden, as the integration's key (`golden_uri`) names the
     /// shared one, when the workspace keeps one per platform.
     fn own_uri(&self) -> Option<String> {
-        self.plan.goldens.fallback.as_ref().map(|_| {
-            platform::platform_golden(self.request.golden_uri, &PlatformConfig::host_dir())
-        })
+        self.plan
+            .goldens
+            .fallback
+            .as_ref()
+            .map(|_| platform::platform_golden(self.request.golden_uri, PlatformKey::host()))
     }
 
     /// The key of the golden this call compares, for messages about it.
@@ -460,7 +462,7 @@ impl Call<'_> {
     /// The clause of a failure against another platform's shared golden; empty for any other.
     fn fallback_clause(&self) -> String {
         match (self.fallback, self.own_uri()) {
-            (Some(fallback), Some(own)) => text::fallback(&fallback.platform, &own),
+            (Some(fallback), Some(own)) => text::fallback(fallback.platform.as_str(), &own),
             _ => String::new(),
         }
     }
@@ -482,7 +484,7 @@ impl Call<'_> {
         let mut message = text::missing_golden(&self.compared_uri());
         if let Some(fallback) = &self.plan.goldens.fallback {
             message.push_str(&text::missing_fallback(
-                &fallback.platform,
+                fallback.platform.as_str(),
                 self.request.golden_uri,
             ));
         }
@@ -566,22 +568,26 @@ impl Call<'_> {
         })
     }
 
-    /// Makes the artifacts folder of the golden hold exactly `images` (none removes an earlier
-    /// failure's) and returns their paths; nothing outside a workspace. Like the case report, the
-    /// images are a side channel: failing to update them is a warning.
+    /// Makes the artifacts folder of the golden on this platform
+    /// (`<artifacts dir>/<host key>/<name>/`) hold exactly `images` (none removes an earlier
+    /// failure's) and returns their paths; nothing outside a workspace. Other platforms' images of
+    /// the golden stay. Like the case report, the images are a side channel: failing to update
+    /// them is a warning.
     fn keep(&self, images: ArtifactImages<'_>) -> Result<Option<Artifacts>, String> {
         let Some(golden) = &self.plan.in_workspace else {
             return Ok(None);
         };
+        let platform_key = PlatformKey::host();
         case::write_artifacts(
             &golden.workspace.root,
             &golden.artifacts,
+            platform_key,
             &golden.name,
             images,
         )
         .map_err(|e| {
             format!(
-                "gleon: cannot update the artifacts {}/{}: {e}",
+                "gleon: cannot update the artifacts {}/{platform_key}/{}: {e}",
                 golden.artifacts.as_str(),
                 golden.name
             )
@@ -605,8 +611,12 @@ impl Call<'_> {
         };
         if record.is_none() && !outcome.is_failure() {
             // A pass without metrics records nothing, but the report of an earlier failure of
-            // this golden must not outlive it.
-            let stale = CaseReport::path(&golden.workspace.gleon_dir(), &golden.name);
+            // this golden on this platform must not outlive it.
+            let stale = CaseReport::path(
+                &golden.workspace.gleon_dir(),
+                PlatformKey::host(),
+                &golden.name,
+            );
             return match fs::remove_file(&stale) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => Err(format!(
                     "gleon: cannot remove the case report {}: {e}",
@@ -675,7 +685,7 @@ impl Call<'_> {
         report.write(&gleon_dir).map(|()| console).map_err(|e| {
             format!(
                 "gleon: cannot write the case report {}: {e}",
-                CaseReport::path(&gleon_dir, &golden.name).display()
+                CaseReport::path(&gleon_dir, PlatformKey::host(), &golden.name).display()
             )
         })
     }
@@ -923,12 +933,14 @@ mod tests {
             )
         }
 
-        /// The images kept for the golden under the default artifacts directory.
+        /// The images kept for the golden on this platform under the default artifacts directory.
         fn artifacts(&self) -> Vec<String> {
             entries(
                 &self
                     .root
-                    .join(".gleon/runs/latest/artifacts/test/goldens/a"),
+                    .join(".gleon/runs/latest/artifacts")
+                    .join(PlatformKey::host())
+                    .join("test/goldens/a"),
             )
         }
 
@@ -942,8 +954,11 @@ mod tests {
         }
 
         fn case_path(&self) -> PathBuf {
-            self.root
-                .join(".gleon/runs/latest/cases/test/goldens/a.json")
+            CaseReport::path(
+                &self.root.join(".gleon"),
+                PlatformKey::host(),
+                "test/goldens/a",
+            )
         }
     }
 
@@ -1135,7 +1150,13 @@ metrics:
         assert!(case["timings_ms"]["native"].is_f64());
         fixture.case();
         assert_eq!(
-            entries(&fixture.root.join(".gleon/runs/latest/cases/test/goldens")),
+            entries(
+                &fixture
+                    .root
+                    .join(".gleon/runs/latest/cases")
+                    .join(PlatformKey::host())
+                    .join("test/goldens")
+            ),
             ["a.json"],
             "no temporary files are left"
         );
@@ -1352,7 +1373,7 @@ metrics:
         fn own_golden(&self) -> PathBuf {
             self.root
                 .join("test/goldens")
-                .join(PlatformConfig::host_dir())
+                .join(PlatformKey::host())
                 .join("a.png")
         }
     }
@@ -1362,7 +1383,7 @@ metrics:
     #[test]
     fn test_on_the_fallback_platform_text_is_compared_almost_exactly() {
         let images = TextImages::new();
-        let fixture = images.fixture(&PlatformConfig::host_dir());
+        let fixture = images.fixture(PlatformKey::host().as_str());
         let session = fixture.session(None);
         let compare = |candidate, text| {
             fixture.compare_raw(&session, candidate, None, images.regions.clone(), text)
@@ -1403,7 +1424,7 @@ metrics:
         let strict = compare(&images.noise, Some(TextTolerance(0.0)));
         assert_eq!(strict.verdict, Verdict::Mismatch);
         let rule_off = images.fixture_with(
-            &PlatformConfig::host_dir(),
+            PlatformKey::host().as_str(),
             "diff: { threshold: 0 }\n    text_tolerance: 1",
         );
         let finished = rule_off.compare_raw(
@@ -1432,7 +1453,7 @@ metrics:
         let compare = |candidate| {
             fixture.compare_raw(&session, candidate, None, images.regions.clone(), None)
         };
-        let own_path = format!("test/goldens/{}/a.png", PlatformConfig::host_dir());
+        let own_path = format!("test/goldens/{}/a.png", PlatformKey::host());
 
         let glyph = compare(&images.glyph);
         assert_eq!(glyph.verdict, Verdict::Match, "{}", glyph.message);
@@ -1476,7 +1497,7 @@ metrics:
                  platform has no own golden \"goldens/{}/a.png\" yet (record or approve it to \
                  compare text too).",
                 foreign_platform(),
-                PlatformConfig::host_dir()
+                PlatformKey::host()
             )),
             "{}",
             outside.message
@@ -1503,7 +1524,7 @@ metrics:
         assert!(
             glyph.message.starts_with(&format!(
                 "Golden \"goldens/{}/a.png\": ",
-                PlatformConfig::host_dir()
+                PlatformKey::host()
             )),
             "the message names the compared golden: {}",
             glyph.message
@@ -1540,7 +1561,7 @@ metrics:
         assert!(
             corrupt.message.starts_with(&format!(
                 "Golden \"goldens/{}/a.png\": gleon could not compare: golden image",
-                PlatformConfig::host_dir()
+                PlatformKey::host()
             )),
             "{}",
             corrupt.message
@@ -1569,7 +1590,7 @@ metrics:
         let fixture = images.fixture(foreign_platform());
         let session = fixture.session(None);
         let candidate = png(4, 4, true);
-        let own_path = format!("test/goldens/{}/a.png", PlatformConfig::host_dir());
+        let own_path = format!("test/goldens/{}/a.png", PlatformKey::host());
 
         let updated = fixture.run(&session, Mode::Update, &candidate);
         assert_eq!(updated.verdict, Verdict::Updated, "{}", updated.message);
@@ -1595,7 +1616,7 @@ metrics:
                 "Could not be compared against non-existent file: \"goldens/{}/a.png\" (nor the \
                  {foreign} golden \"goldens/a.png\": record a new golden on {foreign} first, \
                  every other platform compares it until it has its own)",
-                PlatformConfig::host_dir(),
+                PlatformKey::host(),
                 foreign = foreign_platform()
             )
         );
@@ -1661,7 +1682,12 @@ screenshots:
     fn test_failures_keep_artifacts_next_to_the_failures_dir() {
         let fixture = Fixture::new(Some(METRICS));
         let session = fixture.session(None);
-        let artifact = |file: &str| format!(".gleon/runs/latest/artifacts/test/goldens/a/{file}");
+        let artifact = |file: &str| {
+            format!(
+                ".gleon/runs/latest/artifacts/{}/test/goldens/a/{file}",
+                PlatformKey::host()
+            )
+        };
 
         let mismatch = fixture.run(&session, Mode::Compare, &png(4, 4, true));
         assert_eq!(mismatch.verdict, Verdict::Mismatch);
@@ -1792,14 +1818,22 @@ screenshots:
     fn test_the_artifacts_dir_follows_the_config_then_the_environment() {
         let yaml = format!("{METRICS}artifacts: .gleon/runs/shots\n");
         let fixture = Fixture::new(Some(&yaml));
+        let host = PlatformKey::host();
         fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, true));
         assert_eq!(
-            entries(&fixture.root.join(".gleon/runs/shots/test/goldens/a")).len(),
+            entries(
+                &fixture
+                    .root
+                    .join(".gleon/runs/shots")
+                    .join(host)
+                    .join("test/goldens/a")
+            )
+            .len(),
             3
         );
         assert_eq!(
-            fixture.case().artifacts.unwrap().diff.as_deref(),
-            Some(".gleon/runs/shots/test/goldens/a/diff.png")
+            fixture.case().artifacts.unwrap().diff,
+            Some(format!(".gleon/runs/shots/{host}/test/goldens/a/diff.png"))
         );
 
         let session = fixture.session_with(SessionOptions {
@@ -1808,7 +1842,14 @@ screenshots:
         });
         fixture.run(&session, Mode::Compare, &png(4, 4, true));
         assert_eq!(
-            entries(&fixture.root.join(".gleon/runs/ram/test/goldens/a")).len(),
+            entries(
+                &fixture
+                    .root
+                    .join(".gleon/runs/ram")
+                    .join(host)
+                    .join("test/goldens/a")
+            )
+            .len(),
             3
         );
         assert!(fixture.artifacts().is_empty());
@@ -1855,6 +1896,126 @@ screenshots:
     }
 
     #[test]
+    fn test_platforms_keep_each_others_reports_and_images() {
+        let fixture = Fixture::new(Some(METRICS));
+        let session = fixture.session(None);
+        // Another platform: no process reports an OS `gleon`.
+        let foreign = "gleon-test";
+        let runs = fixture.root.join(".gleon/runs/latest");
+        let foreign_case = runs.join("cases").join(foreign).join("test/goldens/a.json");
+        let foreign_candidate = runs
+            .join("artifacts")
+            .join(foreign)
+            .join("test/goldens/a/candidate.png");
+        for file in [&foreign_case, &foreign_candidate] {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"another platform's").unwrap();
+        }
+
+        let mismatch = fixture.run(&session, Mode::Compare, &png(4, 4, true));
+        assert_eq!(mismatch.verdict, Verdict::Mismatch);
+        assert_eq!(
+            fixture.artifacts(),
+            ["candidate.png", "diff.png", "golden.png"]
+        );
+        assert_eq!(fixture.case().outcome, CaseOutcome::Mismatch);
+
+        let pass = fixture.run(&session, Mode::Compare, &png(4, 4, false));
+        assert_eq!(pass.verdict, Verdict::Identical);
+        assert!(fixture.artifacts().is_empty(), "the own images are removed");
+        assert_eq!(fixture.case().outcome, CaseOutcome::Identical);
+        assert!(
+            fixture
+                .case_path()
+                .starts_with(runs.join("cases").join(PlatformKey::host()))
+        );
+        for file in [&foreign_case, &foreign_candidate] {
+            assert_eq!(fs::read(file).unwrap(), b"another platform's", "{file:?}");
+        }
+    }
+
+    /// The valid report and images of the golden on another platform: this platform's own,
+    /// recorded there (`<dir>/<foreign>/test/goldens/a/`).
+    fn write_foreign_case(fixture: &Fixture, dir: &str) -> (PathBuf, PathBuf) {
+        let foreign = foreign_platform();
+        let (os, arch) = foreign.split_once('-').unwrap();
+        let mut report = fixture.case_json();
+        report["platform"] = serde_json::json!({"os": os, "arch": arch});
+        let images = format!("{dir}/{foreign}/test/goldens/a");
+        for field in ["golden", "candidate", "diff"] {
+            report["artifacts"][field] = format!("{images}/{field}.png").into();
+        }
+        let case = fixture
+            .root
+            .join(".gleon/runs/latest/cases")
+            .join(foreign)
+            .join("test/goldens/a.json");
+        fs::create_dir_all(case.parent().unwrap()).unwrap();
+        fs::write(&case, report.to_string()).unwrap();
+        CaseReport::parse(&fs::read(&case).unwrap()).unwrap();
+        let folder = fixture.root.join(&images);
+        fs::create_dir_all(&folder).unwrap();
+        for file in ["golden.png", "candidate.png", "diff.png"] {
+            fs::write(folder.join(file), b"another platform's").unwrap();
+        }
+        (case, folder)
+    }
+
+    /// A pass without metrics removes the report and images of this platform's earlier failure
+    /// only: another platform's valid report of the golden stays.
+    #[test]
+    fn test_a_pass_without_metrics_removes_only_its_own_report() {
+        let fixture = Fixture::new(Some(METRICS));
+        let mismatch = fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, true));
+        assert_eq!(mismatch.verdict, Verdict::Mismatch);
+        let (foreign_case, foreign_images) =
+            write_foreign_case(&fixture, ".gleon/runs/latest/artifacts");
+
+        let pass = fixture.run(
+            &fixture.session(Some("0")),
+            Mode::Compare,
+            &png(4, 4, false),
+        );
+        assert_eq!(pass.verdict, Verdict::Identical);
+        assert!(!fixture.case_path().exists(), "its own report is removed");
+        assert!(fixture.artifacts().is_empty(), "its own images are removed");
+        assert!(CaseReport::parse(&fs::read(&foreign_case).unwrap()).is_ok());
+        assert_eq!(entries(&foreign_images).len(), 3);
+    }
+
+    /// `GLEON_ARTIFACTS_DIR` holds the images of every platform, each in its directory.
+    #[test]
+    fn test_a_custom_artifacts_dir_of_two_platforms() {
+        let fixture = Fixture::new(Some(METRICS));
+        let session = fixture.session_with(SessionOptions {
+            artifacts_env: Some(".gleon/runs/ci".to_owned()),
+            ..SessionOptions::default()
+        });
+        let host = PlatformKey::host();
+        fixture.run(&session, Mode::Compare, &png(4, 4, true));
+        let own = fixture
+            .root
+            .join(".gleon/runs/ci")
+            .join(host)
+            .join("test/goldens/a");
+        assert_eq!(entries(&own).len(), 3);
+        assert_eq!(
+            fixture.case().artifacts.unwrap().candidate,
+            Some(format!(
+                ".gleon/runs/ci/{host}/test/goldens/a/candidate.png"
+            ))
+        );
+        let (foreign_case, foreign_images) = write_foreign_case(&fixture, ".gleon/runs/ci");
+
+        let pass = fixture.run(&session, Mode::Compare, &png(4, 4, false));
+        assert_eq!(pass.verdict, Verdict::Identical);
+        assert!(entries(&own).is_empty());
+        assert_eq!(fixture.case().outcome, CaseOutcome::Identical);
+        assert!(CaseReport::parse(&fs::read(&foreign_case).unwrap()).is_ok());
+        assert_eq!(entries(&foreign_images).len(), 3);
+    }
+
+    #[test]
     fn test_unwritable_artifacts_are_a_warning() {
         let fixture = Fixture::new(Some(METRICS));
         fs::create_dir_all(fixture.root.join(".gleon/runs/latest")).unwrap();
@@ -1862,9 +2023,10 @@ screenshots:
         let finished = fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, true));
         assert_eq!(finished.verdict, Verdict::Mismatch);
         assert!(
-            finished.warning.starts_with(
-                "gleon: cannot update the artifacts .gleon/runs/latest/artifacts/test/goldens/a: "
-            ),
+            finished.warning.starts_with(&format!(
+                "gleon: cannot update the artifacts .gleon/runs/latest/artifacts/{}/test/goldens/a: ",
+                PlatformKey::host()
+            )),
             "{}",
             finished.warning
         );
@@ -2280,7 +2442,13 @@ metrics:
         });
         assert_eq!(fixture.case().outcome, CaseOutcome::Mismatch);
         assert_eq!(
-            entries(&fixture.root.join(".gleon/runs/latest/cases/test/goldens")),
+            entries(
+                &fixture
+                    .root
+                    .join(".gleon/runs/latest/cases")
+                    .join(PlatformKey::host())
+                    .join("test/goldens")
+            ),
             ["a.json"]
         );
         assert_eq!(fixture.failures().len(), 3, "no temporary files are left");

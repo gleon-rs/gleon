@@ -103,7 +103,7 @@ async fn run_report_inner(
         // GitHub Actions test-reporters), omitting non-standard visual image links.
         ReportFormat::Junit => ReportGenerator::generate_junit_xml(&cases)
             .with_context(|| "Failed to generate JUnit XML report")?,
-        // The case reports of the run (`case.v2.json` each), for scripts and CI tooling.
+        // The case reports of the run (`case.v3.json` each), for scripts and CI tooling.
         ReportFormat::Json => serde_json::to_string_pretty(cases.reports())
             .with_context(|| "Failed to serialize report to JSON")?,
     };
@@ -154,7 +154,7 @@ mod tests {
     fn copy_of_run(temp: &tempfile::TempDir) -> RunSource {
         let cases = temp.path().join("runs/latest/cases");
         let report = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "name": "test/enc",
             "golden": {"path": "test/enc.png", "sha256": "1".repeat(64)},
             "candidate": {"sha256": "0".repeat(64)},
@@ -164,12 +164,16 @@ mod tests {
             "outcome": "mismatch",
             "metrics": {"kind": "pixel", "total_pixels": 4, "diff_pixels": 1, "diff_ratio": 0.25, "headroom": -0.25},
             "regions": [],
-            "artifacts": {"candidate": ".gleon/runs/latest/artifacts/test/enc/candidate.png"},
+            "artifacts": {"candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/enc/candidate.png"},
             "timings_ms": {"total": 1.0},
             "recorded_at": "2026-10-01T12:00:00Z"
         });
-        std::fs::create_dir_all(cases.join("test")).unwrap();
-        std::fs::write(cases.join("test/enc.json"), report.to_string()).unwrap();
+        std::fs::create_dir_all(cases.join("macos-aarch64/test")).unwrap();
+        std::fs::write(
+            cases.join("macos-aarch64/test/enc.json"),
+            report.to_string(),
+        )
+        .unwrap();
         RunSource::Copy(temp.path().join("runs/latest"))
     }
 
@@ -204,7 +208,7 @@ mod tests {
                 "<failure message=\"Mismatch: 25.00% (1 of 4px) differ\"",
             ),
             (ReportFormat::Html, "test&#x2f;enc"),
-            (ReportFormat::Json, "\"schema_version\": 2"),
+            (ReportFormat::Json, "\"schema_version\": 3"),
         ] {
             let out = temp.path().join(format!("out.{format:?}"));
             let res = run_report(&DummyEnv, None, format, &cases, Some(7), Some(&out)).await;

@@ -12,7 +12,7 @@ pub mod stage;
 pub mod status;
 pub(crate) mod sync;
 
-pub use approve::{ApproveError, ApproveResult, approve_workspace};
+pub use approve::{ApproveError, ApproveResult, ApprovedCase, approve_workspace};
 pub use clean::{CleanError, CleanOptions, CleanResult, clean_workspace};
 pub use diff::{DiffOpError, DiffReportResult, run_diff};
 pub use gc::{

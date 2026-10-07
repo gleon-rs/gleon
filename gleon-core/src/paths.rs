@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use gleon_model::platform::PlatformKey;
+
 /// Resolves paths within a single `.gleon` workspace rooted at a given base directory.
 ///
 /// Construction is a pure path computation (no filesystem access); callers decide whether
@@ -40,10 +42,10 @@ impl GleonPaths {
         self.gleon_dir().join("manifests")
     }
 
-    /// `.gleon/manifests/<platform_key>/`
+    /// `.gleon/manifests/<platform>/`
     #[must_use]
-    pub fn manifests_dir(&self, platform_key: &str) -> PathBuf {
-        self.manifests_root().join(platform_key)
+    pub fn manifests_dir(&self, platform: &PlatformKey) -> PathBuf {
+        self.manifests_root().join(platform)
     }
 
     /// `.gleon/blobs/`
@@ -144,7 +146,7 @@ mod tests {
         let paths = GleonPaths::new("/workspace");
         assert_eq!(paths.gleon_dir(), Path::new("/workspace/.gleon"));
         assert_eq!(
-            paths.manifests_dir("macos-aarch64"),
+            paths.manifests_dir(&PlatformKey::parse("macos-aarch64").unwrap()),
             Path::new("/workspace/.gleon/manifests/macos-aarch64")
         );
         assert_eq!(

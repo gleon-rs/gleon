@@ -5,7 +5,12 @@ use std::{
     path::{Component, Path},
 };
 
-use gleon_model::case::{CaseOutcome, CaseReport, text};
+use gleon_model::{
+    case::{CaseOutcome, CaseReport, text},
+    platform::PlatformKey,
+};
+
+use crate::cases::Cases;
 
 /// Lexically normalizes a path's components: collapses `foo/../` pairs and drops `.` segments,
 /// without touching the filesystem.
@@ -61,6 +66,22 @@ pub(super) fn image_link(path: &Path, report_dir: &Path) -> String {
         ".".to_owned()
     } else {
         parts.join("/")
+    }
+}
+
+/// The name of a case as the reports show it: its test name, followed by the key of its platform
+/// (`key`) when the run spans several platforms (`test/goldens/a (linux-x86_64)`), so the cases of
+/// one golden on two platforms are told apart. Borrowed (unchanged output) for a run of one
+/// platform.
+pub(super) fn case_name<'a>(
+    cases: &Cases,
+    key: &PlatformKey,
+    report: &'a CaseReport,
+) -> Cow<'a, str> {
+    if cases.spans_platforms() {
+        Cow::Owned(format!("{} ({key})", report.name))
+    } else {
+        Cow::Borrowed(&report.name)
     }
 }
 

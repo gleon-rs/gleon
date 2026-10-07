@@ -276,7 +276,9 @@ pub enum Commands {
     },
     /// Approve the candidates of failed cases as new baselines
     Approve {
-        /// Optional test names or golden paths to approve (filters by prefix)
+        /// Optional test names, golden paths or `<platform>/<test name>` (as under `cases/`) to
+        /// approve (filters by prefix of whole names); a bare platform key approves every case of
+        /// that platform
         #[arg(value_name = "PATHS")]
         paths: Vec<std::path::PathBuf>,
 

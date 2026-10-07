@@ -351,6 +351,7 @@ mod tests {
         std::fs::create_dir_all(latest.join("cases")).unwrap();
         RunInfo {
             run_id: RunId::new("started").unwrap(),
+            platform: gleon_core::platform::PlatformKey::host().clone(),
             started_at: chrono::Utc::now(),
             command: vec!["flutter".to_owned()],
         }

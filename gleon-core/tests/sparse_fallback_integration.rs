@@ -78,8 +78,8 @@ async fn test_sparse_multi_platform_fallback_full_lifecycle() {
         labels: BTreeMap::new(),
     };
 
-    let macos_key = macos_platform.to_key().unwrap();
-    let linux_key = linux_platform.to_key().unwrap();
+    let macos_key = macos_platform.key().unwrap();
+    let linux_key = linux_platform.key().unwrap();
 
     let config_yaml = r#"
 required_version: ">=0.1.0"
@@ -150,11 +150,12 @@ screenshots:
     // Step 3: Approve t1 on Linux
     // -------------------------------------------------------------------------
     let approve_res = approve_workspace(&linux_ctx, &[], &[], None).unwrap();
-    assert_eq!(approve_res.approved_test_cases.len(), 1);
-    assert_eq!(
-        approve_res.approved_test_cases,
-        vec!["test/goldens/t1".to_string()]
-    );
+    let approved: Vec<_> = approve_res
+        .approved
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(approved, [format!("{linux_key}/test/goldens/t1")]);
 
     let linux_manifests_dir = gleon_dir.join("manifests").join(linux_key);
     // Linux directory must contain ONLY 1 override manifest (test/goldens/t1.json)
@@ -224,7 +225,7 @@ screenshots:
 
     // Approve on Linux: since new image matches macOS fallback baseline, override is pruned
     let approve_2 = approve_workspace(&linux_ctx, &[], &[], None).unwrap();
-    assert_eq!(approve_2.approved_test_cases.len(), 1);
+    assert_eq!(approve_2.approved.len(), 1);
 
     // Linux override manifest must now be deleted from disk
     assert!(!linux_manifests_dir.join("test/goldens/t1.json").exists());

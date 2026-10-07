@@ -16,6 +16,7 @@ use crate::{
     context::{ContextError, ResolvedContext},
     manifest::{ImageHash, ManifestError, SingleTestManifest, WorkspaceIndex},
     paths::GleonPaths,
+    platform::PlatformKey,
     scanner::{FileScanner, ScannerError, TestCase},
 };
 
@@ -75,10 +76,10 @@ pub fn ensure_initialized(base_dir: &Path) -> Result<GleonPaths, CoreError> {
 ///
 /// # Errors
 /// Returns [`CoreError::Context`] if the platform identity fails segment validation.
-pub fn platform_key(context: &ResolvedContext) -> Result<String, CoreError> {
+pub fn platform_key(context: &ResolvedContext) -> Result<PlatformKey, CoreError> {
     context
         .platform
-        .to_key()
+        .key()
         .map_err(|e| CoreError::Context(ContextError::Platform(e)))
 }
 
@@ -92,8 +93,8 @@ pub fn platform_key(context: &ResolvedContext) -> Result<String, CoreError> {
 /// Returns [`CoreError::Manifest`] if either index fails to load.
 pub fn load_index_with_fallback(
     paths: &GleonPaths,
-    platform_key: &str,
-    fallback_platform_key: Option<&str>,
+    platform_key: &PlatformKey,
+    fallback_platform_key: Option<&PlatformKey>,
 ) -> Result<(WorkspaceIndex, Option<WorkspaceIndex>), CoreError> {
     let manifests_dir = paths.manifests_dir(platform_key);
     let workspace_index = WorkspaceIndex::load(&manifests_dir).map_err(CoreError::Manifest)?;
@@ -120,19 +121,19 @@ pub fn load_index_with_fallback(
 /// Returns [`CoreError::Manifest`] if either index fails to load.
 pub fn load_merged_index_with_fallback(
     paths: &GleonPaths,
-    platform_key: &str,
-    fallback_platform_key: Option<&str>,
+    platform_key: &PlatformKey,
+    fallback_platform_key: Option<&PlatformKey>,
 ) -> Result<WorkspaceIndex, CoreError> {
     let (mut workspace_index, fallback_index) =
         load_index_with_fallback(paths, platform_key, fallback_platform_key)?;
 
-    if let Some(fb_index) = fallback_index
+    // A fallback index exists only for a fallback platform.
+    if let (Some(fb_index), Some(fallback)) = (fallback_index, fallback_platform_key)
         && !fb_index.is_empty()
     {
         tracing::info!(
-            "Using fallback platform '{}' for missing manifests on platform '{}'.",
-            fallback_platform_key.unwrap_or_default(),
-            platform_key
+            "Using fallback platform '{fallback}' for missing manifests on platform \
+             '{platform_key}'."
         );
         workspace_index.merge_fallback(fb_index);
     }
@@ -382,20 +383,23 @@ mod tests {
 
     #[test]
     fn test_load_index_with_fallback_merges_only_when_requested() {
+        let key = |key: &str| PlatformKey::parse(key).unwrap();
         let temp = tempdir().unwrap();
         let paths = GleonPaths::new(temp.path());
-        std::fs::create_dir_all(paths.manifests_dir("linux")).unwrap();
-        std::fs::create_dir_all(paths.manifests_dir("macos")).unwrap();
+        std::fs::create_dir_all(paths.manifests_dir(&key("linux"))).unwrap();
+        std::fs::create_dir_all(paths.manifests_dir(&key("macos"))).unwrap();
 
-        let (primary, fallback) = load_index_with_fallback(&paths, "linux", Some("macos")).unwrap();
+        let (primary, fallback) =
+            load_index_with_fallback(&paths, &key("linux"), Some(&key("macos"))).unwrap();
         assert!(primary.is_empty());
         assert!(fallback.is_some());
 
-        let (_, no_fallback) = load_index_with_fallback(&paths, "linux", None).unwrap();
+        let (_, no_fallback) = load_index_with_fallback(&paths, &key("linux"), None).unwrap();
         assert!(no_fallback.is_none());
 
         // Same platform as fallback: no fallback index loaded.
-        let (_, self_fallback) = load_index_with_fallback(&paths, "linux", Some("linux")).unwrap();
+        let (_, self_fallback) =
+            load_index_with_fallback(&paths, &key("linux"), Some(&key("linux"))).unwrap();
         assert!(self_fallback.is_none());
     }
 
@@ -573,9 +577,10 @@ mod tests {
 
     #[test]
     fn test_load_merged_index_with_fallback_non_empty() {
+        let key = |key: &str| PlatformKey::parse(key).unwrap();
         let temp = tempdir().unwrap();
         let paths = GleonPaths::new(temp.path());
-        let macos_manifests = paths.manifests_dir("macos");
+        let macos_manifests = paths.manifests_dir(&key("macos"));
         std::fs::create_dir_all(&macos_manifests).unwrap();
 
         let mut index = WorkspaceIndex::new();
@@ -593,8 +598,24 @@ mod tests {
             )
             .unwrap();
 
-        let merged = load_merged_index_with_fallback(&paths, "linux", Some("macos")).unwrap();
+        // `&File` is `io::Write`, so a shared file collects the formatted log.
+        let log_path = temp.path().join("merge.log");
+        let log = std::sync::Arc::new(std::fs::File::create(&log_path).unwrap());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(log)
+            .finish();
+        let merged = tracing::subscriber::with_default(subscriber, || {
+            load_merged_index_with_fallback(&paths, &key("linux"), Some(&key("macos"))).unwrap()
+        });
         assert_eq!(merged.len(), 1);
         assert!(merged.get("login").is_some());
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(
+            log.contains(
+                "Using fallback platform 'macos' for missing manifests on platform 'linux'"
+            ),
+            "{log}"
+        );
     }
 }

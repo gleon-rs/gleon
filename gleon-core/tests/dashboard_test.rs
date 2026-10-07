@@ -16,15 +16,20 @@
 use std::{num::NonZeroUsize, path::Path};
 
 use gleon_core::{
-    case::{CaseOutcome, Metrics},
+    case::{CaseOutcome, Metrics, RunId},
     cases::Cases,
     context::{ContextOptions, ResolvedContext},
     dashboard::{
         DashboardCompiler, DashboardError, DashboardHistory, DashboardOptions, RunHistoryEntry,
     },
     paths::GleonPaths,
+    platform::PlatformKey,
     storage::{ObjectStoreAdapter, StorageConfig},
 };
+
+fn key(key: &str) -> PlatformKey {
+    PlatformKey::parse(key).unwrap()
+}
 
 fn fixtures() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -53,11 +58,12 @@ fn run_with_a_failure_at(run_id: &str, offset: chrono::TimeDelta) -> Cases {
     }
     let temp = tempfile::tempdir().unwrap();
     for report in &mut reports {
-        report.run_id = Some(gleon_core::case::RunId::new(run_id).unwrap());
+        report.run_id = Some(RunId::new(run_id).unwrap());
         report.recorded_at += offset;
         let file = temp
             .path()
             .join("cases")
+            .join(report.platform_key().unwrap())
             .join(format!("{}.json", report.name));
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, serde_json::to_vec(&*report).unwrap()).unwrap();
@@ -122,11 +128,13 @@ async fn test_dashboard_compilation_and_history_lifecycle() {
     // Verify history.json on disk
     let history_json1 = std::fs::read_to_string(paths.history_file()).unwrap();
     let history1 = DashboardHistory::parse_or_empty(&history_json1, "test").unwrap();
-    assert_eq!(history1.schema_version, 2);
+    assert_eq!(history1.schema_version, 3);
+    assert_eq!(history1.runs[0].failures[0].platform, "linux-x86_64");
     assert_eq!(history1.runs.len(), 1);
     let run = &history1.runs[0];
     assert_eq!(run.id, "ci-1/linux-x86_64");
-    assert_eq!(run.platform, "linux-x86_64");
+    assert_eq!(run.platforms, [key("linux-x86_64")]);
+    assert_eq!(run.run_id.as_ref().map(RunId::as_str), Some("ci-1"));
     assert_eq!((run.summary.total, run.summary.failed), (2, 1));
     assert_eq!(
         run.timestamp.to_rfc3339(),
@@ -184,14 +192,16 @@ fn sample_history() -> DashboardHistory {
         dashboard::{RunSummary, TestHistoryEntry},
     };
 
+    // The platform is the run's (see below).
     let failure = |name: &str, outcome, message: Option<&str>| TestHistoryEntry {
         name: name.to_owned(),
+        platform: key("linux-x86_64"),
         outcome,
         error_kind: (outcome == CaseOutcome::Error).then_some(CaseErrorKind::Image),
         metrics: None,
         message: message.map(str::to_owned),
     };
-    let failures = vec![
+    let failures = [
         TestHistoryEntry {
             metrics: Some(Metrics::Pixel {
                 total_pixels: 60_000,
@@ -248,8 +258,16 @@ fn sample_history() -> DashboardHistory {
         .with_timezone(&chrono::Utc);
     let runs = (1..=200_i64)
         .map(|i| {
+            let platform = ["macos-aarch64", "linux-x86_64", "windows-x86_64"]
+                [usize::try_from(i % 3).unwrap()];
             let failures = if i % 25 == 0 {
-                failures.clone()
+                failures
+                    .iter()
+                    .map(|failure| TestHistoryEntry {
+                        platform: key(platform),
+                        ..failure.clone()
+                    })
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -257,9 +275,8 @@ fn sample_history() -> DashboardHistory {
                 id: format!("run-{i:04}"),
                 timestamp: start + chrono::TimeDelta::hours(i),
                 branch: ["main", "feature/checkout"][usize::try_from(i % 2).unwrap()].to_owned(),
-                platform: ["macos-aarch64", "linux-x86_64", "windows-x86_64"]
-                    [usize::try_from(i % 3).unwrap()]
-                .to_owned(),
+                platforms: vec![key(platform)],
+                run_id: None,
                 commit_sha: (i % 25 == 0).then(|| format!("{i:040x}")),
                 summary: RunSummary {
                     total: 40,
@@ -301,13 +318,13 @@ fn test_history_fixture_round_trip_and_truncation() {
     let mut history = sample_history();
     let cases = run_with_a_failure("ci-new");
     let entry = RunHistoryEntry::from_cases(
-        "ci-new/linux-x86_64",
         cases.recorded_at().unwrap(),
         "main",
-        "linux-x86_64",
         None,
         &cases,
+        &key("linux-x86_64"),
     );
+    assert_eq!(entry.id, "ci-new/linux-x86_64");
     history.append_run(entry.clone(), NonZeroUsize::new(200));
     assert_eq!(history.runs.len(), 200);
     assert_eq!(history.runs[0].id, "run-0002", "the oldest run is dropped");
@@ -364,4 +381,69 @@ async fn test_dashboard_push_without_storage_fails_fast() {
     )
     .await;
     assert!(matches!(err, Err(DashboardError::StorageNotConfigured)));
+}
+
+/// `gleon dashboard` on a joint run of two platforms (one run id) while its platforms arrive: the
+/// entry of the first platform is replaced by the entry of both, which names both.
+#[tokio::test]
+async fn test_dashboard_of_a_joint_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = GleonPaths::new(temp.path());
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
+    let run = temp.path().join("download/latest");
+    let linux = fixtures().join("cases/flutter-linux-x64/cases/linux-x86_64/test/goldens");
+    let platform_dir = |key: &str| run.join("cases").join(key).join("test/goldens");
+    // The macOS half of the run first: the Linux reports, recorded on macOS.
+    std::fs::create_dir_all(platform_dir("macos-aarch64")).unwrap();
+    for entry in std::fs::read_dir(&linux).unwrap() {
+        let path = entry.unwrap().path();
+        let mut report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        report["platform"] = serde_json::json!({"os": "macos", "arch": "aarch64"});
+        std::fs::write(
+            platform_dir("macos-aarch64").join(path.file_name().unwrap()),
+            report.to_string(),
+        )
+        .unwrap();
+    }
+    let record = || async {
+        DashboardCompiler::execute(
+            &paths,
+            &ctx,
+            &Cases::load(&run, None).unwrap(),
+            &DashboardOptions::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        DashboardHistory::parse_or_empty(
+            &std::fs::read_to_string(paths.history_file()).unwrap(),
+            "test",
+        )
+        .unwrap()
+    };
+    let first = record().await;
+    assert_eq!(first.runs.len(), 1);
+    assert_eq!(first.runs[0].id, "36918116203-1/macos-aarch64");
+
+    std::fs::create_dir_all(platform_dir("linux-x86_64")).unwrap();
+    for entry in std::fs::read_dir(&linux).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(
+            &path,
+            platform_dir("linux-x86_64").join(path.file_name().unwrap()),
+        )
+        .unwrap();
+    }
+    let joint = record().await;
+    assert_eq!(joint.runs.len(), 1, "{:?}", joint.runs);
+    let entry = &joint.runs[0];
+    assert_eq!(entry.id, "36918116203-1/linux-x86_64,macos-aarch64");
+    assert_eq!(entry.platforms, [key("linux-x86_64"), key("macos-aarch64")]);
+    assert_eq!((entry.summary.total, entry.summary.failed), (4, 0));
+    let html = std::fs::read_to_string(paths.dashboard_file()).unwrap();
+    assert!(
+        html.contains(r#"data-platforms="linux-x86_64 macos-aarch64""#),
+        "{html}"
+    );
 }

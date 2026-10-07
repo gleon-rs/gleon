@@ -59,6 +59,7 @@ fn prepare<'a>(
             let runs_latest = paths.runs_latest();
             RunInfo {
                 run_id: run_id.clone(),
+                platform: gleon_core::platform::PlatformKey::host().clone(),
                 started_at,
                 command: command.to_vec(),
             }

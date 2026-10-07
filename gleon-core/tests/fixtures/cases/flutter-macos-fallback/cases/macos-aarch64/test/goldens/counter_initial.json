@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "test/goldens/counter_initial",
   "golden": {
     "path": "test/goldens/macos-aarch64/counter_initial.png",
@@ -67,7 +67,7 @@
     }
   ],
   "artifacts": {
-    "candidate": ".gleon/runs/latest/artifacts/test/goldens/counter_initial/candidate.png"
+    "candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/goldens/counter_initial/candidate.png"
   },
   "timings_ms": {
     "total": 2.456,

@@ -65,7 +65,7 @@ async fn test_push_pull_file_scheme_lifecycle() {
     let stage_res = stage_workspace(&ctx, None).unwrap();
     assert_eq!(stage_res.total_screenshots_staged, 1);
 
-    let platform_key = ctx.platform.to_key().unwrap();
+    let platform_key = ctx.platform.key().unwrap();
     let manifest_dir = workspace_temp
         .path()
         .join(".gleon")
@@ -144,7 +144,7 @@ async fn test_push_missing_local_blob_fail_fast() {
 
     init_workspace(&ctx).unwrap();
 
-    let platform_key = ctx.platform.to_key().unwrap();
+    let platform_key = ctx.platform.key().unwrap();
     let manifest_dir = workspace_temp
         .path()
         .join(".gleon")
@@ -184,7 +184,7 @@ async fn test_pull_missing_remote_blob_fail_fast() {
 
     init_workspace(&ctx).unwrap();
 
-    let platform_key = ctx.platform.to_key().unwrap();
+    let platform_key = ctx.platform.key().unwrap();
     let manifest_dir = workspace_temp
         .path()
         .join(".gleon")

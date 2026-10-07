@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::{
     config::GleonConfig,
+    context::ContextError,
     ops::common::{CoreError, append_missing_gitignore_lines, create_new_file_with_content},
     paths::GleonPaths,
 };
@@ -35,10 +36,16 @@ pub struct InitResult {
 ///
 /// # Errors
 ///
-/// Returns an error if the `.gleon` directory tree cannot be created, if the default
+/// Returns an error if the platform has no key (nothing is created then), if the `.gleon`
+/// directory tree cannot be created, if the default
 /// `gleon.yaml` configuration fails to serialize, or if writing the `.gitignore`,
 /// `.env.template`, or `gleon.yaml` scaffold files fails.
 pub fn init_workspace(context: &crate::context::ResolvedContext) -> Result<InitResult, InitError> {
+    // Checked before anything is created: the manifests of the platform go to its directory.
+    let platform_key = context
+        .platform
+        .key()
+        .map_err(|e| CoreError::Context(ContextError::Platform(e)))?;
     let paths = GleonPaths::new(&context.base_dir);
     let gleon_dir = paths.gleon_dir();
     let blobs_dir = paths.blob_scheme_dir("sha256");
@@ -46,12 +53,7 @@ pub fn init_workspace(context: &crate::context::ResolvedContext) -> Result<InitR
 
     std::fs::create_dir_all(&blobs_dir).map_err(CoreError::Io)?;
     std::fs::create_dir_all(&runs_dir).map_err(CoreError::Io)?;
-
-    if let Ok(platform_key) = context.platform.to_key() {
-        std::fs::create_dir_all(paths.manifests_dir(&platform_key)).map_err(CoreError::Io)?;
-    } else {
-        std::fs::create_dir_all(paths.manifests_root()).map_err(CoreError::Io)?;
-    }
+    std::fs::create_dir_all(paths.manifests_dir(&platform_key)).map_err(CoreError::Io)?;
 
     // Scaffold .gleon/.gitignore idempotently to prevent committing blobs/ or runs/ artifacts
     append_missing_gitignore_lines(&paths.gitignore(), gleon_model::config::GITIGNORE_LINES)?;
@@ -96,7 +98,7 @@ pub fn init_workspace(context: &crate::context::ResolvedContext) -> Result<InitR
 )]
 mod tests {
     use super::*;
-    use crate::context::ResolvedContext;
+    use crate::context::{ContextError, ResolvedContext};
 
     #[test]
     fn test_init_workspace_creates_structure_and_config() {
@@ -136,12 +138,18 @@ mod tests {
         };
         ctx.platform.os = "invalid/os".to_string();
 
-        let res = init_workspace(&ctx);
-        assert!(res.is_ok());
-
-        // manifests should be created without a platform sub-directory
-        let manifests_dir = temp.path().join(".gleon").join("manifests");
-        assert!(manifests_dir.exists());
+        // An invalid platform fails before anything is created: a workspace without the
+        // manifests directory of its platform would only fail later, less clearly.
+        let err = init_workspace(&ctx).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                InitError::Core(CoreError::Context(ContextError::Platform(_)))
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("invalid/os"), "{err}");
+        assert!(!temp.path().join(".gleon").exists());
     }
 
     #[test]
