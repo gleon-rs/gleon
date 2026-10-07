@@ -40,6 +40,10 @@ use crate::{
 /// `source.tool` of the case reports `gleon diff` writes.
 pub const CLI_TOOL: &str = "gleon_cli";
 
+/// The file in `.gleon/runs/latest` locked while a `gleon diff` of a shared run id reads the
+/// run and renders its reports.
+const REPORTS_LOCK: &str = ".reports.lock";
+
 /// Errors that can occur during diff execution.
 #[derive(Debug, Error)]
 pub enum DiffOpError {
@@ -352,6 +356,28 @@ fn clear_previous_run(runs_latest: &Path, platform_key: &PlatformKey) -> Result<
     Ok(())
 }
 
+/// Locks [`REPORTS_LOCK`] in `runs_latest` until the returned file is dropped, waiting while
+/// another process holds it.
+///
+/// The processes of a shared run id (`gleon diff --platform` runs side by side) so read the run
+/// and render its reports one at a time: the last one read every case recorded before it, so an
+/// earlier one never overwrites its reports with fewer cases. The lock is the OS's, so it only
+/// orders processes of one machine; a container on a bind-mounted checkout may still interleave
+/// with its host, where `gleon report` after both renders the joint run.
+fn lock_reports(runs_latest: &Path) -> Result<std::fs::File, DiffOpError> {
+    let lock = || {
+        std::fs::create_dir_all(runs_latest)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(runs_latest.join(REPORTS_LOCK))?;
+        file.lock()?;
+        Ok(file)
+    };
+    lock().map_err(|e| CoreError::Io(e).into())
+}
+
 /// Executes diff comparison for the workspace at `base_dir`.
 ///
 /// # Errors
@@ -439,6 +465,11 @@ pub fn run_diff(
     // reports tell what `gleon diff` compared, never an integration's cases under a shared CI run
     // id. A run id of its own no other process shares: its run is these reports, so nothing is
     // read back.
+    let _rendering = options
+        .run_id
+        .is_some()
+        .then(|| lock_reports(&runs_dir))
+        .transpose()?;
     let joint = if options.run_id.is_some() {
         Cases::load(&runs_dir, Some(&run.run_id))?.retain(|report| report.source.tool == CLI_TOOL)
     } else {
@@ -755,6 +786,32 @@ mod tests {
         assert_eq!((alone.total_tests, alone.failed_tests), (1, 0));
         let md = std::fs::read_to_string(latest.join("report.md")).unwrap();
         assert!(md.contains("**Total Tests:** 1\n**Failed:** 0"), "{md}");
+    }
+
+    /// The processes of one run (`gleon diff --platform` runs side by side) render the joint
+    /// reports one at a time: the last one read the cases of every process before it, so an
+    /// earlier one never overwrites its reports with fewer cases.
+    #[test]
+    fn test_diff_renders_a_shared_run_one_process_at_a_time() {
+        let (temp, ctx) = staged_workspace();
+        let latest = temp.path().join(".gleon/runs/latest");
+        std::fs::create_dir_all(&latest).unwrap();
+        let held = std::fs::File::create(latest.join(REPORTS_LOCK)).unwrap();
+        held.lock().unwrap();
+        let options = DiffOptions {
+            run_id: Some(RunId::new("joint").unwrap()),
+            ..DiffOptions::default()
+        };
+
+        std::thread::scope(|scope| {
+            let diff = scope.spawn(|| run_diff(&ctx, &options));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(!diff.is_finished(), "renders only with the lock");
+            assert!(!latest.join("report.md").exists());
+            held.unlock().unwrap();
+            assert_eq!(diff.join().unwrap().unwrap().total_tests, 1);
+        });
+        assert!(latest.join("report.md").exists());
     }
 
     /// Bytes equal to the baseline's by hash are still checked as an image: a manifest of a file

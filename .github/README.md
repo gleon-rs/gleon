@@ -251,7 +251,8 @@ gleon approve linux-x86_64/test/goldens/a
 ```
 
 The platform is the test process's: an x86_64 Flutter under Rosetta on Apple silicon runs as
-`macos-x86_64` and keeps its own goldens there.
+`macos-x86_64` and keeps its own goldens there. The `platform` of `.gleon/gleon.yaml`,
+`GLEON_PLATFORM` and the platform flags set the CLI's platform only.
 
 Without `fallback_platform` every platform compares the shared goldens with text under
 `text_tolerance` (default 1). The case `name` and rule matching use the shared golden on every

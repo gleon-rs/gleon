@@ -524,14 +524,14 @@ fn candidates_of<'a>(
 /// `fallback`, then those of every other platform, each platform's together. Another platform
 /// prunes an override equal to the fallback platform's baseline against its manifests, so these
 /// must be final by then.
-fn write_order(
-    approval: &Approval<'_>,
+fn write_order<'a>(
+    approval: &Approval<'a>,
     fallback: Option<&PlatformKey>,
-) -> (u8, Option<PlatformKey>) {
+) -> (u8, Option<&'a PlatformKey>) {
     match approval {
         Approval::File { .. } => (0, None),
         Approval::Manifest { platform_key, .. } if Some(*platform_key) == fallback => (1, None),
-        Approval::Manifest { platform_key, .. } => (2, Some((*platform_key).clone())),
+        Approval::Manifest { platform_key, .. } => (2, Some(*platform_key)),
     }
 }
 
@@ -641,7 +641,7 @@ pub fn approve_workspace(
         .map(check)
         .collect::<Result<Vec<_>, _>>()?;
     let fallback = context.fallback_platform_key.as_ref();
-    approvals.sort_by_cached_key(|approval| write_order(approval, fallback));
+    approvals.sort_by_key(|approval| write_order(approval, fallback));
 
     let blobs_dir = gleon_paths.blob_scheme_dir("sha256");
     // The manifests of each platform, loaded once and updated as approvals are written: the

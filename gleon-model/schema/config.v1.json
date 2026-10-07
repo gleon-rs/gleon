@@ -36,7 +36,7 @@
       "$ref": "#/$defs/MetricsConfig"
     },
     "platform": {
-      "description": "The platform identifier for which these rules apply (e.g. macos-aarch64).",
+      "description": "The platform the CLI runs as (e.g. `macos-aarch64`, or `{renderer: impeller}` over the\ndetected OS and architecture); its flags and `GLEON_PLATFORM` override it.\n\nRead by the CLI only: an integration (the Flutter package) runs as its process's OS and\narchitecture, the name of the directory of that platform's own goldens.",
       "anyOf": [
         {
           "$ref": "#/$defs/PlatformConfig"

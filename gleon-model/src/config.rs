@@ -151,7 +151,11 @@ pub struct GleonConfig {
     /// Enforced by the CLI only; other readers (the Flutter package) just check its syntax.
     #[schemars(with = "String")]
     pub required_version: semver::VersionReq,
-    /// The platform identifier for which these rules apply (e.g. macos-aarch64).
+    /// The platform the CLI runs as (e.g. `macos-aarch64`, or `{renderer: impeller}` over the
+    /// detected OS and architecture); its flags and `GLEON_PLATFORM` override it.
+    ///
+    /// Read by the CLI only: an integration (the Flutter package) runs as its process's OS and
+    /// architecture, the name of the directory of that platform's own goldens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformConfig>,
     /// Optional fallback platform identifier used when current platform baselines are missing.
