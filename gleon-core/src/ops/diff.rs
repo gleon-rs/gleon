@@ -378,6 +378,29 @@ fn lock_reports(runs_latest: &Path) -> Result<std::fs::File, DiffOpError> {
     lock().map_err(|e| CoreError::Io(e).into())
 }
 
+/// Renders `report.md`, `junit.xml` and `report.html` of the run `run_id` into `runs_latest`.
+///
+/// A run id given to every process (`GLEON_RUN_ID`, `is_shared`) is the run of every platform
+/// sharing it, `gleon diff`'s cases only (never an integration's under a shared CI run id), read
+/// back under [`lock_reports`]. A run id of its own no other process shares: its run is `own`,
+/// the cases of this process, so nothing is read back.
+fn render_reports(
+    runs_latest: &Path,
+    run_id: &RunId,
+    is_shared: bool,
+    own: Vec<CaseReport>,
+) -> Result<(), DiffOpError> {
+    if !is_shared {
+        let own = Cases::new(runs_latest, own).with_run_id(run_id.clone());
+        return Ok(ReportGenerator::generate_all(runs_latest, &own)?);
+    }
+    let _rendering = lock_reports(runs_latest)?;
+    let joint =
+        Cases::load(runs_latest, Some(run_id))?.retain(|report| report.source.tool == CLI_TOOL);
+    ReportGenerator::generate_all(runs_latest, &joint)?;
+    Ok(())
+}
+
 /// Executes diff comparison for the workspace at `base_dir`.
 ///
 /// # Errors
@@ -408,7 +431,11 @@ pub fn run_diff(
     let runs_dir = paths.runs_latest();
     clear_previous_run(&runs_dir, &platform_key)?;
     // After clearing: a workspace without screenshots has no current run to approve from either.
+    // The reports of a shared run still render its other platforms' cases.
     if test_cases.is_empty() {
+        if let Some(run_id) = &options.run_id {
+            render_reports(&runs_dir, run_id, true, Vec::new())?;
+        }
         return Err(DiffOpError::NoScreenshots);
     }
 
@@ -461,21 +488,7 @@ pub fn run_diff(
         .iter()
         .filter(|report| report.outcome.is_failure())
         .count();
-    // With a given run id, the run of every platform sharing it, `gleon diff`'s cases only: the
-    // reports tell what `gleon diff` compared, never an integration's cases under a shared CI run
-    // id. A run id of its own no other process shares: its run is these reports, so nothing is
-    // read back.
-    let _rendering = options
-        .run_id
-        .is_some()
-        .then(|| lock_reports(&runs_dir))
-        .transpose()?;
-    let joint = if options.run_id.is_some() {
-        Cases::load(&runs_dir, Some(&run.run_id))?.retain(|report| report.source.tool == CLI_TOOL)
-    } else {
-        Cases::new(&runs_dir, reports).with_run_id(run.run_id)
-    };
-    ReportGenerator::generate_all(&runs_dir, &joint)?;
+    render_reports(&runs_dir, &run.run_id, options.run_id.is_some(), reports)?;
     if let Some(e) = first_error {
         return Err(e);
     }
@@ -786,6 +799,38 @@ mod tests {
         assert_eq!((alone.total_tests, alone.failed_tests), (1, 0));
         let md = std::fs::read_to_string(latest.join("report.md")).unwrap();
         assert!(md.contains("**Total Tests:** 1\n**Failed:** 0"), "{md}");
+    }
+
+    /// A platform of a shared run without screenshots fails, but the reports of the run still
+    /// render the cases of its other platforms.
+    #[test]
+    fn test_diff_without_screenshots_keeps_the_reports_of_its_run() {
+        let (temp, ctx) = staged_workspace();
+        let root = temp.path();
+        let options = DiffOptions {
+            run_id: Some(RunId::new("joint").unwrap()),
+            ..DiffOptions::default()
+        };
+        let foreign = ResolvedContext {
+            platform: PlatformInfo {
+                os: "freebsd".to_owned(),
+                arch: Some("riscv64".to_owned()),
+                renderer: None,
+                labels: std::collections::BTreeMap::new(),
+            },
+            ..ctx.clone()
+        };
+        run_diff(&foreign, &options).unwrap();
+
+        std::fs::remove_file(root.join("shots/a.png")).unwrap();
+        let err = run_diff(&ctx, &options).unwrap_err();
+        assert!(matches!(err, DiffOpError::NoScreenshots), "{err:?}");
+        let md = std::fs::read_to_string(root.join(".gleon/runs/latest/report.md")).unwrap();
+        assert!(md.contains("**Total Tests:** 1\n**Failed:** 1"), "{md}");
+        assert!(
+            md.contains("| shots/a | shots/a.png | ❌ Missing Baseline |"),
+            "{md}"
+        );
     }
 
     /// The processes of one run (`gleon diff --platform` runs side by side) render the joint
