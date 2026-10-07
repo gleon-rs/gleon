@@ -430,20 +430,27 @@ pub fn run_diff(
             }
         }
     }
-    // The run of every platform sharing the run id, `gleon diff`'s cases only: the reports tell
-    // what `gleon diff` compared, never an integration's cases under a shared CI run id.
-    let joint =
-        Cases::load(&runs_dir, Some(&run.run_id))?.retain(|report| report.source.tool == CLI_TOOL);
+    let total_tests = reports.len();
+    let failed_tests = reports
+        .iter()
+        .filter(|report| report.outcome.is_failure())
+        .count();
+    // With a given run id, the run of every platform sharing it, `gleon diff`'s cases only: the
+    // reports tell what `gleon diff` compared, never an integration's cases under a shared CI run
+    // id. A run id of its own no other process shares: its run is these reports, so nothing is
+    // read back.
+    let joint = if options.run_id.is_some() {
+        Cases::load(&runs_dir, Some(&run.run_id))?.retain(|report| report.source.tool == CLI_TOOL)
+    } else {
+        Cases::new(&runs_dir, reports).with_run_id(run.run_id)
+    };
     ReportGenerator::generate_all(&runs_dir, &joint)?;
     if let Some(e) = first_error {
         return Err(e);
     }
     Ok(DiffReportResult {
-        total_tests: reports.len(),
-        failed_tests: reports
-            .iter()
-            .filter(|report| report.outcome.is_failure())
-            .count(),
+        total_tests,
+        failed_tests,
         runs_dir,
     })
 }

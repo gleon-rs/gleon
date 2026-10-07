@@ -127,15 +127,14 @@ pub fn load_merged_index_with_fallback(
     let (mut workspace_index, fallback_index) =
         load_index_with_fallback(paths, platform_key, fallback_platform_key)?;
 
-    if let Some(fb_index) = fallback_index
+    // A fallback index exists only for a fallback platform.
+    if let (Some(fb_index), Some(fallback)) = (fallback_index, fallback_platform_key)
         && !fb_index.is_empty()
     {
-        if let Some(fallback) = fallback_platform_key {
-            tracing::info!(
-                "Using fallback platform '{fallback}' for missing manifests on platform \
-                 '{platform_key}'."
-            );
-        }
+        tracing::info!(
+            "Using fallback platform '{fallback}' for missing manifests on platform \
+             '{platform_key}'."
+        );
         workspace_index.merge_fallback(fb_index);
     }
 
@@ -599,9 +598,24 @@ mod tests {
             )
             .unwrap();
 
-        let merged =
-            load_merged_index_with_fallback(&paths, &key("linux"), Some(&key("macos"))).unwrap();
+        // `&File` is `io::Write`, so a shared file collects the formatted log.
+        let log_path = temp.path().join("merge.log");
+        let log = std::sync::Arc::new(std::fs::File::create(&log_path).unwrap());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(log)
+            .finish();
+        let merged = tracing::subscriber::with_default(subscriber, || {
+            load_merged_index_with_fallback(&paths, &key("linux"), Some(&key("macos"))).unwrap()
+        });
         assert_eq!(merged.len(), 1);
         assert!(merged.get("login").is_some());
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(
+            log.contains(
+                "Using fallback platform 'macos' for missing manifests on platform 'linux'"
+            ),
+            "{log}"
+        );
     }
 }

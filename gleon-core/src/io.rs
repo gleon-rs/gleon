@@ -180,6 +180,23 @@ mod tests {
 
     use super::*;
 
+    /// A panic of one worker reaches the caller, like it would on one thread.
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns threads over many items")]
+    fn test_map_files_passes_on_a_panic_of_a_worker() {
+        let files: Vec<usize> = (0..MIN_FILES_PER_THREAD * FILE_THREADS).collect();
+        let last = files.len() - 1;
+        let panic = std::panic::catch_unwind(|| {
+            map_files(&files, |&file| assert!(file != last, "file {file}"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            panic.downcast_ref::<String>().map(String::as_str),
+            Some(&*format!("file {last}"))
+        );
+        assert_eq!(map_files(&files, |&file| file * 2)[last], last * 2);
+    }
+
     #[test]
     #[cfg(all(unix, not(miri)))]
     fn test_write_file_atomically_new_file_is_group_world_readable() {

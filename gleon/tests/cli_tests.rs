@@ -824,7 +824,7 @@ fn test_dotenv_loading_integration() -> Result<(), Box<dyn std::error::Error>> {
 /// `extra` fields, in run `run-1`.
 fn case(name: &str, outcome: &str, extra: serde_json::Value) -> serde_json::Value {
     let mut report = serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "name": name,
         "golden": {"path": format!("{name}.png"), "sha256": "1".repeat(64)},
         "candidate": {"sha256": "0".repeat(64)},

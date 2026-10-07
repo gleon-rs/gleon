@@ -1176,7 +1176,10 @@ mod tests {
         assert_eq!(updated.verdict, golden::Verdict::Updated as u8);
         assert_eq!(std::fs::read(&golden_path).unwrap(), COUNTER_3);
         assert_eq!(case()["outcome"], "updated");
-        assert_eq!(case()["schema_version"], 2);
+        assert_eq!(
+            case()["schema_version"],
+            gleon_model::case::CASE_SCHEMA_VERSION
+        );
         assert_eq!(case()["run_id"], "ci-7");
         assert!(case().get("artifacts").is_none());
         gleon_session_free(Some(session));

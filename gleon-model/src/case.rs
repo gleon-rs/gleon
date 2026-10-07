@@ -7,7 +7,7 @@
 //!
 //! Case reports are written by the integrations (the Flutter package through `gleon-ffi`) and are
 //! meant as the one result format the gleon CLI reads too; the schema is committed as
-//! `schema/case.v2.json`. Enums are internally tagged (`"kind"`) and every name is `snake_case`, so
+//! `schema/case.v3.json`. Enums are internally tagged (`"kind"`) and every name is `snake_case`, so
 //! non-Rust writers never mirror Rust type names. Names and paths are checked when a report is
 //! read ([`CaseReport::parse`]), so a report never leads a reader outside its workspace.
 //!
@@ -38,7 +38,7 @@ use crate::{
 };
 
 /// Version of the case report format.
-pub const CASE_SCHEMA_VERSION: u32 = 2;
+pub const CASE_SCHEMA_VERSION: u32 = 3;
 
 /// Directory of the case reports, relative to `.gleon/`.
 pub const CASES_DIR: &str = "runs/latest/cases";
@@ -822,7 +822,7 @@ pub fn millis(duration: Duration) -> f64 {
 pub struct CaseReport {
     /// Version of this format (`CASE_SCHEMA_VERSION`).
     #[serde(deserialize_with = "schema_version")]
-    #[schemars(range(min = 2, max = 2))]
+    #[schemars(range(min = 3, max = 3))]
     pub schema_version: u32,
     /// Canonical test name: the golden path relative to the workspace root without extension, as
     /// lowercase `[a-z0-9_.-]` segments separated by `/`. It is the file name of the report under
@@ -2028,7 +2028,7 @@ mod tests {
         let mismatch = |platform: serde_json::Value, dir: &str, key: &str| {
             let path = |file: &str| format!("{dir}/{key}/test/goldens/a/{file}");
             serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "name": "test/goldens/a",
                 "golden": {"path": "test/goldens/a.png", "sha256": "1".repeat(64)},
                 "candidate": {"sha256": "0".repeat(64)},
@@ -2139,7 +2139,7 @@ mod tests {
     #[test]
     fn test_parsing_rejects_other_versions_and_paths_leaving_the_workspace() {
         let valid = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "name": "test/goldens/a",
             "golden": {"path": "test/goldens/A.png"},
             "candidate": {"sha256": "0".repeat(64)},
@@ -2186,16 +2186,20 @@ mod tests {
         assert_eq!((artifacts.golden, artifacts.diff), (None, None));
         assert!(artifacts.candidate.is_some());
 
-        let mut v1 = valid.clone();
-        v1["schema_version"] = 1.into();
-        assert!(matches!(
-            parse(&v1),
-            Err(CaseParseError::UnsupportedVersion(1))
-        ));
-        assert!(
-            serde_json::from_value::<CaseReport>(v1).is_err(),
-            "serde alone rejects other versions too"
-        );
+        // Version 2 had other rules (any `platform`, flat artifact paths): its writers are
+        // older integrations, told apart from broken reports.
+        for old in [1, 2] {
+            let mut older = valid.clone();
+            older["schema_version"] = old.into();
+            assert!(
+                matches!(parse(&older), Err(CaseParseError::UnsupportedVersion(v)) if v == old),
+                "{old}"
+            );
+            assert!(
+                serde_json::from_value::<CaseReport>(older).is_err(),
+                "serde alone rejects other versions too"
+            );
+        }
         assert!(matches!(
             CaseReport::parse(b"[]"),
             Err(CaseParseError::Json(_))
@@ -2231,8 +2235,8 @@ mod tests {
             );
         }
         assert_eq!(
-            CaseParseError::UnsupportedVersion(1).to_string(),
-            "case report schema 1 is not supported (this gleon reads 2)"
+            CaseParseError::UnsupportedVersion(2).to_string(),
+            "case report schema 2 is not supported (this gleon reads 3)"
         );
 
         let metrics = serde_json::json!({

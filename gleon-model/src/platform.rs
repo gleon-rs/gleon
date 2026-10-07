@@ -98,12 +98,6 @@ impl std::fmt::Display for PlatformKey {
     }
 }
 
-impl AsRef<str> for PlatformKey {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
 impl AsRef<Path> for PlatformKey {
     fn as_ref(&self) -> &Path {
         Path::new(&self.0)
@@ -132,20 +126,6 @@ impl<'de> Deserialize<'de> for PlatformKey {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let key = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
         Self::parse(&key).map_err(serde::de::Error::custom)
-    }
-}
-
-impl schemars::JsonSchema for PlatformKey {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "PlatformKey".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "description": "A platform key: lowercase `[a-z0-9_.-]` segments joined by `+` and `=`.",
-            "type": "string",
-            "pattern": "^[a-z0-9_.-]+([+=][a-z0-9_.-]+)*$"
-        })
     }
 }
 

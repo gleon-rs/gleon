@@ -1899,11 +1899,8 @@ screenshots:
     fn test_platforms_keep_each_others_reports_and_images() {
         let fixture = Fixture::new(Some(METRICS));
         let session = fixture.session(None);
-        let foreign = if PlatformKey::host() == "freebsd-riscv64" {
-            "netbsd-riscv64"
-        } else {
-            "freebsd-riscv64"
-        };
+        // Another platform: no process reports an OS `gleon`.
+        let foreign = "gleon-test";
         let runs = fixture.root.join(".gleon/runs/latest");
         let foreign_case = runs.join("cases").join(foreign).join("test/goldens/a.json");
         let foreign_candidate = runs

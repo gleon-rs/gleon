@@ -283,18 +283,23 @@ impl Cases {
         let root = workspace_root(runs_latest);
         let reports: Vec<_> = reports
             .into_iter()
-            .filter(|(key, report)| match selected.get(key) {
-                Some(Some(run_id)) => report.run_id.as_ref() == Some(run_id),
-                Some(None) => {
-                    report.outcome == CaseOutcome::Missing
-                        || root.is_none_or(|root| {
-                            // The compared golden: a platform's own one may not exist yet.
-                            root.join(report.golden.compared())
-                                .try_exists()
-                                .unwrap_or(true)
-                        })
-                }
-                None => false,
+            // Every platform of the reports has its selection.
+            .filter(|(key, report)| {
+                selected.get(key).is_some_and(|run| {
+                    run.as_ref().map_or_else(
+                        || {
+                            report.outcome == CaseOutcome::Missing
+                                || root.is_none_or(|root| {
+                                    // The compared golden: a platform's own one may not exist
+                                    // yet.
+                                    root.join(report.golden.compared())
+                                        .try_exists()
+                                        .unwrap_or(true)
+                                })
+                        },
+                        |run_id| report.run_id.as_ref() == Some(run_id),
+                    )
+                })
             })
             .collect();
         let without_run = reports
@@ -857,14 +862,9 @@ mod tests {
         cases.reports().iter().map(|r| r.name.as_str()).collect()
     }
 
-    /// A platform other than the host's.
+    /// A platform other than the host's: no process reports an OS `gleon`.
     fn foreign() -> PlatformConfig {
-        let key = if PlatformKey::host() == "freebsd-riscv64" {
-            "netbsd-riscv64"
-        } else {
-            "freebsd-riscv64"
-        };
-        PlatformConfig::Opaque(key.to_owned())
+        PlatformConfig::Opaque("gleon-test".to_owned())
     }
 
     #[test]
@@ -1077,6 +1077,44 @@ mod tests {
     /// A report lives at `cases/<its platform key>/<its name>.json`: a copy elsewhere (by hand,
     /// or the flat `cases/<name>.json` of an older gleon) is skipped with one warning, so one
     /// golden of one platform is one report.
+    /// A report built in code may have a platform without a key (no OS): it is skipped with a
+    /// warning, never filed under a made-up directory.
+    #[test]
+    fn test_new_skips_reports_whose_platform_has_no_key() {
+        let mut keyless = report("b", CaseOutcome::Match);
+        keyless.platform = PlatformConfig::Structured(PlatformFields::default());
+        let cases = Cases::new(
+            "runs/latest",
+            vec![report("a", CaseOutcome::Match), keyless],
+        );
+        assert_eq!(names(&cases), ["a"]);
+        assert_eq!(
+            cases.warnings(),
+            ["skipped 1 case report(s) whose platform has no key"]
+        );
+    }
+
+    /// Only `<key>/<name>.json` itself is the place of a report: a shorter path, another file
+    /// name or a path through `..` or `.` is not, whatever it resolves to.
+    #[test]
+    fn test_a_report_lies_at_its_key_and_name_only() {
+        let key = PlatformKey::parse("linux-x86_64").unwrap();
+        let lies_at = |path: &str| lies_at(Path::new(path), &key, "test/goldens/a");
+        assert!(lies_at("linux-x86_64/test/goldens/a.json"));
+        for elsewhere in [
+            "linux-x86_64/test/goldens.json",
+            "linux-x86_64/test/goldens/a.txt",
+            "linux-x86_64/test/goldens/a/b.json",
+            "test/goldens/a.json",
+            "linux-x86_64/test/../test/goldens/a.json",
+            "../linux-x86_64/test/goldens/a.json",
+            "./linux-x86_64/test/goldens/a.json",
+            "macos-aarch64/test/goldens/a.json",
+        ] {
+            assert!(!lies_at(elsewhere), "{elsewhere}");
+        }
+    }
+
     #[test]
     fn test_load_skips_reports_outside_their_platform_directory() {
         let (_temp, runs_latest) = workspace();

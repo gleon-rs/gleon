@@ -37,7 +37,7 @@ fn check(file: &str, schema: &schemars::Schema) {
 
 #[test]
 fn test_case_schema_is_current() {
-    check("case.v2.json", &schemars::schema_for!(CaseReport));
+    check("case.v3.json", &schemars::schema_for!(CaseReport));
 }
 
 #[test]

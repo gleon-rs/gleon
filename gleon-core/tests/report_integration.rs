@@ -107,7 +107,7 @@ fn test_reports_of_a_real_flutter_run() {
 /// The case report the gleon Flutter package wrote for a deleted golden of its example (macOS,
 /// metrics off), verbatim.
 const FLUTTER_MISSING_CASE: &str = r#"{
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "test/goldens/counter_three_taps",
   "golden": {
     "path": "test/goldens/counter_three_taps.png"
