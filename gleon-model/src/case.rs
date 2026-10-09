@@ -1231,6 +1231,18 @@ pub mod text {
         }
     }
 
+    /// `ratio` as an upper bound in percent: `≤ 6.25%`, or `<0.0001%` for a positive ratio too
+    /// small to show (never `≤ <0.0001%`).
+    #[must_use]
+    pub fn at_most(ratio: f64) -> String {
+        let shown = percent(ratio);
+        if shown.starts_with('<') {
+            format!("{shown}%")
+        } else {
+            format!("≤ {shown}%")
+        }
+    }
+
     /// A similarity with 3 to 4 decimals (`0.800`, `0.9995`).
     #[must_use]
     pub fn similarity(value: f64) -> String {
@@ -1259,7 +1271,7 @@ pub mod text {
         match *tolerance {
             Tolerance::Exact {} => "exact".to_owned(),
             Tolerance::Pixel { max_diff_ratio } => {
-                format!("pixel ≤ {}%", percent(max_diff_ratio))
+                format!("pixel {}", at_most(max_diff_ratio))
             }
             Tolerance::Ssim {
                 min_similarity,
@@ -1278,7 +1290,7 @@ pub mod text {
         if text.0 >= 1.0 {
             "text ignored".to_owned()
         } else {
-            format!("text ≤ {}% per tile", percent(text.0))
+            format!("text {} per tile", at_most(text.0))
         }
     }
 
@@ -1423,7 +1435,10 @@ pub mod text {
             assert_eq!(tolerance(&pixel(0.01)), "pixel ≤ 1.00%");
             assert_eq!(tolerance(&pixel(0.00001)), "pixel ≤ 0.001%");
             assert_eq!(tolerance(&pixel(-0.0)), "pixel ≤ 0.00%");
-            assert_eq!(tolerance(&pixel(1e-9)), "pixel ≤ <0.0001%");
+            assert_eq!(tolerance(&pixel(1e-9)), "pixel <0.0001%");
+            assert_eq!(text_tolerance(&TextTolerance(0.0625)), "text ≤ 6.25% per tile");
+            assert_eq!(text_tolerance(&TextTolerance(1e-9)), "text <0.0001% per tile");
+            assert_eq!(text_tolerance(&TextTolerance::DEFAULT), "text ignored");
             let ssim = |min_similarity, color_tolerance| Tolerance::Ssim {
                 min_similarity,
                 color_tolerance,
