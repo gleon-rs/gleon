@@ -74,7 +74,7 @@
       "type": "object",
       "properties": {
         "anti_alias": {
-          "description": "Whether to apply anti-aliasing detection.",
+          "description": "Reserved: accepted for compatibility of configs, without effect on any comparison.",
           "type": "boolean",
           "default": true
         },
@@ -120,7 +120,7 @@
       ]
     },
     "GlobPattern": {
-      "description": "Case-insensitive glob relative to the workspace root; `*` stays within a path segment, `**` crosses segments.",
+      "description": "Case-insensitive glob relative to the workspace root: `*` and `?` stay within a path segment, `**` (a whole segment) crosses segments, `[...]` is a character class; no `{a,b}` alternatives, no trailing `/`.",
       "type": "string"
     },
     "MaskRule": {

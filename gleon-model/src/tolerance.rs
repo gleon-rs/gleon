@@ -121,23 +121,26 @@ impl Tolerance {
         }
     }
 
+    /// The largest share of differing pixels a pixel comparison allows: exact is a zero
+    /// threshold (and so is SSIM, which has none).
+    #[must_use]
+    pub const fn max_diff_ratio(&self) -> f64 {
+        match *self {
+            Self::Pixel { max_diff_ratio } => max_diff_ratio,
+            Self::Exact {} | Self::Ssim { .. } => 0.0,
+        }
+    }
+
     /// The engine mode and configuration implementing this tolerance (exact is pixel mode with a
     /// zero threshold).
     #[must_use]
     pub fn engine_config(&self) -> (Mode, DiffConfig) {
         let base = DiffConfig::default();
         match *self {
-            Self::Exact {} => (
+            Self::Exact {} | Self::Pixel { .. } => (
                 Mode::Pixel,
                 DiffConfig {
-                    threshold: 0.0,
-                    ..base
-                },
-            ),
-            Self::Pixel { max_diff_ratio } => (
-                Mode::Pixel,
-                DiffConfig {
-                    threshold: max_diff_ratio,
+                    threshold: self.max_diff_ratio(),
                     ..base
                 },
             ),

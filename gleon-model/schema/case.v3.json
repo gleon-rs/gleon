@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "artifacts": {
-      "description": "The images kept for the case (failures only).",
+      "description": "The images kept for the case: of a failure, or the candidate of a recorded pass against\nanother platform's golden that differs from it.",
       "anyOf": [
         {
           "$ref": "#/$defs/Artifacts"
@@ -75,7 +75,7 @@
       "format": "date-time"
     },
     "regions": {
-      "description": "Per-region metrics (today a single whole-image region when `metrics` is present).",
+      "description": "Per-region metrics when `metrics` is present: the whole image, then the worst tile of text\n(when text was compared under a tolerance).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/RegionMetrics"
@@ -139,7 +139,7 @@
       "type": "object",
       "properties": {
         "candidate": {
-          "description": "The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`):\n`<artifacts dir>/<platform key>/<name>/candidate.png`.",
+          "description": "The candidate (mismatches, dimension mismatches, missing goldens and passes against another\nplatform's golden that differ from it, for `gleon approve`):\n`<artifacts dir>/<platform key>/<name>/candidate.png`.",
           "type": [
             "string",
             "null"
@@ -255,7 +255,7 @@
           "const": "dimension_mismatch"
         },
         {
-          "description": "Invalid input or options; see `message`.",
+          "description": "The golden could not be compared or written: invalid input or config, an I/O, image or\ninternal error (`error_kind`); see `message`.",
           "type": "string",
           "const": "error"
         },
@@ -444,7 +444,7 @@
               "const": "pixel"
             },
             "text": {
-              "description": "The text regions, compared under `comparison.text` instead (left out of the pixels\nabove); the worst tile is a `text` entry of `regions`.",
+              "description": "The text regions, compared under `comparison.text_tolerance` instead (left out of the pixels\nabove); the worst tile is a `text` entry of `regions`.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/TextMetrics"
@@ -455,7 +455,7 @@
               ]
             },
             "total_pixels": {
-              "description": "Pixels compared strictly (masked pixels and text under `comparison.text` left out).",
+              "description": "Pixels compared strictly (masked pixels and text under `comparison.text_tolerance` left out).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -655,7 +655,7 @@
           "const": "image"
         },
         {
-          "description": "Text compared under `comparison.text`: the tile of its text regions with the largest\nshare of differing pixels.",
+          "description": "Text compared under `comparison.text_tolerance`: the tile of its text regions with the largest\nshare of differing pixels.",
           "type": "string",
           "const": "text"
         }

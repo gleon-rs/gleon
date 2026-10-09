@@ -150,6 +150,10 @@ impl ResolvedContext {
         } else {
             (None, base_dir.to_path_buf())
         };
+        // `required_version` is the CLI's to enforce (integrations only check its syntax).
+        if let Some(config) = &config {
+            config.verify_version(env!("CARGO_PKG_VERSION"))?;
+        }
 
         let overrides = PlatformOverrides {
             os: options.os.as_deref(),
@@ -285,6 +289,31 @@ mod tests {
         assert!(context.config.is_some());
         assert_eq!(context.branch, "main");
         assert_eq!(context.target_branch, "develop");
+    }
+
+    /// A config requiring a newer CLI is refused before anything runs.
+    #[test]
+    fn test_a_config_for_a_newer_cli_is_refused() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("my_config.yaml");
+        std::fs::write(
+            &config_path,
+            "required_version: \">=99.0.0\"\nscreenshots:\n  - include: \"*.png\"\n",
+        )
+        .unwrap();
+        let options = ContextOptions {
+            config_path: Some(config_path),
+            ..Default::default()
+        };
+        let error = ResolvedContext::resolve(&options, dir.path(), &EmptyEnv).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ContextError::Config(ConfigError::IncompatibleVersion(required, current))
+                    if required == ">=99.0.0" && current == env!("CARGO_PKG_VERSION")
+            ),
+            "{error}"
+        );
     }
 
     #[test]

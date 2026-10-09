@@ -73,11 +73,7 @@ pub fn console_line(
             }),
             Tolerance::Pixel { .. } | Tolerance::Exact {},
         ) => {
-            // Exact is a zero threshold.
-            let max_diff_ratio = match *tolerance {
-                Tolerance::Pixel { max_diff_ratio } => max_diff_ratio,
-                Tolerance::Exact {} | Tolerance::Ssim { .. } => 0.0,
-            };
+            let max_diff_ratio = tolerance.max_diff_ratio();
             let mut detail = format!(
                 "pixel {}% ({diff_pixels} px, ≤{}%, {}%)",
                 percent(diff_ratio),
@@ -168,7 +164,7 @@ pub fn missing_fallback(platform: &str, shared_uri: &str) -> String {
     )
 }
 
-/// An invalid `.gleon/gleon.yaml`, `GLEON_METRICS` value or golden name.
+/// An invalid `.gleon/gleon.yaml`, or a golden whose name its rules cannot take.
 pub fn config_error(config_path: &str, message: &str) -> String {
     format!("gleon: {config_path}: {message}")
 }
@@ -358,25 +354,6 @@ mod tests {
             line(CaseOutcome::Missing, Some("ignored")),
             "gleon ? a.png  missing  1 ms"
         );
-    }
-
-    #[test]
-    fn test_outcome_names() {
-        for outcome in [
-            CaseOutcome::Identical,
-            CaseOutcome::Match,
-            CaseOutcome::Mismatch,
-            CaseOutcome::DimensionMismatch,
-            CaseOutcome::Error,
-            CaseOutcome::Updated,
-            CaseOutcome::Missing,
-        ] {
-            assert_eq!(
-                serde_json::to_value(outcome).unwrap(),
-                outcome.as_str(),
-                "the case report uses the same names"
-            );
-        }
     }
 
     #[test]

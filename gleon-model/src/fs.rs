@@ -32,6 +32,33 @@ pub fn write_atomically(path: &Path, bytes: &[u8], durability: Durability) -> io
     write_atomically_with(path, durability, |writer| writer.write_all(bytes))
 }
 
+/// Removes the file at `path`; a file that is not there is fine.
+///
+/// # Errors
+/// Returns any other I/O error of the removal.
+pub fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Writes `bytes` to `path` atomically ([`write_atomically`]), or without bytes removes `path`
+/// ([`remove_if_exists`]), so an image of an earlier outcome never passes for this one's.
+///
+/// # Errors
+/// Returns the I/O error of the write or the removal.
+pub fn write_or_remove(
+    path: &Path,
+    bytes: Option<&[u8]>,
+    durability: Durability,
+) -> io::Result<()> {
+    bytes.map_or_else(
+        || remove_if_exists(path),
+        |bytes| write_atomically(path, bytes, durability),
+    )
+}
+
 /// Writes the output of `write` to `path` atomically, creating missing parent directories.
 ///
 /// A symbolic link at `path` is written through (its target is replaced, the link stays). On

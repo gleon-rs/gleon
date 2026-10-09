@@ -121,6 +121,23 @@ fn test_init_command() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// A workspace whose `required_version` this CLI does not satisfy is refused.
+#[test]
+fn test_status_refuses_a_config_for_a_newer_cli() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = init_with_config(manifest_dir.join("tests/fixtures/config/newer-cli.yaml"));
+
+    gleon()
+        .current_dir(dir.path())
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Incompatible version. Required: >=99.0.0",
+        ));
+    Ok(())
+}
+
 #[test]
 fn test_status_linux_chrome() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

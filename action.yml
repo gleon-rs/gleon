@@ -6,7 +6,7 @@ branding:
 
 inputs:
   version:
-    description: "gleon version tag to download (e.g. 'v0.2.2' or 'latest')"
+    description: "gleon version tag to download (e.g. 'v0.3.0' or 'latest')"
     required: false
     default: "latest"
   license-key:

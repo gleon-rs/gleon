@@ -673,12 +673,11 @@ pub fn remove_reports_of(
         files.extend(images.filter_map(|path| artifact_path(runs_latest, path)));
     }
     // Removed on several threads, like they are read: one at a time takes seconds for a large run.
-    crate::io::map_files(&files, |path| match std::fs::remove_file(path) {
-        Err(source) if source.kind() != io::ErrorKind::NotFound => Err(CasesError::Io {
+    crate::io::map_files(&files, |path| {
+        gleon_model::fs::remove_if_exists(path).map_err(|source| CasesError::Io {
             path: path.clone(),
             source,
-        }),
-        _ => Ok(()),
+        })
     })
     .into_iter()
     .collect()

@@ -26,8 +26,9 @@
 //! where every pixel matters.
 
 use image::RgbaImage;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::{Pixels, par};
 
 /// Version of the decision policy; bumped whenever verdicts can change for the same inputs.
 pub const POLICY_VERSION: u32 = 2;
@@ -272,10 +273,10 @@ fn envelope_gate(base: Img<'_>, cand: Img<'_>, changed: Rect, tolerance: f32) ->
     let cw = changed.width();
     // Excess of every changed pixel (`f32::MIN` for unchanged ones), and its peak in the same pass.
     let mut excess = vec![f32::MIN; cw * changed.height()];
-    let peak_excess = excess
-        .par_chunks_mut(cw)
-        .enumerate()
-        .map(|(row, out)| {
+    let peak_excess = par::map_chunks_mut(
+        &mut excess,
+        cw,
+        |row, out| {
             let y = changed.y0 + row;
             let mut peak = f32::MIN;
             for (col, e) in out.iter_mut().enumerate() {
@@ -286,8 +287,10 @@ fn envelope_gate(base: Img<'_>, cand: Img<'_>, changed: Rect, tolerance: f32) ->
                 }
             }
             peak
-        })
-        .reduce(|| f32::MIN, f32::max);
+        },
+        || f32::MIN,
+        f32::max,
+    );
     // 8-connected components of unexplained pixels. Indices are `u32` (the analysis budget is far
     // below 2^32 pixels) and no per-component list is kept: a failing component is re-flooded to
     // mark it, so the workspace stays at a few bytes per pixel.
@@ -475,10 +478,10 @@ fn structural_gate(
     let weights = gaussian_weights();
     let ew = eval.width();
     let mut fails = vec![0u8; ew * eval.height()];
-    let (sum, min) = fails
-        .par_chunks_mut(ew * BAND_ROWS)
-        .enumerate()
-        .map(|(band_index, band_fails)| {
+    let (sum, min) = par::map_chunks_mut(
+        &mut fails,
+        ew * BAND_ROWS,
+        |band_index, band_fails| {
             let y0 = eval.y0 + band_index * BAND_ROWS;
             let y1 = (y0 + BAND_ROWS).min(eval.y1);
             ssim_band(
@@ -491,29 +494,39 @@ fn structural_gate(
                 threshold,
                 band_fails,
             )
-        })
-        .reduce(|| (0.0, 1.0), |a, b| (a.0 + b.0, a.1.min(b.1)));
+        },
+        || (0.0, 1.0),
+        |a, b| (a.0 + b.0, a.1.min(b.1)),
+    );
     (eval, fails, sum, min)
 }
 
 /// Bounding box and count of pixels whose RGBA bytes differ, or `None` if the images are identical.
 ///
-/// A plain scan: the coordinate division runs only for differing pixels, and a row-wise `memcmp`
-/// variant measured no faster (the cost of a failing comparison is dominated by the diff image).
+/// Row by row: an equal row is one `memcmp` (every row of a passing frame, most rows of a failing
+/// one), and only the rows that differ are scanned pixel by pixel.
 fn diff_bbox(base: Img<'_>, cand: Img<'_>) -> Option<(Rect, u64)> {
     let mut bbox = BBox::default();
     let mut count = 0u64;
-    for (i, (b, a)) in base
+    let row_bytes = base.width.max(1) * 4;
+    let rows = base
         .raw
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(cand.raw.as_chunks::<4>().0)
-        .enumerate()
-    {
-        if b != a {
-            bbox.add(i % base.width, i / base.width);
-            count += 1;
+        .chunks_exact(row_bytes)
+        .zip(cand.raw.chunks_exact(row_bytes));
+    for (y, (expected, found)) in rows.enumerate() {
+        if expected == found {
+            continue;
+        }
+        let pixels = expected
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(found.as_chunks::<4>().0);
+        for (x, (b, a)) in pixels.enumerate() {
+            if b != a {
+                bbox.add(x, y);
+                count += 1;
+            }
         }
     }
     bbox.0.map(|rect| (rect, count))
@@ -525,24 +538,30 @@ fn diff_bbox(base: Img<'_>, cand: Img<'_>) -> Option<(Rect, u64)> {
 /// Panics if `baseline` and `actual` have different dimensions, or if they exceed
 /// [`MAX_ANALYSIS_PIXELS`] (check [`fits_analysis_budget`] first; `compare_images` does).
 #[must_use]
-pub fn analyze(baseline: &RgbaImage, actual: &RgbaImage, policy: &SsimPolicy) -> SsimAnalysis {
+pub fn analyze<'a>(
+    baseline: impl Into<Pixels<'a>>,
+    actual: impl Into<Pixels<'a>>,
+    policy: &SsimPolicy,
+) -> SsimAnalysis {
+    let (baseline, actual) = (baseline.into(), actual.into());
     assert_eq!(
         baseline.dimensions(),
         actual.dimensions(),
         "Image dimensions must match for SSIM analysis"
     );
+    let (image_width, image_height) = baseline.dimensions();
     assert!(
-        fits_analysis_budget(baseline.width(), baseline.height()),
+        fits_analysis_budget(image_width, image_height),
         "Image exceeds the SSIM analysis budget"
     );
-    let (width, height) = (baseline.width() as usize, baseline.height() as usize);
+    let (width, height) = (image_width as usize, image_height as usize);
     let base = Img {
-        raw: baseline.as_raw(),
+        raw: baseline.raw(),
         width,
         height,
     };
     let cand = Img {
-        raw: actual.as_raw(),
+        raw: actual.raw(),
         width,
         height,
     };
@@ -611,8 +630,7 @@ pub fn analyze(baseline: &RgbaImage, actual: &RgbaImage, policy: &SsimPolicy) ->
         reason = "pixel counts are far below 2^52, so the f64 conversion is exact"
     )]
     let mean_ssim = (ssim_sum + (coarse_total - coarse_evaluated) as f64) / coarse_total as f64;
-    let diff_image =
-        (failing_pixels > 0).then(|| render_diff(baseline, actual, fail_rect, &failing));
+    let diff_image = (failing_pixels > 0).then(|| render_diff(base, cand, fail_rect, &failing));
     SsimAnalysis {
         mean_ssim,
         min_ssim: f64::from(min_ssim),
@@ -631,30 +649,42 @@ pub fn analyze(baseline: &RgbaImage, actual: &RgbaImage, policy: &SsimPolicy) ->
 }
 
 /// Baseline faded towards white, tolerated differences in yellow, failing pixels in red.
-fn render_diff(
-    baseline: &RgbaImage,
-    actual: &RgbaImage,
-    rect: Rect,
-    failing: &[bool],
-) -> RgbaImage {
+fn render_diff(base: Img<'_>, cand: Img<'_>, rect: Rect, failing: &[bool]) -> RgbaImage {
     let fw = rect.width();
-    RgbaImage::from_fn(baseline.width(), baseline.height(), |x, y| {
-        let (xu, yu) = (x as usize, y as usize);
-        if rect.contains(xu, yu) && failing[(yu - rect.y0) * fw + (xu - rect.x0)] {
-            return image::Rgba([255, 0, 0, 255]);
-        }
-        let b = baseline.get_pixel(x, y);
-        if b != actual.get_pixel(x, y) {
-            return image::Rgba([255, 200, 0, 255]);
-        }
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "luma is within [0, 255], so the faded value is within [170, 255]"
-        )]
-        let faded = luma_over_white(b.0).mul_add(1.0 / 3.0, 170.0) as u8;
-        image::Rgba([faded, faded, faded, 255])
-    })
+    let mut diff = vec![0u8; base.raw.len()];
+    let pixels = diff.as_chunks_mut::<4>().0.iter_mut().zip(
+        base.raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(cand.raw.as_chunks::<4>().0),
+    );
+    for (i, (pixel, (b, a))) in pixels.enumerate() {
+        let (x, y) = (i % base.width, i / base.width);
+        *pixel = if rect.contains(x, y) && failing[(y - rect.y0) * fw + (x - rect.x0)] {
+            [255, 0, 0, 255]
+        } else if b != a {
+            [255, 200, 0, 255]
+        } else {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "luma is within [0, 255], so the faded value is within [170, 255]"
+            )]
+            let faded = luma_over_white(*b).mul_add(1.0 / 3.0, 170.0) as u8;
+            [faded, faded, faded, 255]
+        };
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the dimensions came from u32 image sizes"
+    )]
+    let (width, height) = (base.width as u32, base.height as u32);
+    #[expect(
+        clippy::expect_used,
+        reason = "`diff` has the length of the baseline's pixels"
+    )]
+    RgbaImage::from_raw(width, height, diff).expect("the diff has width * height * 4 bytes")
 }
 
 #[cfg(all(test, not(miri)))]

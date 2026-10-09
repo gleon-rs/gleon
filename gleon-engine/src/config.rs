@@ -127,7 +127,7 @@ pub struct DiffConfig {
     #[serde(default = "default_threshold", deserialize_with = "deserialize_ratio")]
     #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
     pub threshold: f64,
-    /// Whether to apply anti-aliasing detection.
+    /// Reserved: accepted for compatibility of configs, without effect on any comparison.
     #[serde(default = "default_anti_alias")]
     pub anti_alias: bool,
     /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).

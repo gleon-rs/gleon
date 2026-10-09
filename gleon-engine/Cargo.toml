@@ -13,16 +13,21 @@ workspace = true
 
 [dependencies]
 bytemuck = { workspace = true }
-hex = { workspace = true }
+hex = { workspace = true, optional = true }
 image = { workspace = true }
-image_hasher = { workspace = true }
-rayon = { workspace = true }
+image_hasher = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [features]
+# Rayon inside a comparison: the CLI (`gleon-core`). `gleon-ffi` compares sequentially, since
+# test runners parallelize across worker processes.
+parallel = ["dep:rayon"]
+# Perceptual hashes of approved images (`gleon-core`).
+phash = ["dep:hex", "dep:image_hasher"]
 # JSON Schema descriptions of the config and result types, used by `gleon-model`.
 schemars = ["dep:schemars"]
 

@@ -1,5 +1,9 @@
-//! Comparing a golden with a candidate: the shared pipeline of `gleon_model::compare`, run
-//! single-threaded and timed.
+//! Comparing a golden with a candidate: the shared pipeline of `gleon_model::compare`, timed.
+//!
+//! The engine runs on the calling thread (`gleon-engine` without its `parallel` feature): the test
+//! runners of the integrations (`flutter test`, Playwright) parallelize across worker processes,
+//! each loading its own copy of the library, so a thread pool per process would only multiply
+//! threads (workers x cores) and add a hand-off per pass.
 
 #![forbid(unsafe_code)]
 
@@ -22,23 +26,6 @@ pub struct Timed {
     pub native: Duration,
 }
 
-/// Runs the engine single-threaded inside this library.
-///
-/// The test runners of the integrations (`flutter test`, Playwright) run their workers as
-/// processes, each loading its own copy of the library, and parallelize across them; an all-core
-/// rayon pool per process would multiply threads (workers x cores) and thrash. An in-process
-/// parallel runner would need the pool size as a session input instead. The CLI keeps its
-/// parallel global pool. Only the first initialization of the process-wide pool can succeed, so a
-/// failure means it is already set up.
-fn limit_engine_threads() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let _already_initialized = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build_global();
-    });
-}
-
 /// Compares the PNG `golden` with `candidate` under `tolerance` with `masks` and `text`, exactly
 /// like `gleon diff` (`gleon_model::compare::compare`).
 #[must_use]
@@ -49,7 +36,6 @@ pub fn compare(
     masks: &[Zone],
     text: Option<Text<'_>>,
 ) -> Timed {
-    limit_engine_threads();
     let started = Instant::now();
     let comparison = gleon_model::compare::compare(golden, candidate, tolerance, masks, text)
         .map_err(|error| Failure::new(error.kind().into(), error.to_string()));

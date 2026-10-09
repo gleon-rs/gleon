@@ -138,7 +138,9 @@ required_version: ">=0.1.0"
 
 # Rules for discovering and comparing screenshots. A file is excluded if it matches `exclude`;
 # otherwise the FIRST rule whose `include` matches applies (paths are matched case-insensitively,
-# relative to the workspace root, with `/` separators).
+# relative to the workspace root, with `/` separators). Globs: `*` and `?` stay within a path
+# segment, `**` (a whole segment) crosses segments, `[...]` is a character class; `{a,b}`
+# alternatives and a trailing `/` are config errors.
 screenshots:
   - include: "test/**/goldens/**/*.png" # Single pattern or list of glob patterns
     mode: pixel # 'pixel' (exact per-pixel compare) or 'ssim' (tolerates rendering noise, see below)
@@ -316,7 +318,7 @@ jobs:
 
 | Input               | Description                                                                                           | Default                       |
 | :------------------ | :---------------------------------------------------------------------------------------------------- | :---------------------------- |
-| `version`           | Release version tag to download (e.g. `'v0.2.2'` or `'latest'`)                                       | `'latest'`                    |
+| `version`           | Release version tag to download (e.g. `'v0.3.0'` or `'latest'`)                                       | `'latest'`                    |
 | `command`           | Execution mode: `'verify'` (pull + diff + report) or single command (`'diff'`, `'pull'`, `'approve'`) | `'diff'`                      |
 | `github-token`      | Token (`${{ secrets.GITHUB_TOKEN }}`) for release downloads and PR comments                           | `${{ github.token }}`         |
 | `target-branch`     | Target branch for baseline comparison                                                                 | PR base ref or default branch |

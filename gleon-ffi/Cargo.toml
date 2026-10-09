@@ -18,10 +18,11 @@ workspace = true
 chrono = { workspace = true }
 gleon-engine = { path = "../gleon-engine" }
 gleon-model = { path = "../gleon-model" }
-rayon = { workspace = true }
 safer-ffi = { workspace = true }
 
 [dev-dependencies]
+# Test builds only: the C header snapshot (`include/gleon_ffi.h`).
+safer-ffi = { workspace = true, features = ["headers"] }
 image = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

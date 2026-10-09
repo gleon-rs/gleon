@@ -63,42 +63,56 @@ pub enum ConfigError {
 
 /// A compiled glob pattern for fast file matching, serialized as a simple string.
 ///
-/// Matching is case-insensitive and `*` does not cross `/` (use `**` for that).
+/// Matching is case-insensitive and `*` does not cross `/` (use `**` for that); `?` is one
+/// character, `[...]`/`[!...]` a character class (the `glob` crate's syntax).
 #[derive(Debug, Clone)]
-pub struct GlobPattern {
-    glob: globset::Glob,
-    matcher: globset::GlobMatcher,
+pub struct GlobPattern(glob::Pattern);
+
+/// Why a string is no [`GlobPattern`].
+#[derive(Debug, thiserror::Error)]
+pub enum GlobError {
+    /// Invalid syntax: an unclosed `[`, or `**` that is not a whole path segment.
+    #[error(transparent)]
+    Syntax(#[from] glob::PatternError),
+    /// `{a,b}` alternatives, which test names can never contain literally.
+    #[error("`{{a,b}}` alternatives are not supported; list one pattern per alternative")]
+    Alternatives,
+    /// A trailing `/`, which no file path has.
+    #[error("a pattern cannot end with `/`; `dir/**` matches the files of a directory")]
+    TrailingSlash,
 }
+
+/// How every [`GlobPattern`] matches.
+const GLOB_MATCH: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: false,
+    require_literal_separator: true,
+    require_literal_leading_dot: false,
+};
 
 impl GlobPattern {
     /// Create a new `GlobPattern` from a raw string.
     ///
     /// # Errors
     /// Returns an error if `raw` is not a syntactically valid glob pattern.
-    pub fn new(raw: &str) -> Result<Self, globset::Error> {
-        let glob = globset::GlobBuilder::new(raw)
-            .literal_separator(true)
-            .case_insensitive(true)
-            .build()?;
-        let matcher = glob.compile_matcher();
-        Ok(Self { glob, matcher })
+    pub fn new(raw: &str) -> Result<Self, GlobError> {
+        if raw.contains(['{', '}']) {
+            return Err(GlobError::Alternatives);
+        }
+        if raw.ends_with('/') {
+            return Err(GlobError::TrailingSlash);
+        }
+        Ok(Self(glob::Pattern::new(raw)?))
     }
 
     /// Get the raw string representation.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        self.glob.glob()
-    }
-
-    /// Access the compiled `globset::Glob`.
-    #[must_use]
-    pub const fn as_glob(&self) -> &globset::Glob {
-        &self.glob
+        self.0.as_str()
     }
 
     /// Check if the path matches this pattern.
     pub fn is_match<P: AsRef<Path>>(&self, path: P) -> bool {
-        self.matcher.is_match(path)
+        self.0.matches_path_with(path.as_ref(), GLOB_MATCH)
     }
 }
 
@@ -127,7 +141,7 @@ impl schemars::JsonSchema for GlobPattern {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Case-insensitive glob relative to the workspace root; `*` stays within a path segment, `**` crosses segments."
+            "description": "Case-insensitive glob relative to the workspace root: `*` and `?` stay within a path segment, `**` (a whole segment) crosses segments, `[...]` is a character class; no `{a,b}` alternatives, no trailing `/`."
         })
     }
 }
@@ -265,9 +279,7 @@ impl ArtifactsDir {
     /// The directory inside the workspace at `root`.
     #[must_use]
     pub fn to_path(&self, root: &Path) -> PathBuf {
-        self.0
-            .split('/')
-            .fold(root.to_path_buf(), |dir, name| dir.join(name))
+        crate::naming::join_relative(root, &self.0)
     }
 }
 
@@ -1067,23 +1079,22 @@ screenshots:
         // 1. Literal path (no wildcards)
         let lit_pat: GlobPattern = serde_yaml::from_str("\"test/pic.png\"").unwrap();
         assert_eq!(lit_pat.as_str(), "test/pic.png");
-        let matcher = lit_pat.as_glob().compile_matcher();
-        assert!(matcher.is_match("test/pic.png"));
-        assert!(!matcher.is_match("test/other.png"));
-        assert!(!matcher.is_match("test/pic.png.bak"));
+        assert!(lit_pat.is_match("test/pic.png"));
+        assert!(lit_pat.is_match("Test/PIC.png"), "case-insensitive");
+        assert!(!lit_pat.is_match("test/other.png"));
+        assert!(!lit_pat.is_match("test/pic.png.bak"));
 
         // 2. Wildcard pattern
         let wild_pat: GlobPattern = serde_yaml::from_str("\"test/*.png\"").unwrap();
         assert_eq!(wild_pat.as_str(), "test/*.png");
-        let matcher = wild_pat.as_glob().compile_matcher();
-        assert!(matcher.is_match("test/pic.png"));
-        assert!(matcher.is_match("test/other.png"));
-        assert!(!matcher.is_match("test/dir/pic.png"));
+        assert!(wild_pat.is_match("test/pic.png"));
+        assert!(wild_pat.is_match("test/other.png"));
+        assert!(!wild_pat.is_match("test/dir/pic.png"));
 
         // 3. Double wildcard pattern
         let double_wild_pat: GlobPattern = serde_yaml::from_str("\"test/**/*.png\"").unwrap();
-        let matcher = double_wild_pat.as_glob().compile_matcher();
-        assert!(matcher.is_match("test/dir/pic.png"));
+        assert!(double_wild_pat.is_match("test/dir/pic.png"));
+        assert!(double_wild_pat.is_match("test/pic.png"));
 
         // 4. Invalid pattern (unclosed character class)
         let invalid: Result<GlobPattern, _> = serde_yaml::from_str("\"test/[a-z\"");

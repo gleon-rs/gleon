@@ -10,8 +10,6 @@
 use std::sync::Arc;
 
 use gleon_engine::config::Zone;
-use globset::{GlobSet, GlobSetBuilder};
-use serde::Serialize;
 
 use crate::{
     config::{GleonConfig, GlobPattern, ScreenshotRule},
@@ -19,17 +17,22 @@ use crate::{
     tolerance::Tolerance,
 };
 
-/// Compiles a `GlobSet` from a list of patterns.
-///
-/// # Errors
-/// Returns the underlying `globset::Error` if any pattern fails to compile (this should not
-/// happen for patterns already validated by [`GlobPattern`]).
-pub fn build_globset(patterns: &[GlobPattern]) -> Result<GlobSet, globset::Error> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(pattern.as_glob().clone());
+/// Globs of which any one matching is a match (a rule's `include`, the `exclude` list).
+#[derive(Debug, Clone, Default)]
+pub struct Globs(Vec<GlobPattern>);
+
+impl Globs {
+    /// Whether no glob is configured.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
-    builder.build()
+
+    /// Whether any glob matches `path` (canonical: lowercase, `/`-separated).
+    #[must_use]
+    pub fn is_match(&self, path: &str) -> bool {
+        self.0.iter().any(|glob| glob.is_match(path))
+    }
 }
 
 /// A golden path that cannot become a gleon test name.
@@ -55,8 +58,7 @@ pub enum Selection {
 }
 
 /// How a golden relates to the configured rules.
-#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuleMatch {
     /// `screenshots[index]` applies.
     Matched {
@@ -67,7 +69,6 @@ pub enum RuleMatch {
         /// The rule's tolerance.
         tolerance: Tolerance,
         /// The rule's tolerance of text (`pixel` mode only).
-        #[serde(skip_serializing_if = "Option::is_none")]
         text_tolerance: Option<crate::tolerance::TextTolerance>,
         /// Mask zones of the rule's masks whose `path` matches, in declaration order.
         masks: Vec<Zone>,
@@ -84,28 +85,27 @@ pub enum RuleMatch {
 /// from.
 #[derive(Debug)]
 pub struct RuleSet {
-    exclude: GlobSet,
-    rules: Vec<(GlobSet, Arc<ScreenshotRule>)>,
+    exclude: Globs,
+    rules: Vec<(Globs, Arc<ScreenshotRule>)>,
 }
 
 impl RuleSet {
-    /// Compiles the include and exclude globs of `config`.
-    ///
-    /// # Errors
-    /// Returns the underlying `globset::Error` if a glob set fails to compile.
-    pub fn new(config: &GleonConfig) -> Result<Self, globset::Error> {
-        let rules = config
-            .screenshots
-            .iter()
-            .map(|rule| build_globset(&rule.include).map(|set| (set, Arc::new(rule.clone()))))
-            .collect::<Result<_, _>>();
-        build_globset(&config.exclude)
-            .and_then(|exclude| rules.map(|rules| Self { exclude, rules }))
+    /// The include and exclude globs of `config`, compiled when it was parsed.
+    #[must_use]
+    pub fn new(config: &GleonConfig) -> Self {
+        Self {
+            exclude: Globs(config.exclude.clone()),
+            rules: config
+                .screenshots
+                .iter()
+                .map(|rule| (Globs(rule.include.clone()), Arc::new(rule.clone())))
+                .collect(),
+        }
     }
 
-    /// The compiled `exclude` globs (the scanner prunes directories with them while walking).
+    /// The `exclude` globs (the scanner prunes directories with them while walking).
     #[must_use]
-    pub const fn exclude_set(&self) -> &GlobSet {
+    pub const fn exclude_set(&self) -> &Globs {
         &self.exclude
     }
 
@@ -223,7 +223,7 @@ screenshots:
 "#;
 
     fn rules() -> RuleSet {
-        RuleSet::new(&GleonConfig::from_yaml_str(YAML).unwrap()).unwrap()
+        RuleSet::new(&GleonConfig::from_yaml_str(YAML).unwrap())
     }
 
     fn resolve(path: &str) -> RuleMatch {
@@ -340,28 +340,14 @@ screenshots:
     }
 
     #[test]
-    fn test_json_shape() {
-        assert_eq!(
-            serde_json::to_value(resolve("test/goldens/wip/a.png")).unwrap(),
-            serde_json::json!({"kind": "excluded"})
-        );
-        assert_eq!(
-            serde_json::to_value(resolve("test/unit/a.png")).unwrap(),
-            serde_json::json!({
-                "kind": "matched",
-                "index": 1,
-                "name": "test/unit/a",
-                "tolerance": {"kind": "pixel", "max_diff_ratio": 0.02},
-                "masks": []
-            })
-        );
-    }
-
-    #[test]
-    fn test_build_globset_matches_patterns() {
-        let patterns = vec![GlobPattern::new("*.png").unwrap()];
-        let set = build_globset(&patterns).unwrap();
-        assert!(set.is_match("a.png"));
-        assert!(!set.is_match("dir/a.png"));
+    fn test_globs_match_any_pattern() {
+        let globs = Globs(vec![
+            GlobPattern::new("*.png").unwrap(),
+            GlobPattern::new("shots/**").unwrap(),
+        ]);
+        assert!(globs.is_match("a.png"));
+        assert!(!globs.is_match("dir/a.png"));
+        assert!(globs.is_match("shots/dir/a.png"));
+        assert!(!Globs::default().is_match("a.png"));
     }
 }

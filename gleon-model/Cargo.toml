@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 gleon-engine = { path = "../gleon-engine", features = ["schemars"] }
 chrono = { workspace = true }
-globset = { workspace = true }
+glob = { workspace = true }
 image = { workspace = true }
 schemars = { workspace = true, features = ["chrono04"] }
 semver = { workspace = true }
@@ -27,4 +27,5 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+globset = { workspace = true }
 regex = { workspace = true }
