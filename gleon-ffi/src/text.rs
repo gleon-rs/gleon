@@ -13,7 +13,7 @@ pub use gleon_model::case::text::{dimension_summary, metrics_summary, text_toler
 use gleon_model::{
     case::{
         CaseOutcome, Metrics,
-        text::{MAX_DECIMALS, color, decimal, percent, signed, similarity},
+        text::{MAX_DECIMALS, at_most_tight, color, decimal, percent, signed, similarity},
     },
     tolerance::{TextTolerance, Tolerance},
 };
@@ -75,9 +75,9 @@ pub fn console_line(
         ) => {
             let max_diff_ratio = tolerance.max_diff_ratio();
             let mut detail = format!(
-                "pixel {}% ({diff_pixels} px, ≤{}%, {}%)",
+                "pixel {}% ({diff_pixels} px, {}, {}%)",
                 percent(diff_ratio),
-                percent(max_diff_ratio),
+                at_most_tight(max_diff_ratio),
                 signed(decimal(headroom * 100.0, 2, MAX_DECIMALS))
             );
             // Text can fail on its own, so its line shows it too; ignored text only its share.
@@ -92,9 +92,9 @@ pub fn console_line(
                 (Some(text), Some(TextTolerance(share))) => {
                     let _infallible = write!(
                         detail,
-                        "  text {}% of a tile (≤{}%, {}%)",
+                        "  text {}% of a tile ({}, {}%)",
                         percent(text.worst_tile_diff_ratio),
-                        percent(share),
+                        at_most_tight(share),
                         signed(decimal(text.headroom * 100.0, 2, MAX_DECIMALS))
                     );
                 }
@@ -284,6 +284,21 @@ mod tests {
                 None
             ),
             "gleon ✓ a.png  pixel 0.00% (0 px, ≤0.00%, +0.00%)  1 ms"
+        );
+        // A positive threshold too small to show is not `≤<0.0001%`.
+        assert_eq!(
+            console_line(
+                "a.png",
+                CaseOutcome::Match,
+                &Tolerance::Pixel {
+                    max_diff_ratio: 1e-9
+                },
+                None,
+                0.6,
+                Some(&unchanged),
+                None
+            ),
+            "gleon ✓ a.png  pixel 0.00% (0 px, <0.0001%, +0.00%)  1 ms"
         );
         let text_only = Metrics::Pixel {
             total_pixels: 100_000,

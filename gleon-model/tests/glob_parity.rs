@@ -129,6 +129,11 @@ fn test_former_globset_readings_are_errors() {
         "/build/**",
         "./build/**",
         "",
+        "../other/**",
+        "test/../goldens/*.png",
+        "test/./goldens/*.png",
+        "test//goldens/*.png",
+        "test/..",
     ] {
         assert!(GlobPattern::new(pattern).is_err(), "{pattern:?}");
     }

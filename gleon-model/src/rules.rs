@@ -17,7 +17,7 @@ use crate::{
     tolerance::Tolerance,
 };
 
-/// Globs of which any one matching is a match (a rule's `include`, the `exclude` list).
+/// Globs of which any one matching is a match (the `exclude` list).
 #[derive(Debug, Clone, Default)]
 pub struct Globs(Vec<GlobPattern>);
 
@@ -86,7 +86,7 @@ pub enum RuleMatch {
 #[derive(Debug)]
 pub struct RuleSet {
     exclude: Globs,
-    rules: Vec<(Globs, Arc<ScreenshotRule>)>,
+    rules: Vec<Arc<ScreenshotRule>>,
 }
 
 impl RuleSet {
@@ -98,7 +98,7 @@ impl RuleSet {
             rules: config
                 .screenshots
                 .iter()
-                .map(|rule| (Globs(rule.include.clone()), Arc::new(rule.clone())))
+                .map(|rule| Arc::new(rule.clone()))
                 .collect(),
         }
     }
@@ -115,7 +115,7 @@ impl RuleSet {
     /// Panics if `index` is out of range.
     #[must_use]
     pub fn rule(&self, index: usize) -> &Arc<ScreenshotRule> {
-        &self.rules[index].1
+        &self.rules[index]
     }
 
     /// Selects the rule of `path` (relative to the workspace root, either separator, any case).
@@ -153,7 +153,7 @@ impl RuleSet {
             .is_some_and(|ext| ext == "png");
         self.rules
             .iter()
-            .position(|(include, _)| is_png && include.is_match(normalized))
+            .position(|rule| is_png && rule.include.iter().any(|glob| glob.is_match(normalized)))
             .map_or(Selection::Unmatched, Selection::Rule)
     }
 

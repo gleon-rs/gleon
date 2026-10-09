@@ -546,11 +546,18 @@ impl Session {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
         }
-        // Resolved once: the workspace lookup and the path inside it both need it.
-        let canonical = self
-            .finds_workspaces
-            .then(|| canonical_file(golden).ok())
-            .flatten();
+        // Resolved once: the workspace lookup and the path inside it both need it. A path that
+        // cannot be resolved fails the call instead of silently comparing outside a workspace.
+        let canonical = if self.finds_workspaces {
+            Some(canonical_file(golden).map_err(|e| {
+                Failure::io(format!(
+                    "gleon: cannot resolve the golden {}: {e}",
+                    golden.display()
+                ))
+            })?)
+        } else {
+            None
+        };
         let workspace = canonical
             .as_deref()
             .and_then(|canonical| Some((self.workspace_of(canonical)?, canonical)));
@@ -778,6 +785,32 @@ metrics:
         assert!(
             plan.in_workspace.is_none(),
             "a missing directory is outside"
+        );
+    }
+
+    /// An unreadable directory is an I/O error, not a golden outside any workspace (which would
+    /// compare exact and warn about a missing `.gleon/gleon.yaml`).
+    #[cfg(unix)]
+    #[test]
+    fn test_an_unresolvable_golden_fails_instead_of_leaving_the_workspace() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_dir, root) = workspace(YAML, "a.png");
+        let locked = root.join("test/goldens");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let planned = session(None).plan(&locked.join("a.png"), None, vec![], None);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let Err(failure) = planned else {
+            panic!("an unreadable directory must fail the plan")
+        };
+        assert_eq!(failure.kind, ErrorKind::Io);
+        assert!(
+            failure
+                .message
+                .starts_with("gleon: cannot resolve the golden"),
+            "{}",
+            failure.message
         );
     }
 

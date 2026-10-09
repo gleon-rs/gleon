@@ -252,49 +252,64 @@ fn classify(
     let has_text = regions.text_tolerance.is_some() && !regions.text.is_empty();
     let width = image_width as usize;
     let mut classes = region_classes(image_width, image_height, regions, has_text);
+    let width = width.max(1);
+    // Blocks of whole rows of about `BLOCK` bytes: one task each with `parallel`.
+    let block = width * (BLOCK / 4 / width).max(1);
+    // Per block: (checked, differing, text, differing text) pixels.
+    let (checked_pixels, diff_pixels, text_pixels, text_diff) = par::map_chunks_mut(
+        &mut classes,
+        block,
+        |index, classes| {
+            let start = index * block * 4;
+            let end = start + classes.len() * 4;
+            let rows = classes
+                .chunks_exact_mut(width)
+                .zip(baseline.raw()[start..end].chunks_exact(width * 4))
+                .zip(actual.raw()[start..end].chunks_exact(width * 4));
+            let mut sums = (0, 0, 0, 0);
+            for ((classes, expected), found) in rows {
+                // An equal row (a whole passing frame, most rows of a failing one) is one
+                // `memcmp`: its pixels keep their classes and are only counted.
+                if expected == found {
+                    sums.0 += count(classes, Class::Strict);
+                    sums.2 += count(classes, Class::Text);
+                    continue;
+                }
+                let pairs = expected
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(found.as_chunks::<4>().0);
+                for (class, (expected, found)) in classes.iter_mut().zip(pairs) {
+                    match class {
+                        Class::Strict => {
+                            sums.0 += 1;
+                            if expected != found {
+                                sums.1 += 1;
+                                *class = Class::StrictDiff;
+                            }
+                        }
+                        Class::Text => {
+                            sums.2 += 1;
+                            if expected != found {
+                                sums.3 += 1;
+                                *class = Class::TextDiff;
+                            }
+                        }
+                        Class::StrictDiff | Class::TextDiff | Class::Masked => {}
+                    }
+                }
+            }
+            sums
+        },
+        || (0, 0, 0, 0),
+        |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
+    );
     let mut analysis = PixelAnalysis {
-        checked_pixels: 0,
-        diff_pixels: 0,
+        checked_pixels,
+        diff_pixels,
         text: None,
     };
-    let (mut text_pixels, mut text_diff) = (0, 0);
-    let rows = classes
-        .chunks_exact_mut(width.max(1))
-        .zip(baseline.raw().chunks_exact(width.max(1) * 4))
-        .zip(actual.raw().chunks_exact(width.max(1) * 4));
-    for ((classes, expected), found) in rows {
-        // An equal row (a whole passing frame, most rows of a failing one) is one `memcmp`: its
-        // pixels keep their classes and are only counted.
-        if expected == found {
-            analysis.checked_pixels += count(classes, Class::Strict);
-            text_pixels += count(classes, Class::Text);
-            continue;
-        }
-        let pairs = expected
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(found.as_chunks::<4>().0);
-        for (class, (expected, found)) in classes.iter_mut().zip(pairs) {
-            match class {
-                Class::Strict => {
-                    analysis.checked_pixels += 1;
-                    if expected != found {
-                        analysis.diff_pixels += 1;
-                        *class = Class::StrictDiff;
-                    }
-                }
-                Class::Text => {
-                    text_pixels += 1;
-                    if expected != found {
-                        text_diff += 1;
-                        *class = Class::TextDiff;
-                    }
-                }
-                Class::StrictDiff | Class::TextDiff | Class::Masked => {}
-            }
-        }
-    }
     if has_text {
         analysis.text = Some(TextAnalysis {
             pixels: text_pixels,
@@ -459,6 +474,10 @@ fn add_row(columns: &mut [u64], row: &[Class], add: bool) {
     }
 }
 
+/// Bytes per task of a pixel pass with `parallel` (whole pixels, or whole rows): enough work to
+/// outweigh a task, and an equal block of [`count_mismatched_pixels`] is one `memcmp`.
+const BLOCK: usize = 1 << 20;
+
 /// The pixels whose RGBA bytes differ; equal images take one `memcmp`.
 ///
 /// # Panics
@@ -469,13 +488,26 @@ fn count_mismatched_pixels(baseline: Pixels<'_>, actual: Pixels<'_>) -> u64 {
     if baseline.raw() == actual.raw() {
         return 0;
     }
-    let pairs = baseline
-        .raw()
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(actual.raw().as_chunks::<4>().0);
-    pairs.filter(|(expected, found)| expected != found).count() as u64
+    let found = actual.raw();
+    par::map_chunks(
+        baseline.raw(),
+        BLOCK,
+        |index, expected| {
+            let start = index * BLOCK;
+            let found = &found[start..start + expected.len()];
+            if expected == found {
+                return 0;
+            }
+            let pairs = expected
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(found.as_chunks::<4>().0);
+            pairs.filter(|(expected, found)| expected != found).count() as u64
+        },
+        || 0,
+        |a, b| a + b,
+    )
 }
 
 #[cfg(all(test, not(miri)))]

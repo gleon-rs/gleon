@@ -1235,11 +1235,21 @@ pub mod text {
     /// small to show (never `≤ <0.0001%`).
     #[must_use]
     pub fn at_most(ratio: f64) -> String {
+        bound(ratio, " ")
+    }
+
+    /// [`at_most`] without the space, as in console lines: `≤6.25%`, `<0.0001%`.
+    #[must_use]
+    pub fn at_most_tight(ratio: f64) -> String {
+        bound(ratio, "")
+    }
+
+    fn bound(ratio: f64, gap: &str) -> String {
         let shown = percent(ratio);
         if shown.starts_with('<') {
             format!("{shown}%")
         } else {
-            format!("≤ {shown}%")
+            format!("≤{gap}{shown}%")
         }
     }
 
@@ -1436,9 +1446,17 @@ pub mod text {
             assert_eq!(tolerance(&pixel(0.00001)), "pixel ≤ 0.001%");
             assert_eq!(tolerance(&pixel(-0.0)), "pixel ≤ 0.00%");
             assert_eq!(tolerance(&pixel(1e-9)), "pixel <0.0001%");
-            assert_eq!(text_tolerance(&TextTolerance(0.0625)), "text ≤ 6.25% per tile");
-            assert_eq!(text_tolerance(&TextTolerance(1e-9)), "text <0.0001% per tile");
+            assert_eq!(
+                text_tolerance(&TextTolerance(0.0625)),
+                "text ≤ 6.25% per tile"
+            );
+            assert_eq!(
+                text_tolerance(&TextTolerance(1e-9)),
+                "text <0.0001% per tile"
+            );
             assert_eq!(text_tolerance(&TextTolerance::DEFAULT), "text ignored");
+            assert_eq!(at_most_tight(0.0625), "≤6.25%");
+            assert_eq!(at_most_tight(1e-9), "<0.0001%");
             let ssim = |min_similarity, color_tolerance| Tolerance::Ssim {
                 min_similarity,
                 color_tolerance,

@@ -4,7 +4,8 @@
 //! a cross-thread hand-off per pass).
 //!
 //! Both variants visit the same chunks and combine the same values; only the order of a float
-//! reduction may differ (as it does between thread counts).
+//! reduction may differ (as it does between thread counts). Data of one chunk stays on the
+//! calling thread either way: a pool hand-off would cost more than it saves.
 
 /// Maps every `size`-element chunk of `data` (with its index) and reduces the results.
 pub fn map_chunks_mut<T, R>(
@@ -19,20 +20,45 @@ where
     R: Send,
 {
     #[cfg(feature = "parallel")]
-    {
+    if data.len() > size {
         use rayon::prelude::*;
-        data.par_chunks_mut(size)
+        return data
+            .par_chunks_mut(size)
             .enumerate()
             .map(|(index, chunk)| map(index, chunk))
-            .reduce(identity, reduce)
+            .reduce(identity, reduce);
     }
-    #[cfg(not(feature = "parallel"))]
-    {
-        data.chunks_mut(size)
+    data.chunks_mut(size)
+        .enumerate()
+        .map(|(index, chunk)| map(index, chunk))
+        .fold(identity(), reduce)
+}
+
+/// Maps every `size`-element chunk of `data` (with its index) and reduces the results.
+pub fn map_chunks<T, R>(
+    data: &[T],
+    size: usize,
+    map: impl Fn(usize, &[T]) -> R + Sync + Send,
+    identity: impl Fn() -> R + Sync + Send,
+    reduce: impl Fn(R, R) -> R + Sync + Send,
+) -> R
+where
+    T: Sync,
+    R: Send,
+{
+    #[cfg(feature = "parallel")]
+    if data.len() > size {
+        use rayon::prelude::*;
+        return data
+            .par_chunks(size)
             .enumerate()
             .map(|(index, chunk)| map(index, chunk))
-            .fold(identity(), reduce)
+            .reduce(identity, reduce);
     }
+    data.chunks(size)
+        .enumerate()
+        .map(|(index, chunk)| map(index, chunk))
+        .fold(identity(), reduce)
 }
 
 /// Runs `visit` on every `size`-element chunk of `data` with its index.

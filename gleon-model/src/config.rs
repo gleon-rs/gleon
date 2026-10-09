@@ -88,8 +88,8 @@ pub enum GlobError {
     /// `[^...]`, which reads as a class containing `^` (negation is `[!...]`).
     #[error("negate a character class with `[!...]`, not `[^...]`")]
     CaretNegation,
-    /// An empty pattern, or one starting with `/` or `./`: paths are relative to the workspace
-    /// root without a leading `./`.
+    /// An empty pattern or segment, a leading `/`, or a `.` or `..` segment: workspace paths are
+    /// relative to its root and have none of these, so such a pattern would never match.
     #[error("patterns are relative to the workspace root, e.g. `test/**/*.png`")]
     NotRelative,
 }
@@ -113,10 +113,13 @@ impl GlobPattern {
             Some(GlobError::Backslash)
         } else if raw.contains("[^") {
             Some(GlobError::CaretNegation)
-        } else if raw.is_empty() || raw.starts_with('/') || raw.starts_with("./") {
-            Some(GlobError::NotRelative)
         } else if raw.ends_with('/') {
             Some(GlobError::TrailingSlash)
+        } else if raw
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+        {
+            Some(GlobError::NotRelative)
         } else {
             None
         };
@@ -420,15 +423,14 @@ pub mod item_or_vec {
     ///
     /// # Errors
     /// Returns an error if the underlying `serializer` fails to serialize the item(s).
-    pub fn serialize<T, S>(vec: &Vec<T>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<T, S>(items: &[T], serializer: S) -> Result<S::Ok, S::Error>
     where
         T: Serialize,
         S: Serializer,
     {
-        if vec.len() == 1 {
-            vec[0].serialize(serializer)
-        } else {
-            vec.serialize(serializer)
+        match items {
+            [item] => item.serialize(serializer),
+            items => items.serialize(serializer),
         }
     }
 
@@ -1135,6 +1137,15 @@ screenshots:
             (
                 "required_version: '>=0.1.0'\nscreenshots:\n  - include: '**/*.png'\nexclude: build/\n",
                 ["exclude", "\"build/\"", "cannot end with `/`", "line 4"],
+            ),
+            (
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: '../other/**/*.png'\n",
+                [
+                    "screenshots[0].include",
+                    "\"../other/**/*.png\"",
+                    "relative to the workspace root",
+                    "line 3",
+                ],
             ),
         ] {
             let error = GleonConfig::from_yaml_str(yaml).unwrap_err().to_string();
