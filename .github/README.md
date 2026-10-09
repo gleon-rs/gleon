@@ -45,7 +45,6 @@ screenshots:
     mode: pixel
     diff:
       threshold: 0.1
-      anti_alias: true
 
 exclude:
   - "**/build/**"
@@ -146,7 +145,6 @@ screenshots:
     mode: pixel # 'pixel' (exact per-pixel compare) or 'ssim' (tolerates rendering noise, see below)
     diff:
       threshold: 0.1 # 'pixel': allowed fraction of differing pixels [0.0 - 1.0] (default: 0.1)
-      anti_alias: true # Reserved, currently has no effect; use mode 'ssim' to tolerate anti-aliasing
       min_similarity: 0.8 # 'ssim': minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
       color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
     # Optional, 'pixel' only: integrations that report the text of a screenshot (the Flutter package)

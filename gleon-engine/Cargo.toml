@@ -12,7 +12,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-bytemuck = { workspace = true }
 hex = { workspace = true, optional = true }
 image = { workspace = true }
 image_hasher = { workspace = true, optional = true }

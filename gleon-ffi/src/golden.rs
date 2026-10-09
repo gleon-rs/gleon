@@ -44,16 +44,17 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Verdict {
+    /// Invalid input, config, image or I/O failure (see [`ErrorKind`]); never a pass. Zero, so
+    /// a summary the library never wrote reads as an error.
+    Error = 0,
     /// Byte-identical PNGs.
-    Identical = 0,
+    Identical = 1,
     /// Within the tolerance.
-    Match = 1,
+    Match = 2,
     /// Beyond the tolerance; the message says why.
-    Mismatch = 2,
+    Mismatch = 3,
     /// Different image sizes.
-    DimensionMismatch = 3,
-    /// Invalid input, config, image or I/O failure (see [`ErrorKind`]); never a pass.
-    Error = 4,
+    DimensionMismatch = 4,
     /// The golden was written (update mode).
     Updated = 5,
     /// The golden does not exist.

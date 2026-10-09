@@ -64,7 +64,9 @@ pub enum ConfigError {
 /// A compiled glob pattern for fast file matching, serialized as a simple string.
 ///
 /// Matching is case-insensitive and `*` does not cross `/` (use `**` for that); `?` is one
-/// character, `[...]`/`[!...]` a character class (the `glob` crate's syntax).
+/// character, `[...]`/`[!...]` a character class (the `glob` crate's syntax). Patterns that would
+/// match differently than written, or never, are errors ([`GlobError`]): the same file means the
+/// same on every operating system.
 #[derive(Debug, Clone)]
 pub struct GlobPattern(glob::Pattern);
 
@@ -80,6 +82,16 @@ pub enum GlobError {
     /// A trailing `/`, which no file path has.
     #[error("a pattern cannot end with `/`; `dir/**` matches the files of a directory")]
     TrailingSlash,
+    /// A `\`: a separator on Windows only, a literal elsewhere, and never an escape.
+    #[error("use `/` to separate directories; `\\` is not supported (`[*]` matches a literal `*`)")]
+    Backslash,
+    /// `[^...]`, which reads as a class containing `^` (negation is `[!...]`).
+    #[error("negate a character class with `[!...]`, not `[^...]`")]
+    CaretNegation,
+    /// An empty pattern, or one starting with `/` or `./`: paths are relative to the workspace
+    /// root without a leading `./`.
+    #[error("patterns are relative to the workspace root, e.g. `test/**/*.png`")]
+    NotRelative,
 }
 
 /// How every [`GlobPattern`] matches.
@@ -95,13 +107,20 @@ impl GlobPattern {
     /// # Errors
     /// Returns an error if `raw` is not a syntactically valid glob pattern.
     pub fn new(raw: &str) -> Result<Self, GlobError> {
-        if raw.contains(['{', '}']) {
-            return Err(GlobError::Alternatives);
-        }
-        if raw.ends_with('/') {
-            return Err(GlobError::TrailingSlash);
-        }
-        Ok(Self(glob::Pattern::new(raw)?))
+        let error = if raw.contains(['{', '}']) {
+            Some(GlobError::Alternatives)
+        } else if raw.contains('\\') {
+            Some(GlobError::Backslash)
+        } else if raw.contains("[^") {
+            Some(GlobError::CaretNegation)
+        } else if raw.is_empty() || raw.starts_with('/') || raw.starts_with("./") {
+            Some(GlobError::NotRelative)
+        } else if raw.ends_with('/') {
+            Some(GlobError::TrailingSlash)
+        } else {
+            None
+        };
+        error.map_or_else(|| Ok(Self(glob::Pattern::new(raw)?)), Err)
     }
 
     /// Get the raw string representation.
@@ -129,7 +148,7 @@ impl<'de> Deserialize<'de> for GlobPattern {
         D: Deserializer<'de>,
     {
         let s = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
-        Self::new(&s).map_err(serde::de::Error::custom)
+        Self::new(&s).map_err(|e| serde::de::Error::custom(format!("glob {s:?}: {e}")))
     }
 }
 
@@ -423,26 +442,39 @@ pub mod item_or_vec {
         Many(Vec<T>),
     }
 
-    /// Deserializes either a single item or a list of items into a `Vec<T>`.
+    /// Deserializes either a single item (a string) or a list of items into a `Vec<T>`.
+    ///
+    /// A visitor rather than an `untagged` enum, so the error of an invalid item (a glob that is
+    /// no pattern) reaches the user instead of "did not match any variant".
     ///
     /// # Errors
-    /// Returns an error if the input is neither a single `T` nor a list of `T`.
+    /// Returns an error if the input is neither a single `T` nor a list of `T`, or the error of
+    /// the item that is invalid.
     pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
     where
         T: Deserialize<'de>,
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum ItemOrVec<T> {
-            Item(T),
-            Vec(Vec<T>),
+        deserializer.deserialize_any(OneOrManyVisitor(std::marker::PhantomData))
+    }
+
+    struct OneOrManyVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for OneOrManyVisitor<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string or a list of strings")
         }
 
-        ItemOrVec::deserialize(deserializer).map(|res| match res {
-            ItemOrVec::Item(s) => vec![s],
-            ItemOrVec::Vec(v) => v,
-        })
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            T::deserialize(serde::de::IntoDeserializer::<E>::into_deserializer(value))
+                .map(|item| vec![item])
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+            Vec::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+        }
     }
 }
 
@@ -513,18 +545,67 @@ impl GleonConfig {
     /// the schema, or [`ConfigError::Validation`] / [`ConfigError::InvalidPlatform`] if the parsed
     /// configuration is semantically invalid.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        Self::load_for_cli(path, None)
+    }
+
+    /// [`Self::load_from_file`] for the CLI of `cli_version`: its `required_version` is checked
+    /// first ([`Self::check_required_version`]), so a config for a newer CLI says so instead of
+    /// failing on what that CLI added.
+    ///
+    /// # Errors
+    /// As [`Self::load_from_file`], plus [`ConfigError::IncompatibleVersion`].
+    pub fn load_for_cli<P: AsRef<Path>>(
+        path: P,
+        cli_version: Option<&semver::Version>,
+    ) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         tracing::debug!("Loading configuration from {:?}", path);
-
-        let file = match std::fs::File::open(path) {
-            Ok(file) => file,
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 tracing::error!("Configuration file not found at {:?}", path);
                 return Err(ConfigError::NotFound(path.to_path_buf()));
             }
             Err(error) => return Err(ConfigError::Io(error)),
         };
-        serde_yaml::from_reader::<_, Self>(std::io::BufReader::new(file))?.validated()
+        if let Some(cli_version) = cli_version {
+            Self::check_required_version(&text, cli_version)?;
+        }
+        Self::from_yaml_str(&text)
+    }
+
+    /// Checks the `required_version` of the config `yaml` against `cli_version`, reading that
+    /// field alone (unknown keys and the rest are left to the strict parse): a config written
+    /// for a newer CLI fails with the version, not with a key this CLI does not know. A
+    /// pre-release CLI (`0.4.0-rc.1`) counts as its release (`0.4.0`): semver ranges never match
+    /// pre-releases otherwise.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::IncompatibleVersion`] if `cli_version` does not satisfy it. YAML
+    /// that cannot be read this far passes: the strict parse reports it.
+    pub fn check_required_version(
+        yaml: &str,
+        cli_version: &semver::Version,
+    ) -> Result<(), ConfigError> {
+        #[derive(Deserialize)]
+        struct Required {
+            required_version: Option<semver::VersionReq>,
+        }
+        let Ok(Required {
+            required_version: Some(required),
+        }) = serde_yaml::from_str::<Required>(yaml)
+        else {
+            return Ok(());
+        };
+        let release = semver::Version::new(cli_version.major, cli_version.minor, cli_version.patch);
+        if required.matches(&release) {
+            Ok(())
+        } else {
+            Err(ConfigError::IncompatibleVersion(
+                required.to_string(),
+                cli_version.to_string(),
+            ))
+        }
     }
 
     /// Parses and validates a configuration from YAML text (the contents of `.gleon/gleon.yaml`).
@@ -540,24 +621,6 @@ impl GleonConfig {
     /// `self` if it passes [`Self::validate`]; the single post-parse step of every loader.
     fn validated(self) -> Result<Self, ConfigError> {
         self.validate().map(|()| self)
-    }
-
-    /// Verifies if the current CLI version satisfies the configuration's `required_version`.
-    ///
-    /// # Errors
-    /// Returns [`ConfigError::InvalidVersionFormat`] if `current_version` is not a valid semver
-    /// string, or [`ConfigError::IncompatibleVersion`] if it does not satisfy `required_version`.
-    pub fn verify_version(&self, current_version: &str) -> Result<(), ConfigError> {
-        let current = semver::Version::parse(current_version)
-            .map_err(|_| ConfigError::InvalidVersionFormat(current_version.to_string()))?;
-
-        if !self.required_version.matches(&current) {
-            return Err(ConfigError::IncompatibleVersion(
-                self.required_version.to_string(),
-                current_version.to_string(),
-            ));
-        }
-        Ok(())
     }
 
     /// The artifacts directory: `flag` (a command-line option) beats `env` (the value of
@@ -774,7 +837,6 @@ mod tests {
         assert_eq!(rule.include[0].as_str(), "src/login.png");
         assert_eq!(rule.mode, Mode::Ssim);
         assert_eq!(rule.diff.threshold, 0.05);
-        assert!(!rule.diff.anti_alias);
         assert_eq!(rule.diff.min_similarity, 0.98);
         assert_eq!(rule.masks.len(), 1);
 
@@ -864,26 +926,23 @@ screenshots:
     }
 
     #[test]
-    fn test_verify_version() {
-        let config = GleonConfig::default(); // default has ">=0.1.0"
-
-        // Valid versions
-        assert!(config.verify_version("0.1.0").is_ok());
-        assert!(config.verify_version("1.0.0").is_ok());
-
-        // Invalid versions
-        let err = config.verify_version("0.0.9").unwrap_err();
+    fn test_required_version_is_checked_before_the_strict_parse() {
+        let version = |text| semver::Version::parse(text).unwrap();
+        let newer = "required_version: '>=99.0.0'\nfuture_option: true\nscreenshots: []\n";
         assert!(matches!(
-            err,
-            ConfigError::IncompatibleVersion(req, cur) if req == ">=0.1.0" && cur == "0.0.9"
+            GleonConfig::check_required_version(newer, &version("0.3.0")),
+            Err(ConfigError::IncompatibleVersion(required, current))
+                if required == ">=99.0.0" && current == "0.3.0"
         ));
-
-        // Malformed current version string
-        let err2 = config.verify_version("not-a-semver").unwrap_err();
-        assert!(matches!(
-            err2,
-            ConfigError::InvalidVersionFormat(cur) if cur == "not-a-semver"
-        ));
+        let current = "required_version: '>=0.3.0'\nscreenshots: []\n";
+        assert!(GleonConfig::check_required_version(current, &version("0.3.0")).is_ok());
+        // A pre-release counts as its release, which semver ranges would never match.
+        assert!(GleonConfig::check_required_version(current, &version("0.3.0-rc.1")).is_ok());
+        assert!(GleonConfig::check_required_version(current, &version("0.2.9")).is_err());
+        // What cannot be read this far is left to the strict parse.
+        for broken in ["required_version: 'nonsense'", "[", ""] {
+            assert!(GleonConfig::check_required_version(broken, &version("0.3.0")).is_ok());
+        }
     }
 
     #[test]
@@ -1048,6 +1107,41 @@ screenshots:
 ";
         let result: Result<GleonConfig, _> = serde_yaml::from_str(invalid_yaml);
         assert!(result.is_err());
+    }
+
+    /// An invalid glob of `include` or `exclude` names itself, why and where, through the
+    /// one-or-many field.
+    #[test]
+    fn test_invalid_globs_name_the_pattern_and_the_reason() {
+        for (yaml, needles) in [
+            (
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'test/{a,b}/*.png'\n",
+                [
+                    "screenshots[0].include",
+                    "\"test/{a,b}/*.png\"",
+                    "alternatives",
+                    "line 3",
+                ],
+            ),
+            (
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: ['a/*.png', 'b/[^c].png']\n",
+                [
+                    "screenshots[0].include",
+                    "\"b/[^c].png\"",
+                    "[!...]",
+                    "line 3",
+                ],
+            ),
+            (
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: '**/*.png'\nexclude: build/\n",
+                ["exclude", "\"build/\"", "cannot end with `/`", "line 4"],
+            ),
+        ] {
+            let error = GleonConfig::from_yaml_str(yaml).unwrap_err().to_string();
+            for needle in needles {
+                assert!(error.contains(needle), "{needle:?} in {error}");
+            }
+        }
     }
 
     #[test]
@@ -1367,7 +1461,6 @@ screenshots:
 
         // Check nested DiffConfig defaults
         assert_eq!(rule.diff.threshold, 0.1);
-        assert!(rule.diff.anti_alias);
         assert_eq!(rule.diff.min_similarity, 0.8);
     }
 

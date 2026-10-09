@@ -53,8 +53,7 @@ pub enum Tolerance {
 }
 
 impl Tolerance {
-    /// The tolerance a `gleon.yaml` screenshot rule describes (`anti_alias` is not used by the
-    /// engine and has no counterpart).
+    /// The tolerance a `gleon.yaml` screenshot rule describes.
     #[must_use]
     pub const fn from_rule(mode: Mode, diff: &DiffConfig) -> Self {
         match mode {
@@ -323,7 +322,6 @@ mod tests {
             threshold: 0.05,
             min_similarity: 0.7,
             color_tolerance: 12.0,
-            ..DiffConfig::default()
         };
         let pixel = Tolerance::from_rule(Mode::Pixel, &diff);
         assert_eq!(
@@ -349,7 +347,6 @@ mod tests {
             threshold: -0.0,
             min_similarity: -0.0,
             color_tolerance: -0.0,
-            ..DiffConfig::default()
         };
         assert!(matches!(
             Tolerance::from_rule(Mode::Pixel, &zeros),

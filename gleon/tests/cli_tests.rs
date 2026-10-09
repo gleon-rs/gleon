@@ -117,7 +117,31 @@ fn test_init_command() -> Result<(), Box<dyn std::error::Error>> {
         .stderr(predicates::str::contains("Initialized gleon workspace"));
 
     assert!(dir.path().join(".gleon").is_dir());
-    assert!(dir.path().join(".gleon").join("gleon.yaml").is_file());
+    let config = std::fs::read_to_string(dir.path().join(".gleon").join("gleon.yaml"))?;
+    assert!(
+        config.contains(&format!(
+            "required_version: '>={}'",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "the config requires the CLI that wrote it: {config}"
+    );
+    Ok(())
+}
+
+/// A glob that would match differently than written is refused, naming the pattern and why.
+#[test]
+fn test_status_refuses_an_unsupported_glob() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = init_with_config(manifest_dir.join("tests/fixtures/config/brace-glob.yaml"));
+
+    gleon()
+        .current_dir(dir.path())
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "screenshots[0].include: glob \"test/{goldens,screens}/**/*.png\": `{a,b}` alternatives",
+        ));
     Ok(())
 }
 

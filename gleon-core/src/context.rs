@@ -50,6 +50,10 @@ pub struct ContextOptions {
     pub branch: Option<String>,
     /// Target branch to compare against; empty/whitespace-only is treated as `"main"`.
     pub target_branch: String,
+    /// The version of the running CLI binary (its `CARGO_PKG_VERSION`): the
+    /// `required_version` of the config must accept it, and `gleon init` writes it as the floor. `None` for
+    /// callers that are no CLI (tests), which check no version.
+    pub cli_version: Option<&'static str>,
 }
 
 /// Fully resolved runtime context for a `gleon` command invocation,
@@ -71,6 +75,8 @@ pub struct ResolvedContext {
     pub base_dir: std::path::PathBuf,
     /// The resolved Git HEAD commit SHA, or `None` if not inside a Git repository or offline.
     pub commit_sha: Option<String>,
+    /// The version of the running CLI ([`ContextOptions::cli_version`]).
+    pub cli_version: Option<semver::Version>,
 }
 
 impl Default for ResolvedContext {
@@ -88,6 +94,7 @@ impl Default for ResolvedContext {
             target_branch: "main".to_string(),
             base_dir: std::path::PathBuf::from("."),
             commit_sha: None,
+            cli_version: None,
         }
     }
 }
@@ -120,40 +127,20 @@ impl ResolvedContext {
         env_provider: &dyn crate::env::EnvProvider,
     ) -> Result<Self, ContextError> {
         let platform_env = PlatformEnv::from_provider(env_provider);
+        // Only the CLI enforces `required_version`; integrations check its syntax alone.
+        let cli_version = options
+            .cli_version
+            .map(|text| {
+                semver::Version::parse(text)
+                    .map_err(|_| ConfigError::InvalidVersionFormat(text.to_owned()))
+            })
+            .transpose()?;
 
-        let (config, resolved_base_dir) = if let Some(ref path) = options.config_path {
-            tracing::debug!(
-                "Loading configuration from explicitly provided path: {:?}",
-                path
-            );
-            let resolved_path = if path.is_absolute() {
-                path.clone()
-            } else {
-                base_dir.join(path)
-            };
-            let cfg = GleonConfig::load_from_file(&resolved_path)?;
-            let config_dir = resolved_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            let root = crate::paths::find_workspace_root(config_dir, |p| p.gleon_dir().is_dir())
-                .or_else(|| crate::paths::find_workspace_root(base_dir, |p| p.gleon_dir().is_dir()))
-                .map_or_else(|| base_dir.to_path_buf(), |p| p.base_dir().to_path_buf());
-            (Some(cfg), root)
-        } else if let Some((config_path, root_dir)) = find_config_and_root(base_dir) {
-            tracing::debug!(
-                "Discovered gleon.yaml at {:?} (root: {:?})",
-                config_path,
-                root_dir
-            );
-            let cfg = GleonConfig::load_from_file(&config_path)?;
-            (Some(cfg), root_dir)
-        } else {
-            (None, base_dir.to_path_buf())
-        };
-        // `required_version` is the CLI's to enforce (integrations only check its syntax).
-        if let Some(config) = &config {
-            config.verify_version(env!("CARGO_PKG_VERSION"))?;
-        }
+        let (config, resolved_base_dir) = load_config(
+            options.config_path.as_deref(),
+            base_dir,
+            cli_version.as_ref(),
+        )?;
 
         let overrides = PlatformOverrides {
             os: options.os.as_deref(),
@@ -223,8 +210,49 @@ impl ResolvedContext {
             target_branch,
             base_dir: resolved_base_dir,
             commit_sha,
+            cli_version,
         })
     }
+}
+
+/// The config of the workspace and its root: the explicit `config_path` (relative to
+/// `base_dir`), else the nearest `.gleon/gleon.yaml` above `base_dir`, else none; loaded for the
+/// CLI of `cli_version` ([`GleonConfig::load_for_cli`]).
+fn load_config(
+    config_path: Option<&std::path::Path>,
+    base_dir: &std::path::Path,
+    cli_version: Option<&semver::Version>,
+) -> Result<(Option<GleonConfig>, std::path::PathBuf), ContextError> {
+    let found = if let Some(path) = config_path {
+        tracing::debug!(
+            "Loading configuration from explicitly provided path: {:?}",
+            path
+        );
+        let resolved_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            base_dir.join(path)
+        };
+        let cfg = GleonConfig::load_for_cli(&resolved_path, cli_version)?;
+        let config_dir = resolved_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let root = crate::paths::find_workspace_root(config_dir, |p| p.gleon_dir().is_dir())
+            .or_else(|| crate::paths::find_workspace_root(base_dir, |p| p.gleon_dir().is_dir()))
+            .map_or_else(|| base_dir.to_path_buf(), |p| p.base_dir().to_path_buf());
+        (Some(cfg), root)
+    } else if let Some((config_path, root_dir)) = find_config_and_root(base_dir) {
+        tracing::debug!(
+            "Discovered gleon.yaml at {:?} (root: {:?})",
+            config_path,
+            root_dir
+        );
+        let cfg = GleonConfig::load_for_cli(&config_path, cli_version)?;
+        (Some(cfg), root_dir)
+    } else {
+        (None, base_dir.to_path_buf())
+    };
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -303,6 +331,7 @@ mod tests {
         .unwrap();
         let options = ContextOptions {
             config_path: Some(config_path),
+            cli_version: Some("0.3.0"),
             ..Default::default()
         };
         let error = ResolvedContext::resolve(&options, dir.path(), &EmptyEnv).unwrap_err();
@@ -310,7 +339,7 @@ mod tests {
             matches!(
                 &error,
                 ContextError::Config(ConfigError::IncompatibleVersion(required, current))
-                    if required == ">=99.0.0" && current == env!("CARGO_PKG_VERSION")
+                    if required == ">=99.0.0" && current == "0.3.0"
             ),
             "{error}"
         );

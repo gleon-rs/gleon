@@ -52,8 +52,8 @@ impl FileScanner {
     /// Scans the workspace based on the rules in `GleonConfig` and a given base directory.
     ///
     /// # Errors
-    /// Returns [`ScannerError::Pattern`] if any include/exclude glob fails to compile, or
-    /// [`ScannerError::InvalidTestName`] if a derived test name fails validation.
+    /// Returns [`ScannerError::Io`] if the walk fails, or [`ScannerError::InvalidTestName`] if a
+    /// derived test name fails validation (globs were compiled when the config was parsed).
     pub fn scan_workspace(
         config: &GleonConfig,
         base_dir: &Path,
@@ -98,7 +98,7 @@ impl FileScanner {
                 }
             };
             let rel_path_str = Self::normalize_path_str(rel_path);
-            let Selection::Rule(index) = rule_set.select(&rel_path.to_string_lossy()) else {
+            let Selection::Rule(index) = rule_set.select_walked(&rel_path_str) else {
                 continue;
             };
             let test_name_norm =
@@ -697,7 +697,6 @@ screenshots:
                 mode: gleon_engine::config::Mode::Pixel,
                 diff: gleon_engine::config::DiffConfig {
                     threshold: 0.0,
-                    anti_alias: false,
                     min_similarity: 0.99,
                     color_tolerance: 8.0,
                 },

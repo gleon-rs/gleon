@@ -7,7 +7,6 @@ screenshots:
     mode: "ssim"
     diff:
       threshold: 0.05
-      anti_alias: false
       min_similarity: 0.98
     masks:
       - path: "mask1"

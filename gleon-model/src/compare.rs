@@ -54,7 +54,7 @@ impl<'a> Candidate<'a> {
                 if !fits_budget(width, height) || !is_rgba_len(width, height, pixels.len()) {
                     return None;
                 }
-                encode(pixels, width, height, FilterType::Adaptive)
+                encode(pixels, width, height)
                     .ok()
                     .map(std::borrow::Cow::Owned)
             }
@@ -296,14 +296,7 @@ pub fn compare(
             Compared::Mismatch {
                 metrics,
                 regions,
-                // `Up` alone: the fastest filter, and a diff never becomes a golden.
-                diff_png: encode(
-                    diff_image.as_raw(),
-                    diff_image.width(),
-                    diff_image.height(),
-                    FilterType::Up,
-                )
-                .map_err(CompareError::Diff)?,
+                diff_png: encode_png(&diff_image).map_err(CompareError::Diff)?,
             }
         }
         ComparisonResult::DimensionMismatch {
@@ -340,25 +333,16 @@ fn clip(region: &Region, width: u32, height: u32) -> Option<Region> {
 /// # Errors
 /// Returns the encoder's error.
 pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, image::ImageError> {
-    encode(
-        image.as_raw(),
-        image.width(),
-        image.height(),
-        FilterType::Adaptive,
-    )
+    encode(image.as_raw(), image.width(), image.height())
 }
 
-/// Encodes the straight RGBA8 `pixels` of a `width` x `height` image as PNG with `filter` and
-/// fast compression: the one PNG encoder of the comparisons (the candidate kept for `gleon
-/// approve`, the diff, [`encode_png`]).
-fn encode(
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    filter: FilterType,
-) -> Result<Vec<u8>, image::ImageError> {
+/// Encodes the straight RGBA8 `pixels` of a `width` x `height` image as PNG with fast compression
+/// and adaptive filters (`Up` alone encodes a diff in half the time but makes it 1.3-3x larger,
+/// written twice per failure): the one PNG encoder of the comparisons (the candidate kept for
+/// `gleon approve`, the diff, [`encode_png`]).
+fn encode(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, image::ImageError> {
     let mut png = Vec::new();
-    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, filter)
+    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive)
         .write_image(pixels, width, height, ExtendedColorType::Rgba8)
         .map(|()| png)
 }

@@ -138,6 +138,14 @@ impl RuleSet {
         if is_excluded {
             return Selection::Excluded;
         }
+        self.select_walked(normalized)
+    }
+
+    /// The rule of a file the scanner's walk reached, by its canonical path: the walk already
+    /// pruned excluded directories and files, so only the rules are matched (no glob per
+    /// directory of the path, which on a large repository dominates [`Self::select`]).
+    #[must_use]
+    pub fn select_walked(&self, normalized: &str) -> Selection {
         // Exactly the scanner's check (`Path::extension`, so a bare `.png` file has none); the
         // path is already lowercase.
         let is_png = std::path::Path::new(normalized)

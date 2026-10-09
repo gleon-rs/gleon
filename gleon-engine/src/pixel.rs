@@ -48,10 +48,12 @@ impl PixelRegions<'_> {
 /// A tile of a text region with its pixels and the text pixels that differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextTile {
-    /// The tile, inside its text region ([`TEXT_TILE`] square, or the region's size where it is
-    /// smaller).
+    /// The tile's part inside its text region ([`TEXT_TILE`] square, or the region's size where
+    /// it is smaller).
     pub region: Region,
-    /// Its pixels: text, and masked ones (which count as equal).
+    /// The pixels of the [`TEXT_TILE`] square, always: masked ones and those outside a region
+    /// thinner than a tile count as equal, so a thin or edge-clipped region (a 4x1 strip) never
+    /// turns one differing pixel into a large share.
     pub pixels: u64,
     /// Its text pixels that differ.
     pub diff_pixels: u64,
@@ -378,8 +380,9 @@ fn region_classes(
 /// The tile of `text` with the largest share of differing text pixels (the first of equal ones):
 /// every [`TEXT_TILE`]-pixel square inside a region (the region's own size when it is smaller),
 /// so a cluster is judged whole wherever it falls and no thin strip at a region's edge makes a
-/// tile of its own. Masked pixels of a tile count as equal, so a mask over most of a tile cannot
-/// turn one noisy pixel into a large share. `None` when no text pixel differs.
+/// tile of its own. Masked pixels of a tile count as equal, and so do the pixels of the square
+/// outside a region thinner than a tile (a small or edge-clipped region): neither can turn one
+/// noisy pixel into a large share. `None` when no text pixel differs.
 ///
 /// The column sums of the tile's rows slide down a region and the tile slides along them, so
 /// this takes one pass over each region. `text` lies inside the image ([`classify`]).
@@ -407,7 +410,7 @@ fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTi
                     width: tile_width,
                     height: tile_height,
                 },
-                pixels: u64::from(tile_width) * u64::from(tile_height),
+                pixels: u64::from(TEXT_TILE) * u64::from(TEXT_TILE),
                 diff_pixels,
             };
             // Shares compared exactly: a / b > c / d as a * d > c * b.
@@ -461,11 +464,7 @@ fn add_row(columns: &mut [u64], row: &[Class], add: bool) {
 /// # Panics
 /// Panics if `baseline` and `actual` do not have identical dimensions.
 #[must_use]
-pub fn count_mismatched_pixels<'a>(
-    baseline: impl Into<Pixels<'a>>,
-    actual: impl Into<Pixels<'a>>,
-) -> u64 {
-    let (baseline, actual) = (baseline.into(), actual.into());
+fn count_mismatched_pixels(baseline: Pixels<'_>, actual: Pixels<'_>) -> u64 {
     same_size(baseline, actual);
     if baseline.raw() == actual.raw() {
         return 0;
@@ -496,7 +495,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compare_pixels_identical() {
+    fn test_identical_images_are_darkened_in_the_diff() {
         let img1 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         let img2 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
 
@@ -506,11 +505,11 @@ mod tests {
         let diff_img = compared.diff_image(&img1, &img2);
         assert_eq!(*diff_img.get_pixel(0, 0), Rgba([127, 0, 0, 255]));
 
-        assert_eq!(count_mismatched_pixels(&img1, &img2), 0);
+        assert_eq!(count_mismatched_pixels((&img1).into(), (&img2).into()), 0);
     }
 
     #[test]
-    fn test_compare_pixels_mismatch() {
+    fn test_strict_differences_are_magenta_in_the_diff() {
         let img1 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         let mut img2 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         img2.put_pixel(5, 5, Rgba([0, 255, 0, 255]));
@@ -523,7 +522,7 @@ mod tests {
         // The matching pixel should be darkened
         assert_eq!(*diff_img.get_pixel(0, 0), Rgba([127, 0, 0, 255]));
 
-        assert_eq!(count_mismatched_pixels(&img1, &img2), 1);
+        assert_eq!(count_mismatched_pixels((&img1).into(), (&img2).into()), 1);
     }
 
     const WHITE: Rgba<u8> = Rgba([255, 255, 255, 255]);
@@ -763,7 +762,8 @@ mod tests {
             .unwrap();
         assert_eq!((worst.pixels, worst.diff_pixels), (256, 2), "{worst:?}");
 
-        // A region smaller than a tile is one tile of its own size.
+        // A region smaller than a tile is one tile of its own size, judged as a whole tile: the
+        // rest of the square counts as equal (one pixel of a 10x6 region is 1 of 256).
         let small = [region(4, 4, 10, 6)];
         let mut actual = ImageBuffer::from_pixel(32, 17, WHITE);
         actual.put_pixel(5, 5, BLACK);
@@ -781,7 +781,7 @@ mod tests {
         .worst_tile
         .unwrap();
         assert_eq!(worst.region, small[0]);
-        assert_eq!((worst.pixels, worst.diff_pixels), (60, 1));
+        assert_eq!((worst.pixels, worst.diff_pixels), (256, 1));
     }
 
     /// A mask over most of a tile leaves few text pixels; they are judged in the whole tile, so
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Image dimensions must match")]
-    fn test_compare_pixels_unequal_dimensions_panics() {
+    fn test_compare_unequal_dimensions_panics() {
         let img1 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         let img2 = ImageBuffer::from_pixel(20, 10, Rgba([255, 0, 0, 255]));
         let _ = compare(&img1, &img2, &PixelRegions::NONE);
@@ -839,6 +839,73 @@ mod tests {
     fn test_count_mismatched_pixels_unequal_dimensions_panics() {
         let img1 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         let img2 = ImageBuffer::from_pixel(10, 20, Rgba([255, 0, 0, 255]));
-        let _ = count_mismatched_pixels(&img1, &img2);
+        let _ = count_mismatched_pixels((&img1).into(), (&img2).into());
+    }
+
+    /// The row fast paths against a per-pixel reference: generated frames (equal rows, changed
+    /// rows, widths 0 and 1), masks and text regions anywhere inside, a fixed xorshift sequence.
+    #[test]
+    fn test_compare_counts_like_a_per_pixel_reference() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |below: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            u32::try_from(state % u64::from(below.max(1))).unwrap()
+        };
+        for _ in 0..500 {
+            let (width, height) = (next(20), 1 + next(12));
+            let baseline = ImageBuffer::from_fn(width, height, |x, y| {
+                Rgba([u8::try_from((x * 7 + y * 3) % 256).unwrap(), 0, 0, 255])
+            });
+            let mut actual = baseline.clone();
+            for _ in 0..next(4) {
+                if width > 0 {
+                    actual.put_pixel(next(width), next(height), BLACK);
+                }
+            }
+            let random_regions = |next: &mut dyn FnMut(u32) -> u32| {
+                (0..next(3))
+                    .map(|_| {
+                        let (x, y) = (next(width + 1), next(height + 1));
+                        region(x, y, next(width - x + 1), next(height - y + 1))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let masks = random_regions(&mut next);
+            let text = random_regions(&mut next);
+            let regions = PixelRegions {
+                masks: &masks,
+                text: &text,
+                text_tolerance: Some(TEXT),
+            };
+            let inside = |regions: &[Region], x: u32, y: u32| {
+                regions.iter().any(|r| {
+                    (r.x..r.x + r.width).contains(&x) && (r.y..r.y + r.height).contains(&y)
+                })
+            };
+            let (mut checked, mut diff, mut text_pixels, mut text_diff) = (0, 0, 0, 0);
+            for (x, y, expected) in baseline.enumerate_pixels() {
+                let differs = expected != actual.get_pixel(x, y);
+                if inside(&masks, x, y) {
+                } else if !text.is_empty() && inside(&text, x, y) {
+                    text_pixels += 1;
+                    text_diff += u64::from(differs);
+                } else {
+                    checked += 1;
+                    diff += u64::from(differs);
+                }
+            }
+            let analysis = compare(&baseline, &actual, &regions).analysis;
+            let context = format!("{width}x{height} masks {masks:?} text {text:?}");
+            assert_eq!(
+                (analysis.checked_pixels, analysis.diff_pixels),
+                (checked, diff),
+                "{context}"
+            );
+            let measured = analysis.text.map(|text| (text.pixels, text.diff_pixels));
+            let expected = (!text.is_empty()).then_some((text_pixels, text_diff));
+            assert_eq!(measured, expected, "{context}");
+        }
     }
 }

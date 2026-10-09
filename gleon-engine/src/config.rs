@@ -127,9 +127,6 @@ pub struct DiffConfig {
     #[serde(default = "default_threshold", deserialize_with = "deserialize_ratio")]
     #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
     pub threshold: f64,
-    /// Reserved: accepted for compatibility of configs, without effect on any comparison.
-    #[serde(default = "default_anti_alias")]
-    pub anti_alias: bool,
     /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).
     #[serde(
         default = "default_min_similarity",
@@ -189,7 +186,6 @@ impl Default for DiffConfig {
     fn default() -> Self {
         Self {
             threshold: default_threshold(),
-            anti_alias: default_anti_alias(),
             min_similarity: default_min_similarity(),
             color_tolerance: default_color_tolerance(),
         }
@@ -213,10 +209,6 @@ pub struct Zone {
 
 const fn default_threshold() -> f64 {
     0.1
-}
-
-const fn default_anti_alias() -> bool {
-    true
 }
 
 const fn default_min_similarity() -> f64 {

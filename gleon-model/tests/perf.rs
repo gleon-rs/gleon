@@ -15,7 +15,8 @@
 //! 360x640, recorded with real fonts) and on a phone-sized frame tiled from it (1080x2560): the
 //! work of one `gleon_golden` call without the file system.
 //!
-//! Ignored by default; run in release for numbers that mean something:
+//! `cargo test` runs every case once; the timings are ignored by default, run them in release for
+//! numbers that mean something:
 //! `cargo test --release -p gleon-model --test perf -- --ignored --nocapture`.
 
 use std::{
@@ -39,7 +40,7 @@ const SSIM: Tolerance = Tolerance::Ssim {
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../gleon-ffi/tests/fixtures")
+        .join("tests/fixtures/flutter")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
@@ -116,16 +117,30 @@ fn raw(image: &RgbaImage) -> Candidate<'_> {
     }
 }
 
+/// Every case once, so the timings below never rot unnoticed (`cargo test` runs this).
+#[test]
+fn perf_cases_run() {
+    run_cases(1, false);
+}
+
 #[test]
 #[ignore = "timings: run in release with --ignored --nocapture"]
 fn perf_of_one_comparison() {
+    run_cases(0, true);
+}
+
+/// Runs every case `runs` times (0: enough for a stable median per frame), printing the median
+/// when `prints`.
+fn run_cases(runs: usize, prints: bool) {
     let initial = decode_rgba(&fixture("counter_initial.png")).unwrap();
     let taps = decode_rgba(&fixture("counter_three_taps.png")).unwrap();
     let frames = [
         Frame::new("360x640", initial.clone(), taps.clone()),
         Frame::new("1080x2560", tiled(&initial), tiled(&taps)),
     ];
-    eprintln!("{:<10} {:<34} {:>10}", "frame", "case", "median");
+    if prints {
+        eprintln!("{:<10} {:<34} {:>10}", "frame", "case", "median");
+    }
     for frame in &frames {
         let (width, height) = frame.same.dimensions();
         let regions = lines(width, height);
@@ -134,7 +149,11 @@ fn perf_of_one_comparison() {
             tolerance: TextTolerance::OWN_PLATFORM,
         });
         let other_png = encode_png(&frame.same).unwrap();
-        let runs = if width > 1000 { 15 } else { 51 };
+        let runs = match runs {
+            0 if width > 1000 => 15,
+            0 => 51,
+            runs => runs,
+        };
         let compared = |candidate: Candidate<'_>, tolerance: &Tolerance, text| {
             black_box(compare(&frame.golden, candidate, tolerance, &[], text).unwrap());
         };
@@ -172,12 +191,14 @@ fn perf_of_one_comparison() {
         ];
         for (case, run) in &cases {
             let time = median(runs, run);
-            eprintln!(
-                "{:<10} {:<34} {:>8.3} ms",
-                frame.name,
-                case,
-                time.as_secs_f64() * 1000.0
-            );
+            if prints {
+                eprintln!(
+                    "{:<10} {:<34} {:>8.3} ms",
+                    frame.name,
+                    case,
+                    time.as_secs_f64() * 1000.0
+                );
+            }
         }
         assert!(matches!(
             compare(&frame.golden, raw(&frame.changed), &EXACT, &[], text)

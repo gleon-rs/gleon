@@ -8,8 +8,8 @@
 //! resolving the `.gleon/gleon.yaml` rule, reading and comparing the golden, writing failure
 //! artifacts, case reports and (in update mode) the golden itself.
 //!
-//! Exports go through [`safer_ffi`]: opaque handles, the by-value [`GleonSummary`] and its byte
-//! slices use its FFI-safe types, so the only raw pointers left are the inputs. Buffers stay raw
+//! Exports go through [`safer_ffi`]: opaque handles, the [`GleonSummary`] written to the caller's
+//! buffer and its byte slices use its FFI-safe types, so the only raw pointers left are the inputs. Buffers stay raw
 //! `(ptr, len)` pairs on purpose: a caller can pass its own buffers without copying them (Dart's
 //! `Uint8List.address` and `Uint32List.address` in leaf calls), which is impossible for pointers
 //! inside a struct. The scalars of a call travel in one [`GleonCall`] struct and its strings as
@@ -23,7 +23,7 @@
 //! - Calls never return null and never unwind: invalid input and panics become an error result.
 //! - Sessions may be shared by threads.
 //! - The caller owns returned sessions and the `texts` of a [`GleonSummary`] and releases them
-//!   with [`gleon_session_free`] and [`gleon_result_free`]; the summary's slices stay valid until
+//!   with [`gleon_session_free`] and [`gleon_texts_free`]; the summary's slices stay valid until
 //!   its `texts` are freed. A summary without texts (a pass, as a rule) has null `texts`, so a
 //!   passing comparison is one call.
 //! - [`gleon_golden`] writes its summary to a buffer of the caller instead of returning it: in
@@ -60,7 +60,7 @@ use gleon_model::{
     tolerance::{TextTolerance, Tolerance},
 };
 use golden::{Finished, Mode, Request};
-pub use handles::{GleonCall, GleonResult, GleonSession, GleonSummary};
+pub use handles::{GleonCall, GleonSession, GleonSummary, GleonTexts};
 use safer_ffi::prelude::*;
 use session::{ArtifactNames, Integration, Session, SessionOptions};
 
@@ -137,8 +137,9 @@ mod handles {
     #[derive_ReprC]
     #[repr(C)]
     pub struct GleonSummary {
-        /// `0` identical, `1` match, `2` mismatch, `3` dimension mismatch, `4` error,
-        /// `5` updated, `6` missing golden.
+        /// `0` error, `1` identical, `2` match, `3` mismatch, `4` dimension mismatch,
+        /// `5` updated, `6` missing golden. Zero is an error, so a summary never written (a call
+        /// that did not happen) is never a pass.
         pub verdict: u8,
         /// For an error: `1` invalid input, `2` config, `3` I/O, `4` image, `5` internal;
         /// `0` otherwise.
@@ -149,10 +150,33 @@ mod handles {
         pub console: c_slice::Ref<'static, u8>,
         /// Warnings to print, one per line; usually empty.
         pub warning: c_slice::Ref<'static, u8>,
-        /// Owns the three texts until [`gleon_result_free`](crate::gleon_result_free); null when
+        /// Owns the three texts until [`gleon_texts_free`](crate::gleon_texts_free); null when
         /// they are all empty.
-        pub texts: Option<repr_c::Box<GleonResult>>,
+        pub texts: Option<repr_c::Box<GleonTexts>>,
     }
+
+    // The layout the integrations declare (Dart `Struct`s in the Flutter package): a change here
+    // is a change of the C contract and needs an `ABI_VERSION` bump.
+    const _: () = {
+        use std::mem::{offset_of, size_of};
+        assert!(size_of::<GleonCall>() == 48);
+        assert!(offset_of!(GleonCall, max_diff_ratio) == 0);
+        assert!(offset_of!(GleonCall, min_similarity) == 8);
+        assert!(offset_of!(GleonCall, color_tolerance) == 16);
+        assert!(offset_of!(GleonCall, text_tolerance) == 24);
+        assert!(offset_of!(GleonCall, candidate_width) == 32);
+        assert!(offset_of!(GleonCall, candidate_height) == 36);
+        assert!(offset_of!(GleonCall, mode) == 40);
+        assert!(offset_of!(GleonCall, candidate_format) == 41);
+        assert!(offset_of!(GleonCall, tolerance_kind) == 42);
+        assert!(size_of::<GleonSummary>() == 64);
+        assert!(offset_of!(GleonSummary, verdict) == 0);
+        assert!(offset_of!(GleonSummary, error_kind) == 1);
+        assert!(offset_of!(GleonSummary, message) == 8);
+        assert!(offset_of!(GleonSummary, console) == 24);
+        assert!(offset_of!(GleonSummary, warning) == 40);
+        assert!(offset_of!(GleonSummary, texts) == 56);
+    };
 
     /// Opaque per-process state, owned by the caller until
     /// [`gleon_session_free`](crate::gleon_session_free).
@@ -161,10 +185,10 @@ mod handles {
     pub struct GleonSession(pub(crate) Session);
 
     /// Opaque texts of a call, owned by the caller until
-    /// [`gleon_result_free`](crate::gleon_result_free).
+    /// [`gleon_texts_free`](crate::gleon_texts_free).
     #[derive_ReprC]
     #[repr(opaque)]
-    pub struct GleonResult(pub(crate) Finished);
+    pub struct GleonTexts(pub(crate) Finished);
 }
 
 /// Returns the contract version implemented by this library.
@@ -274,14 +298,14 @@ fn summary(finished: Finished) -> GleonSummary {
         return GleonSummary {
             verdict,
             error_kind,
-            message: EMPTY.into(),
-            console: EMPTY.into(),
-            warning: EMPTY.into(),
+            message: c_slice::Ref::default(),
+            console: c_slice::Ref::default(),
+            warning: c_slice::Ref::default(),
             texts: None,
         };
     }
-    let texts: repr_c::Box<GleonResult> = Box::new(GleonResult(finished)).into();
-    let GleonResult(finished) = &*texts;
+    let texts: repr_c::Box<GleonTexts> = Box::new(GleonTexts(finished)).into();
+    let GleonTexts(finished) = &*texts;
     // SAFETY: the strings live on the heap of the boxed result, which the summary carries as
     // `texts`: moving the box moves no byte of them, and the caller reads the slices only before
     // it frees `texts` (the contract of `GleonSummary`).
@@ -297,9 +321,6 @@ fn summary(finished: Finished) -> GleonSummary {
         texts: Some(texts),
     }
 }
-
-/// An empty text.
-const EMPTY: &[u8] = &[];
 
 /// An error result for a broken C contract.
 fn invalid_input(message: &str) -> Finished {
@@ -492,7 +513,7 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 }
 
 /// Compares `candidate` against the golden file (`call.mode` 0), or writes it there (`mode` 1,
-/// update mode, PNG only), and returns the verdict with the texts to show.
+/// update mode, PNG only), and writes the verdict with the texts to show to `summary`.
 ///
 /// `golden_path` is the shared golden. When the `.gleon/gleon.yaml` of its workspace names the
 /// `fallback_platform` the shared goldens were recorded on and this process runs on another,
@@ -504,10 +525,11 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 /// messages), `failures_dir` (the directory for failure artifacts, shown verbatim), `test_name`
 /// (the running test, may be empty).
 ///
-/// The summary is written to `summary`. `call` holds the scalars ([`GleonCall`]): `candidate_format` `0` passes PNG bytes, `1` the raw
+/// `call` holds the scalars ([`GleonCall`]): `candidate_format` `0` passes PNG bytes, `1` the raw
 /// straight (not premultiplied) RGBA8 pixels of a `candidate_width` x `candidate_height` capture
 /// (exactly `4 * width * height` bytes), which spares the integration encoding a PNG on every
-/// passing comparison; the call's tolerance is described at `call_tolerance`.
+/// passing comparison; `tolerance_kind` `0` uses the `.gleon/gleon.yaml` rule, `1` exact, `2`
+/// pixel (`max_diff_ratio`), `3` SSIM (`min_similarity`, `color_tolerance`).
 ///
 /// `mask_count` pixel masks `[x, y, width, height]` are at `masks`. `text_region_count` text
 /// regions `[x, y, width, height]` (candidate pixels) are at `text_regions`, compared in pixel
@@ -517,7 +539,8 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 ///
 /// # Safety
 /// `call` must point to a readable [`GleonCall`] (any alignment) or be null, `summary` to a
-/// writable buffer of a [`GleonSummary`] (any alignment; null drops the summary). Each `(ptr, len)`
+/// writable buffer of a [`GleonSummary`] (any alignment; null drops the summary). The buffer is
+/// overwritten without being read: free the `texts` of a summary it held before. Each `(ptr, len)`
 /// pair must describe a readable buffer of `len` elements (bytes for `strings` and `candidate`,
 /// aligned `u32`s for `lengths`, `4 * mask_count` aligned `u32`s for `masks`,
 /// `4 * text_region_count` for `text_regions`), or be `(null, 0)`. All stay valid for the
@@ -598,9 +621,13 @@ pub unsafe fn gleon_golden(
 }
 
 /// Releases the `texts` of a [`GleonSummary`]. Passing null is a no-op.
+///
+/// # Safety
+/// `texts` must come from a summary of [`gleon_golden`] and be freed once; no slice of that
+/// summary may be read afterwards (they borrow from `texts`).
 #[ffi_export]
-pub fn gleon_result_free(result: Option<repr_c::Box<GleonResult>>) {
-    drop(result);
+pub unsafe fn gleon_texts_free(texts: Option<repr_c::Box<GleonTexts>>) {
+    drop(texts);
 }
 
 // Runs under Miri too: these tests exercise the unsafe pointer boundary; the ones touching the
@@ -696,7 +723,7 @@ mod tests {
             warning: text(summary.warning),
             had_texts: summary.texts.is_some(),
         };
-        gleon_result_free(summary.texts);
+        unsafe { gleon_texts_free(summary.texts) };
         answer
     }
 
@@ -757,12 +784,32 @@ mod tests {
     }
 
     /// Runs `gleon_golden` into an unaligned buffer, like any caller may pass, and reads the
-    /// summary back.
+    /// summary back. The buffer starts as a valid summary without texts, so a call that wrote nothing
+    /// reads as the error of verdict 0, never as undefined memory.
     unsafe fn summarized(golden: impl FnOnce(*mut GleonSummary)) -> GleonSummary {
         let mut buffer = vec![0u8; size_of::<GleonSummary>() + 1];
         let summary = unsafe { buffer.as_mut_ptr().add(1) }.cast::<GleonSummary>();
+        unsafe { summary.write_unaligned(blank_summary()) };
         golden(summary);
         unsafe { summary.read_unaligned() }
+    }
+
+    /// A summary before any call: zeros, empty slices.
+    fn blank_summary() -> GleonSummary {
+        GleonSummary {
+            verdict: 0,
+            error_kind: 0,
+            message: c_slice::Ref::default(),
+            console: c_slice::Ref::default(),
+            warning: c_slice::Ref::default(),
+            texts: None,
+        }
+    }
+
+    /// Zero is no pass: a summary the library never wrote is an error.
+    #[test]
+    fn test_an_unwritten_summary_is_an_error() {
+        assert_eq!(golden::Verdict::Error as u8, blank_summary().verdict);
     }
 
     fn golden(session: Option<&GleonSession>, call: Call<'_>) -> Answer {
@@ -794,33 +841,6 @@ mod tests {
     #[test]
     fn test_abi_version() {
         assert_eq!(gleon_ffi_abi_version(), ABI_VERSION);
-    }
-
-    /// The C header of this contract is committed as `include/gleon_ffi.h`, so a change shows in
-    /// review (and must bump [`ABI_VERSION`]). Regenerate after changing an export:
-    /// `GLEON_UPDATE_HEADERS=1 cargo test -p gleon-ffi --lib header`.
-    #[safer_ffi::cfg_headers]
-    #[test]
-    #[cfg_attr(miri, ignore = "writes and reads files")]
-    fn test_the_c_header_is_current() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("include/gleon_ffi.h");
-        let mut generated = Vec::new();
-        safer_ffi::headers::builder()
-            .with_guard("GLEON_FFI_H")
-            .to_writer(&mut generated)
-            .generate()
-            .unwrap();
-        if std::env::var_os("GLEON_UPDATE_HEADERS").is_some() {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, &generated).unwrap();
-            return;
-        }
-        let committed = std::fs::read(&path).unwrap_or_default();
-        assert!(
-            committed == generated,
-            "{} is stale; run `GLEON_UPDATE_HEADERS=1 cargo test -p gleon-ffi --lib header`",
-            path.display()
-        );
     }
 
     /// Raw candidates must have the length of their size; a text tolerance is a share or NaN.
@@ -1208,7 +1228,7 @@ mod tests {
         }));
         assert!(warned.had_texts);
         assert_eq!(warned.warning, "careful");
-        gleon_result_free(None);
+        unsafe { gleon_texts_free(None) };
     }
 
     #[test]

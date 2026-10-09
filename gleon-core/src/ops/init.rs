@@ -73,7 +73,22 @@ pub fn init_workspace(context: &crate::context::ResolvedContext) -> Result<InitR
     )?;
 
     let internal_config = paths.config_file();
-    let default_config = GleonConfig::default();
+    // New configs require the CLI that wrote them (its release, without a pre-release part).
+    let default_config = GleonConfig {
+        required_version: context.cli_version.as_ref().map_or_else(
+            || GleonConfig::default().required_version,
+            |version| semver::VersionReq {
+                comparators: vec![semver::Comparator {
+                    op: semver::Op::GreaterEq,
+                    major: version.major,
+                    minor: Some(version.minor),
+                    patch: Some(version.patch),
+                    pre: semver::Prerelease::EMPTY,
+                }],
+            },
+        ),
+        ..GleonConfig::default()
+    };
     let yaml_content = serde_yaml::to_string(&default_config).map_err(InitError::Yaml)?;
     let config_created =
         create_new_file_with_content(&internal_config, yaml_content.as_bytes(), &gleon_dir)?

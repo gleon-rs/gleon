@@ -794,6 +794,18 @@ metrics:
         assert!(matches!(rule, Ok((_, None))));
     }
 
+    /// Only the CLI enforces `required_version`: an integration plans with a config that asks
+    /// for any CLI version (its syntax is still checked by the parse).
+    #[test]
+    fn test_integrations_do_not_enforce_the_required_version() {
+        let yaml = YAML.replace(">=0.1.0", ">=99.0.0");
+        let (_dir, root) = workspace(&yaml, "a.png");
+        let plan = session(None)
+            .plan(&root.join("test/goldens/a.png"), None, vec![], None)
+            .unwrap();
+        assert!(plan.in_workspace.is_some(), "the rule applies");
+    }
+
     #[test]
     fn test_metrics_env_overrides_the_config() {
         let (_dir, root) = workspace(YAML, "a.png");

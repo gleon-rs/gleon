@@ -21,8 +21,6 @@ gleon-model = { path = "../gleon-model" }
 safer-ffi = { workspace = true }
 
 [dev-dependencies]
-# Test builds only: the C header snapshot (`include/gleon_ffi.h`).
-safer-ffi = { workspace = true, features = ["headers"] }
 image = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

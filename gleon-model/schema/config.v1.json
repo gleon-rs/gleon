@@ -73,11 +73,6 @@
       "description": "Configuration parameters for the diff engine.",
       "type": "object",
       "properties": {
-        "anti_alias": {
-          "description": "Reserved: accepted for compatibility of configs, without effect on any comparison.",
-          "type": "boolean",
-          "default": true
-        },
         "color_tolerance": {
           "description": "Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode).",
           "type": "number",
@@ -260,7 +255,6 @@
           "description": "Specific diffing configuration.",
           "$ref": "#/$defs/DiffConfig",
           "default": {
-            "anti_alias": true,
             "color_tolerance": 8.0,
             "min_similarity": 0.8,
             "threshold": 0.1
