@@ -20,6 +20,13 @@ pub use ssim::{Region, SsimAnalysis, SsimPolicy};
 
 use crate::config::{DiffConfig, Mode};
 
+/// Version of the engine's tolerant decisions: the SSIM policy, the text tiles of the pixel mode.
+///
+/// Bumped whenever verdicts can change for the same inputs. 3: a text tile always counts
+/// [`pixel::TEXT_TILE`] squared pixels, so a thin or edge-clipped text region no longer turns one
+/// differing pixel into a large share.
+pub const POLICY_VERSION: u32 = 3;
+
 /// The straight (not premultiplied) RGBA8 pixels of an image, row by row, borrowed: a decoded
 /// golden (`&RgbaImage`) or the raw capture of an integration, compared without a copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

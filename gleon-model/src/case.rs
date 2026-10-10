@@ -612,7 +612,7 @@ pub struct Comparison {
     pub text_tolerance: Option<TextTolerance>,
     /// Ignored zones, applied to both images.
     pub masks: Vec<Zone>,
-    /// Version of the engine's tolerant (SSIM) decision policy.
+    /// Version of the engine's tolerant decisions (SSIM, text tiles): `gleon_engine::POLICY_VERSION`.
     pub policy_version: u32,
 }
 

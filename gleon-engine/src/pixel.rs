@@ -555,6 +555,16 @@ mod tests {
         assert_eq!(*diff_img.get_pixel(0, 0), Rgba([127, 0, 0, 255]));
 
         assert_eq!(count_mismatched_pixels((&img1).into(), (&img2).into()), 1);
+
+        // Over one block: the equal first block is skipped, the differing last one counted.
+        let wide = ImageBuffer::from_pixel(600, 600, Rgba([255, 0, 0, 255]));
+        let mut changed = wide.clone();
+        changed.put_pixel(599, 599, Rgba([0, 255, 0, 255]));
+        assert!(wide.as_raw().len() > BLOCK);
+        assert_eq!(
+            count_mismatched_pixels((&wide).into(), (&changed).into()),
+            1
+        );
     }
 
     const WHITE: Rgba<u8> = Rgba([255, 255, 255, 255]);

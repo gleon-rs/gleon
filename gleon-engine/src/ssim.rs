@@ -1,6 +1,6 @@
 //! Rendering-noise-tolerant comparison: a shift-tolerant envelope gate plus a coarse-scale SSIM gate.
 //!
-//! Decision policy ([`POLICY_VERSION`] 2), designed for UI goldens: anti-aliasing, sub-pixel glyph
+//! Decision policy (part of [`crate::POLICY_VERSION`]), designed for UI goldens: anti-aliasing, sub-pixel glyph
 //! placement and imperceptible color drift must pass; changed, added or removed content, color and
 //! alpha changes, and loss of structure (blur) must fail.
 //!
@@ -29,9 +29,6 @@ use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 
 use crate::{Pixels, par};
-
-/// Version of the decision policy; bumped whenever verdicts can change for the same inputs.
-pub const POLICY_VERSION: u32 = 2;
 
 /// Largest image (in pixels, 4096x4096) admitted to [`analyze`].
 ///

@@ -415,7 +415,8 @@ const fn default_true() -> bool {
     true
 }
 
-/// Helper module for serde to deserialize a single item or a list of items into a `Vec<T>`.
+/// Helper module for serde to deserialize a single string item or a list of items into a
+/// `Vec<T>`: the lists of globs (`include`, `exclude`), where a bare item is always a string.
 pub mod item_or_vec {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -444,7 +445,10 @@ pub mod item_or_vec {
         Many(Vec<T>),
     }
 
-    /// Deserializes either a single item (a string) or a list of items into a `Vec<T>`.
+    /// Deserializes either a single string item or a list of items into a `Vec<T>`.
+    ///
+    /// Other bare scalars (`exclude: 123`) are an "expected a string or a list" error, as no item
+    /// type of this module reads them.
     ///
     /// A visitor rather than an `untagged` enum, so the error of an invalid item (a glob that is
     /// no pattern) reaches the user instead of "did not match any variant".
@@ -467,6 +471,14 @@ pub mod item_or_vec {
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             formatter.write_str("a string or a list of strings")
+        }
+
+        fn visit_borrowed_str<E: serde::de::Error>(
+            self,
+            value: &'de str,
+        ) -> Result<Self::Value, E> {
+            T::deserialize(serde::de::value::BorrowedStrDeserializer::new(value))
+                .map(|item| vec![item])
         }
 
         fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
@@ -1168,6 +1180,11 @@ screenshots:
         assert_eq!(s1.values, vec!["hello".to_string()]);
         // Serializes as a single string
         assert_eq!(serde_yaml::to_string(&s1).unwrap().trim(), "values: hello");
+
+        // An owned string (from a YAML value) is read like a borrowed one.
+        let value: serde_yaml::Value = serde_yaml::from_str("values: hello").unwrap();
+        let owned: TestStruct = serde_yaml::from_value(value).unwrap();
+        assert_eq!(owned, s1);
 
         // Test list of strings
         let s2: TestStruct = serde_yaml::from_str("values: [\"hello\", \"world\"]").unwrap();

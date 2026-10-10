@@ -306,7 +306,7 @@
           }
         },
         "policy_version": {
-          "description": "Version of the engine's tolerant (SSIM) decision policy.",
+          "description": "Version of the engine's tolerant decisions (SSIM, text tiles): `gleon_engine::POLICY_VERSION`.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0

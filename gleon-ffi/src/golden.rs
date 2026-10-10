@@ -674,7 +674,7 @@ impl Call<'_> {
             comparison: case::Comparison {
                 tolerance: self.plan.tolerance,
                 masks: self.plan.masks.clone(),
-                policy_version: gleon_engine::ssim::POLICY_VERSION,
+                policy_version: gleon_engine::POLICY_VERSION,
                 text_tolerance: self.text(),
             },
             outcome,
@@ -2238,6 +2238,23 @@ metrics:
                 .contains("gleon: cannot write failure feedback to"),
             "{}",
             finished.message
+        );
+    }
+
+    /// A pass removes the report of an earlier failure; one that cannot be removed (a directory
+    /// in its place) is a warning, and the pass stays a pass.
+    #[test]
+    fn test_a_stale_report_that_cannot_be_removed_is_a_warning() {
+        let fixture = Fixture::new(Some(RULE_WITHOUT_METRICS));
+        fs::create_dir_all(fixture.case_path().join("inside")).unwrap();
+        let finished = fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, false));
+        assert_eq!(finished.verdict, Verdict::Identical);
+        assert!(
+            finished
+                .warning
+                .starts_with("gleon: cannot remove the case report"),
+            "{}",
+            finished.warning
         );
     }
 

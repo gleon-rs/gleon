@@ -95,6 +95,14 @@ jobs:
       - name: 🧪 Test the sequential engine (incl. the SSIM corpus)
         run: cargo test --locked -p gleon-engine
 
+      - name: 🔬 Build the Miri sysroot
+        # The sysroot is the toolchain's own std, built from a manifest cargo generates: its
+        # warnings (`unused_dependencies` on nightly) are not ours, so the action's
+        # `CARGO_BUILD_WARNINGS=deny` would fail the build. The tests below still deny warnings.
+        run: cargo miri setup
+        env:
+          CARGO_BUILD_WARNINGS: warn
+
       - name: 🔬 Run the ABI tests under Miri
         run: cargo miri test --locked -p gleon-ffi --lib
 

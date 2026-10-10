@@ -246,7 +246,7 @@ impl DiffRun<'_> {
                 // `gleon diff` sees no text: its screenshots are compared strictly.
                 text_tolerance: None,
                 masks,
-                policy_version: gleon_engine::ssim::POLICY_VERSION,
+                policy_version: gleon_engine::POLICY_VERSION,
             },
             outcome: judged.outcome,
             error_kind: judged.error_kind,

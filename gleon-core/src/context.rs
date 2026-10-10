@@ -224,19 +224,15 @@ fn load_config(
     cli_version: Option<&semver::Version>,
 ) -> Result<(Option<GleonConfig>, std::path::PathBuf), ContextError> {
     let found = if let Some(path) = config_path {
-        tracing::debug!(
-            "Loading configuration from explicitly provided path: {:?}",
-            path
-        );
+        tracing::debug!("Loading configuration from explicitly provided path: {path:?}");
         let resolved_path = if path.is_absolute() {
             path.to_path_buf()
         } else {
             base_dir.join(path)
         };
         let cfg = GleonConfig::load_for_cli(&resolved_path, cli_version)?;
-        let config_dir = resolved_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
+        // A loaded file has a parent: `resolved_path` is absolute or joined to `base_dir`.
+        let config_dir = resolved_path.parent().unwrap_or(base_dir);
         let root = crate::paths::find_workspace_root(config_dir, |p| p.gleon_dir().is_dir())
             .or_else(|| crate::paths::find_workspace_root(base_dir, |p| p.gleon_dir().is_dir()))
             .map_or_else(|| base_dir.to_path_buf(), |p| p.base_dir().to_path_buf());
@@ -340,6 +336,19 @@ mod tests {
                 &error,
                 ContextError::Config(ConfigError::IncompatibleVersion(required, current))
                     if required == ">=99.0.0" && current == "0.3.0"
+            ),
+            "{error}"
+        );
+
+        let options = ContextOptions {
+            cli_version: Some("dev"),
+            ..options
+        };
+        let error = ResolvedContext::resolve(&options, dir.path(), &EmptyEnv).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ContextError::Config(ConfigError::InvalidVersionFormat(version)) if version == "dev"
             ),
             "{error}"
         );

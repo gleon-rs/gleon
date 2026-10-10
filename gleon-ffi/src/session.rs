@@ -801,9 +801,7 @@ metrics:
         let planned = session(None).plan(&locked.join("a.png"), None, vec![], None);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let Err(failure) = planned else {
-            panic!("an unreadable directory must fail the plan")
-        };
+        let failure = planned.map(drop).unwrap_err();
         assert_eq!(failure.kind, ErrorKind::Io);
         assert!(
             failure
