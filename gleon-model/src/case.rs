@@ -1704,7 +1704,11 @@ pub mod text {
             assert_eq!(tolerance(&ssim(0.9995, 7.5)), "ssim ≥ 0.9995, color ±7.5");
         }
 
-        fn ssim_metrics(failing_region: Option<Region>, color: f64) -> Metrics {
+        fn ssim_metrics(
+            failing_region: Option<Region>,
+            color: f64,
+            text: Option<super::super::TextMetrics>,
+        ) -> Metrics {
             Metrics::Ssim {
                 min_ssim: 0.5,
                 mean_ssim: 0.9,
@@ -1718,7 +1722,7 @@ pub mod text {
                     similarity: -0.3,
                     color,
                 },
-                text: None,
+                text,
             }
         }
 
@@ -1784,19 +1788,73 @@ pub mod text {
                 height: 1,
             };
             assert_eq!(
-                metrics_summary(&ssim_metrics(Some(area), -138.0)),
+                metrics_summary(&ssim_metrics(Some(area), -138.0, None)),
                 "changed area at (10, 10) 1x1px: min local SSIM 0.500, colors deviate by up to \
                  146.0 (8-bit units)"
             );
             assert_eq!(
-                metrics_summary(&ssim_metrics(None, 1.0)),
+                metrics_summary(&ssim_metrics(None, 1.0, None)),
                 "min local SSIM 0.500"
+            );
+            // Text that failed next to failing pixels joins the SSIM gates.
+            let failed_text = super::super::TextMetrics {
+                pixels: 300,
+                diff_pixels: 120,
+                worst_tile_diff_ratio: 0.4,
+                headroom: -0.3,
+            };
+            assert_eq!(
+                metrics_summary(&ssim_metrics(None, 1.0, Some(failed_text))),
+                "min local SSIM 0.500, text up to 40.00% of a tile"
             );
             assert_eq!(
                 dimension_summary((100, 60), (100, 61)),
                 "golden is 100x60px, test image is 100x61px"
             );
             assert!(too_large_for_ssim(9, 9).starts_with("9x9 exceeds the SSIM analysis budget"));
+        }
+
+        #[test]
+        fn test_region_summaries() {
+            use super::super::{RegionKind, RegionMetrics};
+
+            let tile = Region {
+                x: 0,
+                y: 16,
+                width: 16,
+                height: 16,
+            };
+            let text_tile = RegionMetrics {
+                kind: RegionKind::Text,
+                rect: Some(tile),
+                metrics: Metrics::Pixel {
+                    total_pixels: 256,
+                    diff_pixels: 46,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
+                    diff_ratio: 0.18,
+                    headroom: -0.08,
+                    text: None,
+                },
+            };
+            assert_eq!(
+                region_summary(&text_tile).as_deref(),
+                Some("worst text tile (0, 16) 16x16px: 18.00% differ")
+            );
+            let changed = RegionMetrics {
+                kind: RegionKind::Changed,
+                rect: Some(tile),
+                metrics: ssim_metrics(None, 1.0, None),
+            };
+            assert_eq!(
+                region_summary(&changed).as_deref(),
+                Some("changed area (0, 16) 16x16px: min local SSIM 0.500, mean 0.900")
+            );
+            // The whole image's metrics are the comparison's.
+            assert_eq!(
+                region_summary(&RegionMetrics::whole_image(ssim_metrics(None, 1.0, None))),
+                None
+            );
         }
     }
 }
@@ -1941,6 +1999,39 @@ mod tests {
             RegionMetrics::of(metrics, &pixel, &Tolerance::Exact {}, None).len(),
             1
         );
+        // Changed pixels within the policy: no excess, whatever their peak.
+        let passing = Measurement::Ssim {
+            mean_ssim: 0.99,
+            min_ssim: 0.9,
+            max_excess: 0.0,
+            peak_excess: 20.0,
+            changed_pixels: 9,
+            changed_region: None,
+            failing_pixels: 0,
+            failing_region: None,
+            changed_local: Some(local(0, 0)),
+            failing_local: None,
+            text: None,
+        };
+        let metrics = Metrics::from_measurement(&passing, &tolerance, None).unwrap();
+        let regions = RegionMetrics::of(metrics, &passing, &tolerance, None);
+        assert!(
+            matches!(
+                regions.as_slice(),
+                [
+                    _,
+                    RegionMetrics {
+                        kind: RegionKind::Changed,
+                        metrics: Metrics::Ssim {
+                            max_excess: 0.0,
+                            ..
+                        },
+                        ..
+                    }
+                ]
+            ),
+            "{regions:?}"
+        );
     }
 
     #[test]
@@ -2041,6 +2132,32 @@ mod tests {
         assert!(pixel(0, 1, 0));
         // A pass whose every differing pixel lies on an edge is not the golden itself.
         assert!(pixel(0, 0, 1));
+        let ssim = |changed_pixels, text_diff_pixels| {
+            Metrics::Ssim {
+                min_ssim: 1.0,
+                mean_ssim: 1.0,
+                max_excess: 0.0,
+                peak_excess: 0.0,
+                changed_pixels,
+                changed_region: None,
+                failing_pixels: 0,
+                failing_region: None,
+                headroom: SsimHeadroom {
+                    similarity: 0.2,
+                    color: 8.0,
+                },
+                text: Some(TextMetrics {
+                    pixels: 4,
+                    diff_pixels: text_diff_pixels,
+                    worst_tile_diff_ratio: 0.0,
+                    headroom: 1.0,
+                }),
+            }
+            .differs()
+        };
+        assert!(!ssim(0, 0));
+        assert!(ssim(1, 0));
+        assert!(ssim(0, 1));
     }
 
     #[test]

@@ -238,9 +238,8 @@ impl Compared {
     /// `baseline`: faded like the rest of it, differing text yellow, or orange when the text
     /// failed its tolerance. Nothing without text.
     pub(crate) fn paint_text(&self, diff: &mut RgbaImage, baseline: Pixels<'_>) {
-        let Some(classes) = &self.classes else {
-            return;
-        };
+        // No classes (every pixel strict): nothing to zip.
+        let classes = self.classes.as_deref().unwrap_or_default();
         let pixels = diff
             .as_mut()
             .as_chunks_mut::<4>()

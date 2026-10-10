@@ -917,7 +917,7 @@ mod tests {
     };
 
     #[test]
-    fn test_windows_of_a_rect_beside_the_evaluated_ones_are_empty() {
+    fn test_a_rect_beside_the_analyzed_planes_has_no_metrics() {
         let eval = Rect {
             x0: 0,
             y0: 0,
@@ -932,14 +932,22 @@ mod tests {
             fail_rect: eval,
             failing: &[],
         };
-        // Rows overlap the evaluated windows, columns do not.
-        let region = planes.windows(Rect {
+        // Rows overlap the evaluated windows and the changed pixels, columns do not.
+        let region = planes.local(Rect {
             x0: 12,
             y0: 0,
             x1: 16,
             y1: 4,
         });
         assert_eq!((region.min_ssim, region.mean_ssim), (1.0, 1.0));
+        assert_eq!(
+            (
+                region.changed_pixels,
+                region.failing_pixels,
+                region.peak_excess
+            ),
+            (0, 0, 0.0)
+        );
     }
 
     fn solid(w: u32, h: u32, c: [u8; 4]) -> RgbaImage {
