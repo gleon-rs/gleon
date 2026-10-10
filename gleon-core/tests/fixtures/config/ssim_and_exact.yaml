@@ -1,0 +1,7 @@
+required_version: ">=0.1.0"
+screenshots:
+  - include: "ssim/*.png"
+    mode: ssim
+  - include: "shots/*.png"
+    mode: pixel
+    diff: { threshold: 0.0 }

@@ -61,7 +61,8 @@ pub enum Tolerance {
         #[serde(default, skip_serializing_if = "crate::serde_skip::is_default")]
         anti_alias: bool,
         /// A differing pixel outside text counts as equal when the Sobel gradient of the golden's
-        /// luma there exceeds this, `[0, 254]` (0: off).
+        /// luma there (unnormalized like Skia Gold's: a sharp step of 16 gives 64) exceeds this,
+        /// `[0, 254]` (0: off).
         #[serde(default, skip_serializing_if = "crate::serde_skip::is_default")]
         #[schemars(range(max = 254))]
         edge_threshold: u8,

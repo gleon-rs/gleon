@@ -736,18 +736,10 @@ impl GleonConfig {
                     rule.diff.color_tolerance
                 )));
             }
-            if rule.mode != Mode::Pixel {
-                let diff = &rule.diff;
-                let set = [
-                    ("channel_tolerance", diff.channel_tolerance != 0),
-                    ("anti_alias", diff.anti_alias),
-                    ("edge_threshold", diff.edge_threshold != 0),
-                ];
-                if let Some((key, _)) = set.into_iter().find(|&(_, is_set)| is_set) {
-                    return Err(ConfigError::Validation(format!(
-                        "screenshots[{i}].diff.{key} applies to `mode: pixel` only"
-                    )));
-                }
+            if let Some((key, owner)) = foreign_diff_key(rule.mode, &rule.diff) {
+                return Err(ConfigError::Validation(format!(
+                    "screenshots[{i}].diff.{key} applies to `mode: {owner}` only"
+                )));
             }
             if let Some(text) = &rule.text_tolerance {
                 text.validate().map_err(|e| {
@@ -842,6 +834,40 @@ impl Default for GleonConfig {
     }
 }
 
+/// The first key of `diff` that belongs to the other mode than `mode` and is off its default (it
+/// would be silently ignored), with the mode it belongs to.
+fn foreign_diff_key(mode: Mode, diff: &DiffConfig) -> Option<(&'static str, &'static str)> {
+    let defaults = DiffConfig::default();
+    let changed = |value: f64, default: f64| value.total_cmp(&default).is_ne();
+    let (keys, owner): (&[(&'static str, bool)], _) = match mode {
+        Mode::Pixel => (
+            &[
+                (
+                    "min_similarity",
+                    changed(diff.min_similarity, defaults.min_similarity),
+                ),
+                (
+                    "color_tolerance",
+                    changed(diff.color_tolerance, defaults.color_tolerance),
+                ),
+            ],
+            "ssim",
+        ),
+        Mode::Ssim => (
+            &[
+                ("threshold", changed(diff.threshold, defaults.threshold)),
+                ("channel_tolerance", diff.channel_tolerance != 0),
+                ("anti_alias", diff.anti_alias),
+                ("edge_threshold", diff.edge_threshold != 0),
+            ],
+            "pixel",
+        ),
+    };
+    keys.iter()
+        .find(|&&(_, is_set)| is_set)
+        .map(|&(key, _)| (key, owner))
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -892,8 +918,8 @@ mod tests {
         let rule = &config.screenshots[0];
         assert_eq!(rule.include[0].as_str(), "src/login.png");
         assert_eq!(rule.mode, Mode::Ssim);
-        assert_eq!(rule.diff.threshold, 0.05);
         assert_eq!(rule.diff.min_similarity, 0.98);
+        assert_eq!(rule.diff.color_tolerance, 12.0);
         assert_eq!(rule.masks.len(), 1);
 
         let mask = &rule.masks[0];
@@ -1048,32 +1074,48 @@ screenshots:
 
     /// Pixel options set on an SSIM rule would silently do nothing: a config error naming them.
     #[test]
-    fn test_pixel_options_need_a_pixel_rule() {
+    fn test_diff_keys_need_the_mode_that_reads_them() {
         let yaml = |mode: &str, diff: &str| {
             format!(
                 "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n    diff: {diff}\n"
             )
         };
-        for (diff, key) in [
-            ("{ anti_alias: true }", "anti_alias"),
-            ("{ channel_tolerance: 4 }", "channel_tolerance"),
-            ("{ edge_threshold: 64 }", "edge_threshold"),
+        for (diff, key, owner, other) in [
+            ("{ anti_alias: true }", "anti_alias", "pixel", "ssim"),
+            (
+                "{ channel_tolerance: 4 }",
+                "channel_tolerance",
+                "pixel",
+                "ssim",
+            ),
+            ("{ edge_threshold: 64 }", "edge_threshold", "pixel", "ssim"),
+            ("{ threshold: 0.05 }", "threshold", "pixel", "ssim"),
+            ("{ min_similarity: 0.9 }", "min_similarity", "ssim", "pixel"),
+            (
+                "{ color_tolerance: 10 }",
+                "color_tolerance",
+                "ssim",
+                "pixel",
+            ),
         ] {
-            let err = GleonConfig::from_yaml_str(&yaml("ssim", diff)).unwrap_err();
+            let err = GleonConfig::from_yaml_str(&yaml(other, diff)).unwrap_err();
             assert!(
                 err.to_string().contains(&format!(
-                    "screenshots[0].diff.{key} applies to `mode: pixel` only"
+                    "screenshots[0].diff.{key} applies to `mode: {owner}` only"
                 )),
                 "{err}"
             );
             assert!(
-                GleonConfig::from_yaml_str(&yaml("pixel", diff)).is_ok(),
+                GleonConfig::from_yaml_str(&yaml(owner, diff)).is_ok(),
                 "{diff}"
             );
         }
-        // Off (the defaults `gleon init` writes) is fine in any mode.
-        let off = "{ channel_tolerance: 0, anti_alias: false, edge_threshold: 0 }";
-        assert!(GleonConfig::from_yaml_str(&yaml("ssim", off)).is_ok());
+        // The defaults (`gleon init` writes them all) are fine in any mode.
+        let defaults = "{ threshold: 0.01, min_similarity: 0.8, color_tolerance: 8.0, \
+                        channel_tolerance: 0, anti_alias: false, edge_threshold: 0 }";
+        for mode in ["pixel", "ssim"] {
+            assert!(GleonConfig::from_yaml_str(&yaml(mode, defaults)).is_ok());
+        }
     }
 
     /// `text_tolerance` is a share, for pixel and SSIM rules alike.

@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use std::fs;
 
 use gleon_core::{
@@ -50,13 +52,7 @@ fn test_init_workspace_idempotent_preserves_custom_config() {
     let base_path = temp_dir.path();
 
     let config_path = base_path.join(".gleon").join("gleon.yaml");
-    let custom_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "custom/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(&config_path, custom_yaml).unwrap();
+    common::copy_config(base_path, "custom");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 

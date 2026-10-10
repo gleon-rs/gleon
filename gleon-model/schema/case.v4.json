@@ -312,7 +312,7 @@
           "minimum": 0
         },
         "text_tolerance": {
-          "description": "The tolerance of the text regions the integration reported (pixel and exact only);\nabsent when there were none.",
+          "description": "The tolerance of the text regions the integration reported (under every tolerance);\nabsent when there were none.",
           "anyOf": [
             {
               "$ref": "#/$defs/TextTolerance"
@@ -870,7 +870,7 @@
               "minimum": 0
             },
             "edge_threshold": {
-              "description": "A differing pixel outside text counts as equal when the Sobel gradient of the golden's\nluma there exceeds this, `[0, 254]` (0: off).",
+              "description": "A differing pixel outside text counts as equal when the Sobel gradient of the golden's\nluma there (unnormalized like Skia Gold's: a sharp step of 16 gives 64) exceeds this,\n`[0, 254]` (0: off).",
               "type": "integer",
               "format": "uint8",
               "maximum": 254,

@@ -60,7 +60,7 @@ pub struct PixelOptions {
     /// A pixel passes when it looks anti-aliased in either image (the detection of pixelmatch).
     pub anti_alias: bool,
     /// A pixel passes when the Sobel gradient magnitude of the baseline's luma there (8-bit
-    /// units) exceeds this (0: off). Every change on edges passes too: a missing glyph or small
+    /// units, unnormalized like Skia Gold's: a sharp step of 16 gives 64) exceeds this (0: off). Every change on edges passes too: a missing glyph or small
     /// icon, a 1px move (see `tests/ssim_corpus.rs`).
     pub edge_threshold: u8,
 }
@@ -557,7 +557,8 @@ fn is_anti_aliased(image: Pixels<'_>, other: Pixels<'_>, x: usize, y: usize) -> 
     let center = luma(image.rgba(x, y));
     let (around, on_border) = neighbors(x, y, width, height);
     let mut zeroes = usize::from(on_border);
-    let (mut darkest, mut brightest) = ((0, None), (0, None));
+    // `delta` is the center minus the neighbor: the brightest neighbor has the lowest.
+    let (mut brightest, mut darkest) = ((0, None), (0, None));
     for (nx, ny) in around {
         let delta = center - luma(image.rgba(nx, ny));
         if delta == 0 {
@@ -565,17 +566,17 @@ fn is_anti_aliased(image: Pixels<'_>, other: Pixels<'_>, x: usize, y: usize) -> 
             if zeroes > 2 {
                 return false;
             }
-        } else if delta < darkest.0 {
-            darkest = (delta, Some((nx, ny)));
-        } else if delta > brightest.0 {
+        } else if delta < brightest.0 {
             brightest = (delta, Some((nx, ny)));
+        } else if delta > darkest.0 {
+            darkest = (delta, Some((nx, ny)));
         }
     }
     let flat_in_both = |(nx, ny): (usize, usize)| {
         has_many_siblings(image, nx, ny) && has_many_siblings(other, nx, ny)
     };
-    match (darkest.1, brightest.1) {
-        (Some(darkest), Some(brightest)) => flat_in_both(darkest) || flat_in_both(brightest),
+    match (brightest.1, darkest.1) {
+        (Some(brightest), Some(darkest)) => flat_in_both(brightest) || flat_in_both(darkest),
         _ => false,
     }
 }
@@ -593,8 +594,8 @@ fn has_many_siblings(image: Pixels<'_>, x: usize, y: usize) -> bool {
 }
 
 /// Whether (`x`, `y`) lies on an edge of `baseline`: its Sobel gradient of luma (8-bit units,
-/// neighbors outside the image repeat the border) exceeds `threshold`; never for threshold 0
-/// (off).
+/// unnormalized like Skia Gold's, so a sharp step of `d` gives `4 * d`; neighbors outside the
+/// image repeat the border) exceeds `threshold`; never for threshold 0 (off).
 fn is_edge(baseline: Pixels<'_>, x: usize, y: usize, threshold: u8) -> bool {
     if threshold == 0 {
         return false;
@@ -605,8 +606,11 @@ fn is_edge(baseline: Pixels<'_>, x: usize, y: usize, threshold: u8) -> bool {
         let ny = y.saturating_add_signed(dy).min(height - 1);
         luma(baseline.rgba(nx, ny))
     };
-    let gx = at(1, -1) + 2 * at(1, 0) + at(1, 1) - at(-1, -1) - 2 * at(-1, 0) - at(-1, 1);
-    let gy = at(-1, 1) + 2 * at(0, 1) + at(1, 1) - at(-1, -1) - 2 * at(0, -1) - at(1, -1);
+    let (top_left, top, top_right) = (at(-1, -1), at(0, -1), at(1, -1));
+    let (left, right) = (at(-1, 0), at(1, 0));
+    let (bottom_left, bottom, bottom_right) = (at(-1, 1), at(0, 1), at(1, 1));
+    let gx = top_right + 2 * right + bottom_right - top_left - 2 * left - bottom_left;
+    let gy = bottom_left + 2 * bottom + bottom_right - top_left - 2 * top - top_right;
     // Compared squared, in the units of luma: no square root, no float.
     let limit = i64::from(threshold) * 255 * 256;
     gx * gx + gy * gy > limit * limit
@@ -837,15 +841,16 @@ pub fn dimension_diff<'a>(
     par::for_each_chunk_mut(&mut diff, row_bytes, |y, out| {
         let expected = row_of(baseline, baseline_width, baseline_height, y);
         let found = row_of(actual, actual_width, actual_height, y);
-        // The masked columns of this row.
-        let masked: Vec<std::ops::Range<usize>> = masks
-            .iter()
-            .filter(|mask| (mask.y as usize..(mask.y + mask.height) as usize).contains(&y))
-            .map(|mask| mask.x as usize..(mask.x + mask.width) as usize)
-            .collect();
+        // The masks over this row, without collecting them (masks are few).
+        let row_masks = || {
+            masks
+                .iter()
+                .filter(move |mask| (mask.y as usize..(mask.y + mask.height) as usize).contains(&y))
+        };
         for (x, pixel) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let is_stripe = (x + y) % 8 < 4;
-            let is_masked = masked.iter().any(|columns| columns.contains(&x));
+            let is_masked = row_masks()
+                .any(|mask| (mask.x as usize..(mask.x + mask.width) as usize).contains(&x));
             *pixel = match (expected.get(x).copied(), found.get(x).copied()) {
                 (Some(expected), Some(found)) if expected == found || is_masked => darken(expected),
                 (Some(_), Some(_)) => MAGENTA,

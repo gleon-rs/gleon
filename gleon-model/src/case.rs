@@ -139,11 +139,13 @@ impl Metrics {
             Self::Pixel {
                 diff_pixels,
                 tolerated_pixels,
+                edge_pixels,
                 text,
                 ..
             } => {
                 diff_pixels > 0
                     || tolerated_pixels > 0
+                    || edge_pixels > 0
                     || text.is_some_and(|text| text.diff_pixels > 0)
             }
             Self::Ssim {
@@ -721,7 +723,7 @@ pub struct TestInfo {
 pub struct Comparison {
     /// The effective tolerance.
     pub tolerance: Tolerance,
-    /// The tolerance of the text regions the integration reported (pixel and exact only);
+    /// The tolerance of the text regions the integration reported (under every tolerance);
     /// absent when there were none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_tolerance: Option<TextTolerance>,
@@ -1080,18 +1082,7 @@ impl CaseReport {
         if has_text_metrics && comparison.text_tolerance.is_none() {
             return Err(InconsistentCase::TextTolerance);
         }
-        let region_matches = |region: &RegionMetrics| match region.kind {
-            RegionKind::Text => matches!(region.metrics, Metrics::Pixel { .. }),
-            RegionKind::Image => {
-                matches!(region.metrics, Metrics::Ssim { .. }) == is_ssim_tolerance
-            }
-            RegionKind::Changed | RegionKind::Failing => {
-                is_ssim_tolerance && matches!(region.metrics, Metrics::Ssim { .. })
-            }
-        };
-        if !self.regions.iter().all(region_matches) {
-            return Err(InconsistentCase::RegionMetrics);
-        }
+        self.validate_regions(is_ssim_tolerance)?;
         if let Some(Metrics::Pixel {
             tolerated_pixels,
             edge_pixels,
@@ -1124,6 +1115,39 @@ impl CaseReport {
             return Err(InconsistentCase::Artifacts);
         }
         self.validate_artifact_paths()
+    }
+
+    /// Every region measured in the mode of the comparison (text tiles in pixels), inside the
+    /// golden when its size is known.
+    fn validate_regions(&self, is_ssim_tolerance: bool) -> Result<(), InconsistentCase> {
+        let region_matches = |region: &RegionMetrics| match region.kind {
+            RegionKind::Text => matches!(region.metrics, Metrics::Pixel { .. }),
+            RegionKind::Image => {
+                matches!(region.metrics, Metrics::Ssim { .. }) == is_ssim_tolerance
+            }
+            RegionKind::Changed | RegionKind::Failing => {
+                is_ssim_tolerance && matches!(region.metrics, Metrics::Ssim { .. })
+            }
+        };
+        if !self.regions.iter().all(region_matches) {
+            return Err(InconsistentCase::RegionMetrics);
+        }
+        let within = |start: u32, length: u32, size: Option<u32>| {
+            start
+                .checked_add(length)
+                .is_some_and(|end| size.is_none_or(|size| end <= size))
+        };
+        let inside_golden = |region: &RegionMetrics| {
+            region.rect.is_none_or(|rect| {
+                within(rect.x, rect.width, self.golden.width)
+                    && within(rect.y, rect.height, self.golden.height)
+            })
+        };
+        if self.regions.iter().all(inside_golden) {
+            Ok(())
+        } else {
+            Err(InconsistentCase::RegionBounds)
+        }
     }
 
     /// Checks that every image lies at `<artifacts dir>/<platform key>/<name>/<file>` of this
@@ -1238,6 +1262,9 @@ pub enum InconsistentCase {
     /// metrics), or a `changed`/`failing` region of a comparison that is not SSIM.
     #[error("`regions` are measured in the mode of `comparison.tolerance` (text tiles in pixels)")]
     RegionMetrics,
+    /// A region beyond the golden (when its size is known) or past the end of `u32`.
+    #[error("`regions` lie inside the golden")]
+    RegionBounds,
     /// Tolerated or edge pixels without the pixel options that let them pass.
     #[error("`tolerated_pixels`/`edge_pixels` need the pixel options that let them pass")]
     PixelOptions,
@@ -1994,6 +2021,29 @@ mod tests {
     }
 
     #[test]
+    fn test_differs_counts_the_pixels_every_option_let_pass() {
+        let pixel = |diff_count, tolerated_count, edge_count| {
+            Metrics::from_measurement(
+                &Measurement::Pixel {
+                    checked_pixels: 100,
+                    diff_count,
+                    tolerated_count,
+                    edge_count,
+                    text: None,
+                },
+                &Tolerance::pixel(0.1),
+                None,
+            )
+            .is_some_and(|metrics| metrics.differs())
+        };
+        assert!(!pixel(0, 0, 0));
+        assert!(pixel(1, 0, 0));
+        assert!(pixel(0, 1, 0));
+        // A pass whose every differing pixel lies on an edge is not the golden itself.
+        assert!(pixel(0, 0, 1));
+    }
+
+    #[test]
     fn test_mode_mismatch_is_rejected() {
         assert_eq!(
             Metrics::from_measurement(&ssim_measurement(), &Tolerance::Exact {}, None),
@@ -2690,6 +2740,23 @@ mod tests {
                     "regions": [{"kind": "changed", "rect": {"x": 0, "y": 0, "width": 1, "height": 1}, "metrics": metrics}]
                 }),
                 InconsistentCase::RegionMetrics,
+            ),
+            // Regions beyond the golden, or past the end of `u32`.
+            (
+                serde_json::json!({
+                    "outcome": "match", "artifacts": null, "metrics": metrics,
+                    "golden": {"path": "a.png", "sha256": "1".repeat(64), "width": 4, "height": 4},
+                    "regions": [{"kind": "text", "rect": {"x": 2, "y": 0, "width": 4, "height": 1}, "metrics": metrics}]
+                }),
+                InconsistentCase::RegionBounds,
+            ),
+            (
+                serde_json::json!({
+                    "outcome": "match", "artifacts": null, "metrics": metrics,
+                    "golden": {"path": "a.png", "sha256": "1".repeat(64)},
+                    "regions": [{"kind": "text", "rect": {"x": u32::MAX, "y": 0, "width": 2, "height": 1}, "metrics": metrics}]
+                }),
+                InconsistentCase::RegionBounds,
             ),
             // Pixels counted as tolerated or on edges without the options that let them pass.
             (

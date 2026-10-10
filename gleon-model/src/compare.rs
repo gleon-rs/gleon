@@ -241,9 +241,9 @@ pub fn decode_masked(
 /// Compares the PNG `golden` with `candidate` under `tolerance`, with `masks` and `text`.
 ///
 /// Masks apply to images of the same size (like [`decode_masked`]): in pixel and exact mode their
-/// pixels are neither compared nor counted, in SSIM mode they are painted black in both. Text
-/// regions are judged by their tiles under their tolerance, masks winning (in SSIM mode painted
-/// black for both gates too).
+/// pixels are neither compared nor counted, in SSIM mode the candidate takes the golden's pixels
+/// there. Text regions are judged by their tiles under their tolerance, masks winning (in SSIM
+/// mode left out of both gates the same way).
 ///
 /// # Errors
 /// Returns [`CompareError`] for an image that cannot be decoded, raw pixels of the wrong length,

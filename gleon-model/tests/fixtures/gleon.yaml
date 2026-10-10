@@ -6,8 +6,8 @@ screenshots:
   - include: "src/login.png"
     mode: "ssim"
     diff:
-      threshold: 0.05
       min_similarity: 0.98
+      color_tolerance: 12
     masks:
       - path: "mask1"
         zones:

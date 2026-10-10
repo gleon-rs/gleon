@@ -177,13 +177,14 @@ pub fn missing_golden(golden_uri: &str) -> String {
     format!("Could not be compared against non-existent file: \"{golden_uri}\"")
 }
 
-/// The clause of a missing golden on a platform with its own goldens: the shared golden of
-/// `platform` is missing too, and a new golden starts there.
-pub fn missing_fallback(platform: &str, shared_uri: &str) -> String {
-    format!(
+/// Appends to `message` the clause of a missing golden on a platform with its own goldens: the
+/// shared golden of `platform` is missing too, and a new golden starts there.
+pub fn push_missing_fallback(message: &mut String, platform: &str, shared_uri: &str) {
+    let _infallible = write!(
+        message,
         " (nor the {platform} golden \"{shared_uri}\": record a new golden on {platform} first, \
          every other platform compares it until it has its own)"
-    )
+    );
 }
 
 /// An invalid `.gleon/gleon.yaml`, or a golden whose name its rules cannot take.

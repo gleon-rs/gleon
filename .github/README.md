@@ -143,7 +143,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "test/**/goldens/**/*.png" # Single pattern or list of glob patterns
     mode: pixel # 'pixel' (exact per-pixel compare) or 'ssim' (tolerates rendering noise, see below)
-    diff:
+    diff: # each key belongs to one mode: another value than its default in the other is a config error
       threshold: 0.01 # 'pixel': allowed fraction of differing pixels [0.0 - 1.0] (default: 0.01; 0: exact)
       min_similarity: 0.8 # 'ssim': minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
       color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
@@ -154,8 +154,9 @@ screenshots:
       channel_tolerance: 0 # no RGBA byte differs by more than this [0 - 254]: GPU and color drift
       anti_alias: false # the pixel looks anti-aliased in either image (the detection of pixelmatch)
       # The Sobel gradient of the golden's luma there exceeds this [0 - 254] (Skia Gold's edge
-      # mask). Every change on edges passes too: a missing glyph or small icon, a 1px move (see
-      # gleon-engine/tests/ssim_corpus.rs); the lower the value, the more pixels are edges.
+      # mask, unnormalized: a sharp step of 16 gives 64). Every change on edges passes too: a
+      # missing glyph or small icon, a 1px move (see gleon-engine/tests/ssim_corpus.rs); the lower
+      # the value, the more pixels are edges.
       edge_threshold: 0
     # Optional: integrations that report the text of a screenshot (the Flutter package) compare it
     # under this tolerance (in 'ssim' mode left out of both of its gates), the rest under the

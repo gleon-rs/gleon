@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use std::{fs, path::Path};
 
 use gleon_core::{
@@ -300,19 +302,7 @@ fn test_reports_of_a_failing_diff_run_link_existing_images() {
     let root = temp.path();
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
     init_workspace(&ctx).unwrap();
-    fs::write(
-        root.join(".gleon/gleon.yaml"),
-        r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "ssim/*.png"
-    mode: ssim
-  - include: "shots/*.png"
-    mode: pixel
-    diff: { threshold: 0.0 }
-"#,
-    )
-    .unwrap();
+    common::copy_config(root, "ssim_and_exact");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
     fs::create_dir_all(root.join("shots")).unwrap();
     fs::create_dir_all(root.join("ssim")).unwrap();

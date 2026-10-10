@@ -1,0 +1,5 @@
+# A monorepo package: the goldens of packages/app.
+required_version: ">=0.1.0"
+screenshots:
+  - include: "packages/app/test/goldens/**/*.png"
+    mode: pixel

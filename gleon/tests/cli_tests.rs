@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -40,20 +42,17 @@ fn init_temp_dir() -> TempDir {
     dir
 }
 
-/// Creates an initialized temp workspace and copies the given fixture YAML into
+/// Creates an initialized temp workspace and copies the fixture config `fixture` (see
+/// [`common::copy_config`]) into
 /// `.gleon/gleon.yaml`, replacing the default config written by `gleon init`.
 ///
 /// This avoids passing `--config /abs/path` to the binary, which would set the
 /// scanner root to a system temp directory that macOS may pollute with stray
 /// `.app` bundles (e.g. from the Simulator). With the config inside the temp dir,
 /// workspace auto-discovery roots the scanner there — fully isolated.
-fn init_with_config(fixture_yaml: impl AsRef<std::path::Path>) -> TempDir {
+fn init_with_config(fixture: &str) -> TempDir {
     let dir = init_temp_dir();
-    std::fs::copy(
-        fixture_yaml.as_ref(),
-        dir.path().join(".gleon").join("gleon.yaml"),
-    )
-    .expect("failed to copy fixture config");
+    common::copy_config(dir.path(), fixture);
     dir
 }
 
@@ -131,8 +130,7 @@ fn test_init_command() -> Result<(), Box<dyn std::error::Error>> {
 /// A glob that would match differently than written is refused, naming the pattern and why.
 #[test]
 fn test_status_refuses_an_unsupported_glob() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = init_with_config(manifest_dir.join("tests/fixtures/config/brace-glob.yaml"));
+    let dir = init_with_config("config/brace-glob");
 
     gleon()
         .current_dir(dir.path())
@@ -148,8 +146,7 @@ fn test_status_refuses_an_unsupported_glob() -> Result<(), Box<dyn std::error::E
 /// A workspace whose `required_version` this CLI does not satisfy is refused.
 #[test]
 fn test_status_refuses_a_config_for_a_newer_cli() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = init_with_config(manifest_dir.join("tests/fixtures/config/newer-cli.yaml"));
+    let dir = init_with_config("config/newer-cli");
 
     gleon()
         .current_dir(dir.path())
@@ -164,9 +161,7 @@ fn test_status_refuses_a_config_for_a_newer_cli() -> Result<(), Box<dyn std::err
 
 #[test]
 fn test_status_linux_chrome() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fixture_config = manifest_dir.join("tests/fixtures/platform/linux-chrome.yaml");
-    let dir = init_with_config(&fixture_config);
+    let dir = init_with_config("platform/linux-chrome");
 
     let mut cmd = gleon();
     cmd.current_dir(dir.path())
@@ -181,9 +176,7 @@ fn test_status_linux_chrome() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_status_macos_opaque() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fixture_config = manifest_dir.join("tests/fixtures/platform/macos-opaque.yaml");
-    let dir = init_with_config(&fixture_config);
+    let dir = init_with_config("platform/macos-opaque");
 
     let mut cmd = gleon();
     cmd.current_dir(dir.path()).arg("status").assert().success();
@@ -192,9 +185,7 @@ fn test_status_macos_opaque() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_status_minimal_with_overrides() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fixture_config = manifest_dir.join("tests/fixtures/platform/minimal.yaml");
-    let dir = init_with_config(&fixture_config);
+    let dir = init_with_config("platform/minimal");
 
     let mut cmd = gleon();
     cmd.current_dir(dir.path())
@@ -420,9 +411,7 @@ fn test_invalid_subcommand() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_verbose_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fixture_config = manifest_dir.join("tests/fixtures/platform/minimal.yaml");
-    let dir = init_with_config(&fixture_config);
+    let dir = init_with_config("platform/minimal");
 
     let mut cmd = gleon();
     cmd.current_dir(dir.path())
@@ -437,9 +426,7 @@ fn test_verbose_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_quiet_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fixture_config = manifest_dir.join("tests/fixtures/platform/minimal.yaml");
-    let dir = init_with_config(&fixture_config);
+    let dir = init_with_config("platform/minimal");
 
     let mut cmd = gleon();
     cmd.current_dir(dir.path())
@@ -542,13 +529,7 @@ fn test_cli_diff_exit_code_on_match_and_mismatch() -> Result<(), Box<dyn std::er
     std::fs::create_dir_all(&billing_dir)?;
     std::fs::write(billing_dir.join("form.png"), &img_200)?;
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    std::fs::create_dir_all(dir.path().join(".gleon")).unwrap();
-    std::fs::write(dir.path().join(".gleon").join("gleon.yaml"), config_yaml)?;
+    common::copy_config(dir.path(), "config/billing");
 
     // 3. gleon stage
     let mut cmd_stage = gleon();
@@ -601,13 +582,7 @@ fn test_stage_already_up_to_date_message() -> Result<(), Box<dyn std::error::Err
     std::fs::create_dir_all(&billing_dir)?;
     std::fs::write(billing_dir.join("form.png"), &img_200)?;
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    std::fs::create_dir_all(dir.path().join(".gleon")).unwrap();
-    std::fs::write(dir.path().join(".gleon").join("gleon.yaml"), config_yaml)?;
+    common::copy_config(dir.path(), "config/billing");
 
     // First stage
     let mut cmd_stage1 = gleon();
@@ -714,13 +689,7 @@ fn test_pull_and_push_with_file_storage_url() -> Result<(), Box<dyn std::error::
     std::fs::create_dir_all(&billing_dir)?;
     std::fs::write(billing_dir.join("form.png"), &img_200)?;
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    std::fs::create_dir_all(dir.path().join(".gleon")).unwrap();
-    std::fs::write(dir.path().join(".gleon").join("gleon.yaml"), config_yaml)?;
+    common::copy_config(dir.path(), "config/billing");
 
     let mut cmd_stage = gleon();
     cmd_stage
@@ -939,12 +908,7 @@ fn test_cli_report_defaults_to_the_latest_run() -> Result<(), Box<dyn std::error
     std::fs::create_dir_all(&billing_dir)?;
     std::fs::write(billing_dir.join("form.png"), &img_200)?;
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    std::fs::write(dir.path().join(".gleon").join("gleon.yaml"), config_yaml)?;
+    common::copy_config(dir.path(), "config/billing");
 
     gleon()
         .current_dir(dir.path())
@@ -1196,11 +1160,7 @@ fn test_approve_command() {
         login_dir.join("button.png"),
     )
     .expect("copy screenshot");
-    std::fs::write(
-        base_path.join(".gleon/gleon.yaml"),
-        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"login/*.png\"\n",
-    )
-    .unwrap();
+    common::copy_config(base_path, "config/login");
     gleon().current_dir(base_path).arg("diff").assert().code(1);
     std::fs::write(base_path.join(".gleon/runs/latest/cases/broken.json"), "{").unwrap();
 
@@ -1237,11 +1197,7 @@ fn test_test_runs_the_command_as_one_run() {
     let dir = init_temp_dir();
     let gleon_bin = assert_cmd::cargo::cargo_bin("gleon");
     copy_fixture("baseline_100x100.png", &dir.path().join("shots/new.png"));
-    std::fs::write(
-        dir.path().join(".gleon/gleon.yaml"),
-        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"shots/*.png\"\n",
-    )
-    .unwrap();
+    common::copy_config(dir.path(), "config/shots");
 
     gleon()
         .current_dir(dir.path())
@@ -1459,11 +1415,7 @@ fn test_test_report_approve_end_to_end() {
     let dir = init_temp_dir();
     let root = dir.path();
     let gleon_bin = assert_cmd::cargo::cargo_bin("gleon");
-    std::fs::write(
-        root.join(".gleon/gleon.yaml"),
-        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"shots/*.png\"\n    mode: pixel\n    diff: { threshold: 0.0 }\n",
-    )
-    .unwrap();
+    common::copy_config(root, "config/shots-exact");
     copy_fixture("baseline_100x100.png", &root.join("shots/changed.png"));
     gleon().current_dir(root).arg("stage").assert().success();
     copy_fixture(
@@ -1534,11 +1486,7 @@ fn test_approve_filters_by_platform() {
     let dir = init_temp_dir();
     copy_fixture("baseline_100x100.png", &dir.path().join("login/button.png"));
     copy_fixture("200x100.png", &dir.path().join("login/card.png"));
-    std::fs::write(
-        dir.path().join(".gleon/gleon.yaml"),
-        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"login/*.png\"\n",
-    )
-    .unwrap();
+    common::copy_config(dir.path(), "config/login");
     let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let joint = |args: &[&str]| {
         let mut cmd = gleon();
@@ -1584,11 +1532,7 @@ fn test_approve_filters_by_platform() {
 fn test_diffs_of_two_platforms_then_report() {
     let dir = init_temp_dir();
     copy_fixture("baseline_100x100.png", &dir.path().join("login/button.png"));
-    std::fs::write(
-        dir.path().join(".gleon/gleon.yaml"),
-        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"login/*.png\"\n",
-    )
-    .unwrap();
+    common::copy_config(dir.path(), "config/login");
     let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let latest = dir.path().join(".gleon/runs/latest");
     gleon()
@@ -1641,11 +1585,7 @@ fn test_diffs_of_two_platforms_then_report() {
 fn test_diff_and_report_of_a_labeled_platform() {
     let dir = init_temp_dir();
     copy_fixture("baseline_100x100.png", &dir.path().join("login/button.png"));
-    std::fs::write(
-        dir.path().join(".gleon/gleon.yaml"),
-        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"login/*.png\"\n",
-    )
-    .unwrap();
+    common::copy_config(dir.path(), "config/login");
     let platform = [
         "--os",
         "ios-sim",

@@ -95,7 +95,7 @@
           "minimum": 0.0
         },
         "edge_threshold": {
-          "description": "Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the\nbaseline's luma there (8-bit units, capped at 255) exceeds this, `[0, 254]`: the edges a\nsub-pixel shift or another rasterizer moves (Skia Gold's edge mask). Default 0: off. Hides\nevery change that lies on edges too: on the calibration corpus a missing glyph, a card\nmoved by 1px and, at 64, a missing small icon pass; the lower the value, the more pixels\ncount as edges.",
+          "description": "Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the\nbaseline's luma there (8-bit units, unnormalized like Skia Gold's: a sharp step of 16\ngives 64) exceeds this, `[0, 254]`: the edges a sub-pixel shift or another rasterizer\nmoves (Skia Gold's edge mask). Default 0: off. Hides every change that lies on edges too:\non the calibration corpus a missing glyph, a card moved by 1px and, at 64, a missing small\nicon pass; the lower the value, the more pixels count as edges.",
           "type": "integer",
           "format": "uint8",
           "default": 0,

@@ -490,10 +490,11 @@ impl Call<'_> {
     fn missing_message(&self) -> String {
         let mut message = text::missing_golden(&self.compared_uri());
         if let Some(fallback) = &self.plan.goldens.fallback {
-            message.push_str(&text::missing_fallback(
+            text::push_missing_fallback(
+                &mut message,
                 fallback.platform.as_str(),
                 self.request.golden_uri,
-            ));
+            );
         }
         message
     }

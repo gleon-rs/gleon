@@ -1,0 +1,4 @@
+# A config `gleon init` must leave alone.
+required_version: ">=0.1.0"
+screenshots:
+  - include: "custom/**/*.png"

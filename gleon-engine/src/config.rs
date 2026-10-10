@@ -153,11 +153,11 @@ pub struct DiffConfig {
     #[serde(default)]
     pub anti_alias: bool,
     /// Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the
-    /// baseline's luma there (8-bit units, capped at 255) exceeds this, `[0, 254]`: the edges a
-    /// sub-pixel shift or another rasterizer moves (Skia Gold's edge mask). Default 0: off. Hides
-    /// every change that lies on edges too: on the calibration corpus a missing glyph, a card
-    /// moved by 1px and, at 64, a missing small icon pass; the lower the value, the more pixels
-    /// count as edges.
+    /// baseline's luma there (8-bit units, unnormalized like Skia Gold's: a sharp step of 16
+    /// gives 64) exceeds this, `[0, 254]`: the edges a sub-pixel shift or another rasterizer
+    /// moves (Skia Gold's edge mask). Default 0: off. Hides every change that lies on edges too:
+    /// on the calibration corpus a missing glyph, a card moved by 1px and, at 64, a missing small
+    /// icon pass; the lower the value, the more pixels count as edges.
     #[serde(default, deserialize_with = "deserialize_pixel_option")]
     #[cfg_attr(feature = "schemars", schemars(range(max = 254)))]
     pub edge_threshold: u8,

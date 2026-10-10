@@ -781,9 +781,10 @@ impl Planes<'_> {
     fn windows(&self, rect: Rect) -> SsimRegion {
         let eval = self.coarse_eval;
         let (cx0, cy0) = ((rect.x0 / 2).max(eval.x0), (rect.y0 / 2).max(eval.y0));
+        // Empty (never reversed) when `rect` lies beside the evaluated windows.
         let (cx1, cy1) = (
-            rect.x1.div_ceil(2).min(eval.x1),
-            rect.y1.div_ceil(2).min(eval.y1),
+            rect.x1.div_ceil(2).min(eval.x1).max(cx0),
+            rect.y1.div_ceil(2).min(eval.y1).max(cy0),
         );
         let (mut sum, mut min, mut windows) = (0.0f64, 1.0f32, 0u64);
         for cy in cy0..cy1 {
@@ -914,6 +915,32 @@ mod tests {
         min_similarity: 0.8,
         color_tolerance: 8.0,
     };
+
+    #[test]
+    fn test_windows_of_a_rect_beside_the_evaluated_ones_are_empty() {
+        let eval = Rect {
+            x0: 0,
+            y0: 0,
+            x1: 4,
+            y1: 4,
+        };
+        let planes = Planes {
+            changed: eval,
+            excess: &[],
+            coarse_eval: eval,
+            coarse_ssim: &[0.5; 16],
+            fail_rect: eval,
+            failing: &[],
+        };
+        // Rows overlap the evaluated windows, columns do not.
+        let region = planes.windows(Rect {
+            x0: 12,
+            y0: 0,
+            x1: 16,
+            y1: 4,
+        });
+        assert_eq!((region.min_ssim, region.mean_ssim), (1.0, 1.0));
+    }
 
     fn solid(w: u32, h: u32, c: [u8; 4]) -> RgbaImage {
         ImageBuffer::from_pixel(w, h, Rgba(c))

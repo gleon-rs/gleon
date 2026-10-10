@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use std::{fs, path::Path};
 
 use gleon_core::{
@@ -55,11 +57,7 @@ fn test_approve_full_flow_with_diff_failures() {
     let screenshot_file = screenshot_dir.join("button.png");
     fs::copy(fixtures_dir.join("baseline_100x100.png"), &screenshot_file).unwrap();
 
-    fs::copy(
-        fixtures_dir.join("default_config.yaml"),
-        base_path.join(".gleon").join("gleon.yaml"),
-    )
-    .unwrap();
+    common::copy_config(base_path, "default");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -107,11 +105,7 @@ fn test_approve_uses_the_test_names_of_the_scanner() {
     let base_path = temp_dir.path();
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
     init_workspace(&ctx_init).unwrap();
-    fs::write(
-        base_path.join(".gleon/gleon.yaml"),
-        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"Auth/**\"\n",
-    )
-    .unwrap();
+    common::copy_config(base_path, "auth_any");
     fs::create_dir_all(base_path.join("Auth")).unwrap();
     fs::write(
         base_path.join("Auth/Login.Screen.PNG"),
@@ -149,11 +143,7 @@ fn test_approve_skips_candidates_that_are_no_png() {
     let base_path = temp_dir.path();
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
     init_workspace(&ctx_init).unwrap();
-    fs::write(
-        base_path.join(".gleon/gleon.yaml"),
-        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"billing/**/*.png\"\n",
-    )
-    .unwrap();
+    common::copy_config(base_path, "billing");
     fs::create_dir_all(base_path.join("billing")).unwrap();
     fs::write(
         base_path.join("billing/form.png"),
