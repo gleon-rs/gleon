@@ -702,3 +702,44 @@ fn perf_full_screen_worst_case() {
         a.passed()
     );
 }
+
+/// Peak memory of the largest SSIM comparison the engine admits (4096x4096, every pixel
+/// changed, half of the frame text): run the test binary alone under `/usr/bin/time -l`
+/// (macOS) or `/usr/bin/time -v` (Linux) with `--ignored --exact memory_at_the_analysis_budget`.
+#[test]
+#[ignore = "memory report; run the test binary alone under /usr/bin/time"]
+fn memory_at_the_analysis_budget() {
+    let side = 4096u32;
+    let base = RgbaImage::from_fn(side, side, |x, y| {
+        Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 239) as u8, 255])
+    });
+    let cand = RgbaImage::from_fn(side, side, |x, y| {
+        Rgba([
+            (x % 251) as u8 ^ 1,
+            (y % 241) as u8,
+            255 - (x % 7) as u8,
+            255,
+        ])
+    });
+    let text = [gleon_engine::Region {
+        x: 0,
+        y: 0,
+        width: side,
+        height: side / 2,
+    }];
+    let result = compare_images(
+        &base,
+        &cand,
+        Mode::Ssim,
+        &DiffConfig::default(),
+        &PixelRegions {
+            masks: &[],
+            text: &text,
+            text_tolerance: Some(1.0),
+        },
+    );
+    eprintln!(
+        "verdict: {}",
+        matches!(result, ComparisonResult::Match { .. })
+    );
+}

@@ -776,6 +776,7 @@ mod tests {
                 total_pixels: 1000,
                 diff_pixels,
                 tolerated_pixels: 0,
+                edge_pixels: 0,
                 diff_ratio: diff_pixels as f64 / 1000.0,
                 headroom: 0.0,
                 text: None,

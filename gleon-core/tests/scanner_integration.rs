@@ -49,8 +49,8 @@ fn test_scanner_with_real_fixture() {
     let cases: Vec<TestCase> = FileScanner::scan_workspace(&config, &base_dir)
         .expect("Scanning the workspace should succeed");
 
-    // We found all the expected PNG files (9 files total in the fixtures dir)
-    assert_eq!(cases.len(), 9);
+    // We found all the expected PNG files (11 files total in the fixtures dir)
+    assert_eq!(cases.len(), 11);
 
     // Verify 200x100.png
     let test_case_200 = cases

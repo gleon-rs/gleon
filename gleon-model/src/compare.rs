@@ -264,7 +264,9 @@ pub fn compare(
     let (masks, clamped_masks) = if same_size {
         resolve_zones(masks, width, height)
     } else {
-        (Vec::new(), 0)
+        // Only for the diff of both sizes (in golden pixels): no warning, the sizes are the
+        // finding.
+        (resolve_zones(masks, width, height).0, 0)
     };
     let (mode, config) = tolerance.engine_config();
     let text = text.filter(|text| same_size && !text.regions.is_empty());
@@ -407,6 +409,7 @@ mod tests {
                     total_pixels: 100,
                     diff_pixels: 0,
                     tolerated_pixels: 0,
+                    edge_pixels: 0,
                     diff_ratio: 0.0,
                     headroom: 0.0,
                     text: None,
@@ -415,6 +418,7 @@ mod tests {
                     total_pixels: 100,
                     diff_pixels: 0,
                     tolerated_pixels: 0,
+                    edge_pixels: 0,
                     diff_ratio: 0.0,
                     headroom: 0.0,
                     text: None,
@@ -495,35 +499,45 @@ mod tests {
         assert_eq!(clipped.clamped_masks, 1);
     }
 
-    /// Images of different sizes are not masked: their sizes are the finding, and the diff
-    /// shows both.
+    /// Images of different sizes: their sizes are the finding (no clamped-mask warning), and
+    /// the diff shows both, masked pixels unmarked.
     #[test]
-    fn test_dimension_mismatch_reports_sizes_without_masking() {
+    fn test_dimension_mismatch_reports_sizes_with_a_diff_of_both() {
         let a = png(10, 10, |_, _| RED);
-        let b = png(12, 10, |_, _| RED);
+        let b = png(12, 10, |x, y| {
+            if (x, y) == (1, 1) || (x, y) == (8, 8) {
+                Rgba([0, 0, 0, 255])
+            } else {
+                RED
+            }
+        });
         let mask = Zone {
             x: 0,
             y: 0,
             width: Dimension::Percent(50.0),
             height: Dimension::Pixels(20),
         };
-        let Comparison {
-            compared:
-                Compared::DimensionMismatch {
-                    golden: (10, 10),
-                    candidate: (12, 10),
-                    diff_png: Some(diff_png),
-                },
-            clamped_masks: 0,
-        } = compare(&a, Candidate::Png(&b), &EXACT, &[mask], None).unwrap()
-        else {
-            panic!("a dimension mismatch with a diff expected");
-        };
-        let diff = decode_rgba(&diff_png).unwrap();
-        assert_eq!(diff.dimensions(), (12, 10));
-        // The overlap is darkened (no mask painted it), the candidate's own columns striped.
-        assert_eq!(diff.get_pixel(0, 0).0, [127, 0, 0, 255]);
-        assert_eq!(diff.get_pixel(10, 0).0, [0, 200, 83, 255]);
+        let comparison = compare(&a, Candidate::Png(&b), &EXACT, &[mask], None).unwrap();
+        let diff = |png: &[u8]| decode_rgba(png).unwrap();
+        assert!(
+            matches!(
+                &comparison,
+                Comparison {
+                    compared: Compared::DimensionMismatch {
+                        golden: (10, 10),
+                        candidate: (12, 10),
+                        diff_png: Some(png),
+                    },
+                    clamped_masks: 0,
+                } if diff(png).dimensions() == (12, 10)
+                    // Masked: the darkened golden; unmasked: magenta; the candidate's own
+                    // columns: green stripes.
+                    && diff(png).get_pixel(1, 1).0 == [127, 0, 0, 255]
+                    && diff(png).get_pixel(8, 8).0 == [255, 0, 255, 255]
+                    && diff(png).get_pixel(10, 0).0 == [0, 200, 83, 255]
+            ),
+            "{comparison:?}"
+        );
     }
 
     /// Raw pixels compare like the PNG they encode to; pixels of the wrong length are the
@@ -705,6 +719,7 @@ mod tests {
             checked_pixels: 1,
             diff_count: 0,
             tolerated_count: 0,
+            edge_count: 0,
             text: None,
         };
         assert!(Metrics::from_measurement(&pixel, &SSIM, None).is_none());

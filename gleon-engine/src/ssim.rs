@@ -32,10 +32,12 @@ use crate::{Pixels, par};
 
 /// Largest image (in pixels, 4096x4096) admitted to [`analyze`].
 ///
-/// The analysis workspace grows with the changed area (roughly 16 bytes per pixel on top of the two
-/// decoded images in the worst case), so it is bounded separately from, and well below, the decoder
-/// budget: realistic goldens (a full `MaterialApp` capture is 2400x1800, a 5K screen 14.7 MP) fit,
-/// decoder-limit images cannot exhaust memory.
+/// The analysis workspace grows with the changed area, so it is bounded separately from, and
+/// well below, the decoder budget: realistic goldens (a full `MaterialApp` capture is 2400x1800, a
+/// 5K screen 14.7 MP) fit, decoder-limit images cannot exhaust memory. Worst case measured at the
+/// budget (every pixel changed, half the frame text, so the actual image is copied and the text
+/// classified): 357 MiB peak RSS for the whole process, both 64 MiB images included
+/// (`memory_at_the_analysis_budget` in `tests/ssim_corpus.rs`).
 pub const MAX_ANALYSIS_PIXELS: u64 = 4096 * 4096;
 
 /// Returns whether a `width` x `height` image fits [`MAX_ANALYSIS_PIXELS`].
@@ -215,20 +217,14 @@ impl BBox {
 /// Full-resolution image accessor.
 #[derive(Clone, Copy)]
 struct Img<'a> {
-    raw: &'a [u8],
+    pixels: Pixels<'a>,
     width: usize,
     height: usize,
 }
 
 impl Img<'_> {
-    const fn rgba(self, x: usize, y: usize) -> [u8; 4] {
-        let i = (y * self.width + x) * 4;
-        [
-            self.raw[i],
-            self.raw[i + 1],
-            self.raw[i + 2],
-            self.raw[i + 3],
-        ]
+    fn rgba(self, x: usize, y: usize) -> [u8; 4] {
+        self.pixels.rgba(x, y)
     }
 
     /// Premultiplied RGBA in 8-bit units, so alpha changes show in the color channels too.
@@ -523,9 +519,10 @@ fn diff_bbox(base: Img<'_>, cand: Img<'_>) -> Option<(Rect, u64)> {
     let mut count = 0u64;
     let row_bytes = base.width.max(1) * 4;
     let rows = base
-        .raw
+        .pixels
+        .raw()
         .chunks_exact(row_bytes)
-        .zip(cand.raw.chunks_exact(row_bytes));
+        .zip(cand.pixels.raw().chunks_exact(row_bytes));
     for (y, (expected, found)) in rows.enumerate() {
         if expected == found {
             continue;
@@ -569,12 +566,12 @@ pub fn analyze<'a>(
     );
     let (width, height) = (image_width as usize, image_height as usize);
     let base = Img {
-        raw: baseline.raw(),
+        pixels: baseline,
         width,
         height,
     };
     let cand = Img {
-        raw: actual.raw(),
+        pixels: actual,
         width,
         height,
     };
@@ -839,7 +836,7 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
 pub(crate) fn passing_diff<'a>(baseline: Pixels<'a>, actual: Pixels<'a>) -> RgbaImage {
     let (width, height) = baseline.dimensions();
     let img = |pixels: Pixels<'a>| Img {
-        raw: pixels.raw(),
+        pixels,
         width: width as usize,
         height: height as usize,
     };
@@ -866,13 +863,14 @@ pub(crate) fn faded(pixel: [u8; 4]) -> [u8; 4] {
 /// Baseline faded towards white, tolerated differences in yellow, failing pixels in red.
 fn render_diff(base: Img<'_>, cand: Img<'_>, rect: Rect, failing: &[bool]) -> RgbaImage {
     let fw = rect.width();
-    let mut diff = vec![0u8; base.raw.len()];
+    let mut diff = vec![0u8; base.pixels.raw().len()];
     let pixels = diff.as_chunks_mut::<4>().0.iter_mut().zip(
-        base.raw
+        base.pixels
+            .raw()
             .as_chunks::<4>()
             .0
             .iter()
-            .zip(cand.raw.as_chunks::<4>().0),
+            .zip(cand.pixels.raw().as_chunks::<4>().0),
     );
     for (i, (pixel, (b, a))) in pixels.enumerate() {
         let (x, y) = (i % base.width, i / base.width);

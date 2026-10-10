@@ -1,0 +1,10 @@
+required_version: ">=0.1.0"
+screenshots:
+  # Exact: the anti-aliasing of another rasterizer fails.
+  - include: "strict/*.png"
+    mode: pixel
+    diff: { threshold: 0 }
+  # Exact but for anti-aliased pixels.
+  - include: "aa/*.png"
+    mode: pixel
+    diff: { threshold: 0, anti_alias: true }

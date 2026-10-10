@@ -6,8 +6,8 @@
 //! win over text. Text is what operating systems draw differently (their font engines, hinting);
 //! everything else of a test frame renders the same everywhere.
 //!
-//! [`PixelOptions`] can let some differing pixels pass (counted as equal): small channel deltas,
-//! anti-aliased pixels and, outside text, pixels on the baseline's edges.
+//! [`PixelOptions`] can let some differing pixels outside text pass (counted as equal): small
+//! channel deltas, anti-aliased pixels and pixels on the baseline's edges.
 
 use image::RgbaImage;
 
@@ -51,17 +51,17 @@ impl PixelRegions<'_> {
 /// Which differing pixels the pixel mode lets pass, counted as equal ([`Self::STRICT`]: none).
 ///
 /// For rendering noise of shapes (GPU drift, anti-aliasing, sub-pixel geometry) in a pixel or
-/// exact comparison; not a substitute for SSIM mode, and text keeps its own tolerance (the edge
-/// mask never applies to it).
+/// exact comparison; not a substitute for SSIM mode. No option applies inside text: text keeps
+/// its own tolerance (its tiles), so an option never lowers the share of a changed glyph.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PixelOptions {
     /// A pixel passes when no RGBA byte differs by more than this (0: off).
     pub channel_tolerance: u8,
     /// A pixel passes when it looks anti-aliased in either image (the detection of pixelmatch).
     pub anti_alias: bool,
-    /// A pixel outside text passes when the Sobel gradient of the baseline's luma there (8-bit
-    /// units, capped at 255) exceeds this (0: off; 255 hides nothing). Every change on edges
-    /// passes too: a missing glyph or small icon, a 1px move (see `tests/ssim_corpus.rs`).
+    /// A pixel passes when the Sobel gradient magnitude of the baseline's luma there (8-bit
+    /// units) exceeds this (0: off). Every change on edges passes too: a missing glyph or small
+    /// icon, a 1px move (see `tests/ssim_corpus.rs`).
     pub edge_threshold: u8,
 }
 
@@ -76,9 +76,7 @@ impl PixelOptions {
     /// Whether every differing pixel is a difference.
     #[must_use]
     pub const fn is_strict(&self) -> bool {
-        self.channel_tolerance == 0
-            && !self.anti_alias
-            && (self.edge_threshold == 0 || self.edge_threshold == u8::MAX)
+        self.channel_tolerance == 0 && !self.anti_alias && self.edge_threshold == 0
     }
 }
 
@@ -115,7 +113,7 @@ impl TextTile {
 pub struct TextAnalysis {
     /// Text pixels (masked ones left out).
     pub pixels: u64,
-    /// Text pixels that differ.
+    /// Text pixels whose RGBA bytes differ (no pixel option applies to text).
     pub diff_pixels: u64,
     /// The tile with the largest share of differing pixels (the first of equal ones); `None`
     /// when no text pixel differs.
@@ -438,7 +436,13 @@ fn classify(
                     if expected == found {
                         continue;
                     }
-                    *class = match judge.tolerance(column, row, *expected, *found, is_text) {
+                    // Text keeps its own policy (its tiles): no option applies to it.
+                    if is_text {
+                        counts.text_diff += 1;
+                        *class = Class::TextDiff;
+                        continue;
+                    }
+                    *class = match judge.tolerance(column, row, *expected, *found) {
                         Some(Class::Edge) => {
                             counts.edge += 1;
                             Class::Edge
@@ -446,10 +450,6 @@ fn classify(
                         Some(tolerated) => {
                             counts.tolerated += 1;
                             tolerated
-                        }
-                        None if is_text => {
-                            counts.text_diff += 1;
-                            Class::TextDiff
                         }
                         None => {
                             counts.diff += 1;
@@ -485,8 +485,8 @@ fn classify(
     (classes, analysis)
 }
 
-/// Decides whether a differing pixel passes under the [`PixelOptions`], in their order: the
-/// channel tolerance, then the anti-aliasing detection, then (outside text) the edge mask.
+/// Decides whether a differing strict pixel (never text) passes under the [`PixelOptions`], in
+/// their order: the channel tolerance, then the anti-aliasing detection, then the edge mask.
 ///
 /// Luma is integer arithmetic throughout (Rec. 601 weights 77/150/29 over white, scaled by
 /// `255 * 256`), so every platform takes the same decisions bit for bit.
@@ -499,14 +499,7 @@ struct Judge<'a> {
 impl Judge<'_> {
     /// `Some(Class::Tolerated)`, `Some(Class::Edge)` or `None` (a difference) for the differing
     /// pixel at (`x`, `y`) of `expected` (baseline) and `found` (actual).
-    fn tolerance(
-        &self,
-        x: usize,
-        y: usize,
-        expected: [u8; 4],
-        found: [u8; 4],
-        is_text: bool,
-    ) -> Option<Class> {
+    fn tolerance(&self, x: usize, y: usize, expected: [u8; 4], found: [u8; 4]) -> Option<Class> {
         let PixelOptions {
             channel_tolerance,
             anti_alias,
@@ -524,16 +517,8 @@ impl Judge<'_> {
         {
             return Some(Class::Tolerated);
         }
-        (!is_text && is_edge(self.baseline, x, y, edge_threshold)).then_some(Class::Edge)
+        is_edge(self.baseline, x, y, edge_threshold).then_some(Class::Edge)
     }
-}
-
-/// The pixel at (`x`, `y`) of `image` (inside it).
-fn pixel_at(image: Pixels<'_>, x: usize, y: usize) -> [u8; 4] {
-    let start = (y * image.width as usize + x) * 4;
-    let mut pixel = [0; 4];
-    pixel.copy_from_slice(&image.raw()[start..start + 4]);
-    pixel
 }
 
 /// The luma of `pixel` composited over white, in units of `1 / (255 * 256)` of 8-bit luma.
@@ -544,8 +529,11 @@ fn luma([r, g, b, a]: [u8; 4]) -> i64 {
 }
 
 /// The 3x3 neighborhood of (`x`, `y`) in a `width` x `height` image, the center excluded and
-/// clipped at the image's edges, column by column (the order of pixelmatch), and whether the center
-/// lies on an edge of the image.
+/// clipped at the image's edges, column by column (the order of pixelmatch), and whether the
+/// center lies on an edge of the image.
+///
+/// Ranges over the clipped neighborhood: measured faster than filtering fixed offsets (91 vs 96
+/// ms for a fully changed 1080x2560 frame under `aa + edges`, `gleon-model/tests/perf.rs`).
 fn neighbors(
     x: usize,
     y: usize,
@@ -566,12 +554,12 @@ fn neighbors(
 /// brightest of them sits in a flat area (3+ identical neighbors) in `image` and `other` alike.
 fn is_anti_aliased(image: Pixels<'_>, other: Pixels<'_>, x: usize, y: usize) -> bool {
     let (width, height) = (image.width as usize, image.height as usize);
-    let center = luma(pixel_at(image, x, y));
+    let center = luma(image.rgba(x, y));
     let (around, on_border) = neighbors(x, y, width, height);
     let mut zeroes = usize::from(on_border);
     let (mut darkest, mut brightest) = ((0, None), (0, None));
     for (nx, ny) in around {
-        let delta = center - luma(pixel_at(image, nx, ny));
+        let delta = center - luma(image.rgba(nx, ny));
         if delta == 0 {
             zeroes += 1;
             if zeroes > 2 {
@@ -595,27 +583,27 @@ fn is_anti_aliased(image: Pixels<'_>, other: Pixels<'_>, x: usize, y: usize) -> 
 /// Whether the pixel at (`x`, `y`) of `image` has 3+ neighbors of identical bytes (an image edge
 /// counts as one).
 fn has_many_siblings(image: Pixels<'_>, x: usize, y: usize) -> bool {
-    let center = pixel_at(image, x, y);
+    let center = image.rgba(x, y);
     let (around, on_border) = neighbors(x, y, image.width as usize, image.height as usize);
     let same = around
-        .filter(|&(nx, ny)| pixel_at(image, nx, ny) == center)
+        .filter(|&(nx, ny)| image.rgba(nx, ny) == center)
         .take(3)
         .count();
     same + usize::from(on_border) > 2
 }
 
 /// Whether (`x`, `y`) lies on an edge of `baseline`: its Sobel gradient of luma (8-bit units,
-/// neighbors outside the image repeat the border, capped at 255) exceeds `threshold`; never for
-/// threshold 0 (off) or 255.
+/// neighbors outside the image repeat the border) exceeds `threshold`; never for threshold 0
+/// (off).
 fn is_edge(baseline: Pixels<'_>, x: usize, y: usize, threshold: u8) -> bool {
-    if threshold == 0 || threshold == u8::MAX {
+    if threshold == 0 {
         return false;
     }
     let (width, height) = (baseline.width as usize, baseline.height as usize);
     let at = |dx: isize, dy: isize| {
         let nx = x.saturating_add_signed(dx).min(width - 1);
         let ny = y.saturating_add_signed(dy).min(height - 1);
-        luma(pixel_at(baseline, nx, ny))
+        luma(baseline.rgba(nx, ny))
     };
     let gx = at(1, -1) + 2 * at(1, 0) + at(1, 1) - at(-1, -1) - 2 * at(-1, 0) - at(-1, 1);
     let gy = at(-1, 1) + 2 * at(0, 1) + at(1, 1) - at(-1, -1) - 2 * at(0, -1) - at(1, -1);
@@ -812,9 +800,10 @@ fn count_mismatched_pixels(baseline: Pixels<'_>, actual: Pixels<'_>) -> u64 {
 /// The diff visualization of a `baseline` and an `actual` image of different sizes.
 ///
 /// The canvas has the larger width and the larger height: the area both cover is compared like
-/// [`compare`] without regions (differences magenta on the darkened baseline), the area only the
-/// baseline covers is darkened with blue diagonal stripes, the area only the actual image covers
-/// with green ones, and the corner neither covers is gray.
+/// [`compare`] with `masks` (differences magenta on the darkened baseline, masked pixels never
+/// marked), the area only the baseline covers is darkened with blue diagonal stripes, the area
+/// only the actual image covers with green ones, and the corner neither covers is gray. `masks`
+/// are in baseline pixels; their parts outside the area both cover do not matter.
 ///
 /// `None` when the canvas is over the decoding budget ([`crate::decode::fits_budget`]): two
 /// images within it can still span a canvas beyond it (16384x1 and 1x16384).
@@ -822,6 +811,7 @@ fn count_mismatched_pixels(baseline: Pixels<'_>, actual: Pixels<'_>) -> u64 {
 pub fn dimension_diff<'a>(
     baseline: impl Into<Pixels<'a>>,
     actual: impl Into<Pixels<'a>>,
+    masks: &[Region],
 ) -> Option<RgbaImage> {
     let (baseline, actual) = (baseline.into(), actual.into());
     let ((baseline_width, baseline_height), (actual_width, actual_height)) =
@@ -847,10 +837,17 @@ pub fn dimension_diff<'a>(
     par::for_each_chunk_mut(&mut diff, row_bytes, |y, out| {
         let expected = row_of(baseline, baseline_width, baseline_height, y);
         let found = row_of(actual, actual_width, actual_height, y);
+        // The masked columns of this row.
+        let masked: Vec<std::ops::Range<usize>> = masks
+            .iter()
+            .filter(|mask| (mask.y as usize..(mask.y + mask.height) as usize).contains(&y))
+            .map(|mask| mask.x as usize..(mask.x + mask.width) as usize)
+            .collect();
         for (x, pixel) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let is_stripe = (x + y) % 8 < 4;
+            let is_masked = masked.iter().any(|columns| columns.contains(&x));
             *pixel = match (expected.get(x).copied(), found.get(x).copied()) {
-                (Some(expected), Some(found)) if expected == found => darken(expected),
+                (Some(expected), Some(found)) if expected == found || is_masked => darken(expected),
                 (Some(_), Some(_)) => MAGENTA,
                 (Some(_), None) if is_stripe => BLUE,
                 (None, Some(_)) if is_stripe => GREEN,
@@ -1329,7 +1326,7 @@ mod tests {
         let mut actual = ImageBuffer::from_pixel(12, 8, red);
         actual.put_pixel(3, 3, Rgba([0, 0, 0, 255]));
 
-        let diff = dimension_diff(&baseline, &actual).unwrap();
+        let diff = dimension_diff(&baseline, &actual, &[]).unwrap();
         assert_eq!(diff.dimensions(), (12, 10));
         // Overlap: equal pixels darkened, the changed one magenta.
         assert_eq!(*diff.get_pixel(0, 0), Rgba([100, 0, 0, 255]));
@@ -1343,18 +1340,45 @@ mod tests {
         // Neither.
         assert_eq!(*diff.get_pixel(11, 9), Rgba(UNCOVERED));
         // The other way round, the stripes swap colors.
-        let swapped = dimension_diff(&actual, &baseline).unwrap();
+        let swapped = dimension_diff(&actual, &baseline, &[]).unwrap();
         assert_eq!(*swapped.get_pixel(0, 8), Rgba(GREEN));
         assert_eq!(*swapped.get_pixel(10, 7), Rgba(BLUE));
+    }
+
+    #[test]
+    fn test_dimension_diff_leaves_masked_pixels_unmarked() {
+        let red = Rgba([200, 0, 0, 255]);
+        let baseline = ImageBuffer::from_pixel(10, 10, red);
+        let mut actual = ImageBuffer::from_pixel(12, 8, red);
+        actual.put_pixel(3, 3, Rgba([0, 0, 0, 255]));
+        actual.put_pixel(6, 6, Rgba([0, 0, 0, 255]));
+        // A mask over (3, 3) and one reaching beyond the overlap: clipped, never a panic.
+        let masks = [
+            Region {
+                x: 2,
+                y: 2,
+                width: 3,
+                height: 3,
+            },
+            Region {
+                x: 9,
+                y: 7,
+                width: 5,
+                height: 5,
+            },
+        ];
+        let diff = dimension_diff(&baseline, &actual, &masks).unwrap();
+        assert_eq!(*diff.get_pixel(3, 3), Rgba([100, 0, 0, 255]));
+        assert_eq!(*diff.get_pixel(6, 6), Rgba(MAGENTA));
     }
 
     #[test]
     fn test_dimension_diff_needs_a_canvas_within_the_budget() {
         let tall = RgbaImage::new(1, 16384);
         let wide = RgbaImage::new(16384, 1);
-        assert_eq!(dimension_diff(&tall, &wide), None);
+        assert_eq!(dimension_diff(&tall, &wide, &[]), None);
         assert_eq!(
-            dimension_diff(&RgbaImage::new(0, 3), &RgbaImage::new(0, 4)),
+            dimension_diff(&RgbaImage::new(0, 3), &RgbaImage::new(0, 4), &[]),
             None
         );
     }
@@ -1448,16 +1472,6 @@ mod tests {
         assert_eq!(*diff.get_pixel(5, 5), Rgba(CYAN));
         assert_eq!(*diff.get_pixel(1, 1), Rgba(MAGENTA));
 
-        // 255 hides nothing (gradients are capped at 255): the strict fast path.
-        assert!(options(0, false, 255).is_strict());
-        let capped = compare(
-            &baseline,
-            &actual,
-            &PixelRegions::NONE,
-            &options(0, false, 255),
-        );
-        assert_eq!(capped.analysis.diff_pixels, 3);
-
         // Never inside text: glyphs are all edges.
         let text = [Region {
             x: 4,
@@ -1478,6 +1492,37 @@ mod tests {
         .analysis;
         assert_eq!(in_text.edge_pixels, 0);
         assert_eq!(in_text.text.unwrap().diff_pixels, 1);
+    }
+
+    /// Text keeps its own policy: no option lets a differing text pixel pass, so an option meant
+    /// for the noise of shapes never lowers the share of a changed glyph in its tile.
+    #[test]
+    fn test_options_never_apply_inside_text() {
+        let baseline = edge_frame(128);
+        let actual = edge_frame(100); // anti-aliasing of the edge changed: 10 pixels
+        let text = [Region {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        }];
+        let regions = PixelRegions {
+            masks: &[],
+            text: &text,
+            text_tolerance: Some(1.0),
+        };
+        let compared = compare(&baseline, &actual, &regions, &options(254, true, 64));
+        assert_eq!(compared.analysis.tolerated_pixels, 0);
+        assert_eq!(compared.analysis.edge_pixels, 0);
+        assert_eq!(compared.analysis.text.unwrap().diff_pixels, 10);
+        // Outside text the same change is tolerated.
+        let outside = compare(
+            &baseline,
+            &actual,
+            &PixelRegions::NONE,
+            &options(0, true, 0),
+        );
+        assert_eq!(outside.analysis.tolerated_pixels, 10);
     }
 
     #[test]

@@ -207,6 +207,7 @@ fn sample_history() -> DashboardHistory {
                 total_pixels: 60_000,
                 diff_pixels: 128,
                 tolerated_pixels: 0,
+                edge_pixels: 0,
                 diff_ratio: 128.0 / 60_000.0,
                 headroom: -128.0 / 60_000.0,
                 text: None,

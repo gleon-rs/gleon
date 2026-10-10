@@ -4,6 +4,7 @@ use image::RgbaImage;
 use tracing::warn;
 
 use crate::{
+    Pixels,
     config::{Dimension, Zone},
     ssim::Region,
 };
@@ -99,6 +100,47 @@ pub fn paint_black(img: &mut RgbaImage, regions: &[Region]) {
                 fill(y * row_bytes + left, y * row_bytes + right);
             }
         }
+    }
+}
+
+/// The row spans (byte ranges of the raw buffer) of `regions` in an image of `row_bytes` bytes
+/// per row; the regions lie inside the image.
+fn row_spans(regions: &[Region], row_bytes: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+    regions.iter().flat_map(move |region| {
+        let (left, right) = (
+            region.x as usize * 4,
+            (region.x + region.width) as usize * 4,
+        );
+        (region.y as usize..(region.y + region.height) as usize)
+            .map(move |y| y * row_bytes + left..y * row_bytes + right)
+    })
+}
+
+/// Whether `a` and `b` (of the same size) differ anywhere inside `regions` (inside the images).
+#[must_use]
+pub fn differ_inside(a: Pixels<'_>, b: Pixels<'_>, regions: &[Region]) -> bool {
+    let row_bytes = a.dimensions().0 as usize * 4;
+    row_spans(regions, row_bytes).any(|span| a.raw()[span.clone()] != b.raw()[span])
+}
+
+/// Copies the pixels of `regions` from `source` (of the same size) into `image`.
+///
+/// The regions then compare as equal while their surroundings keep their real neighbors: an
+/// SSIM comparison excludes text and masks this way (painting them over would widen the
+/// envelope of the pixels around them).
+///
+/// # Panics
+/// Panics if a region reaches beyond the images or the sizes differ.
+pub fn copy_regions(image: &mut RgbaImage, source: Pixels<'_>, regions: &[Region]) {
+    assert_eq!(
+        image.dimensions(),
+        source.dimensions(),
+        "same sizes expected"
+    );
+    let row_bytes = image.width() as usize * 4;
+    let raw: &mut [u8] = image.as_mut();
+    for span in row_spans(regions, row_bytes) {
+        raw[span.clone()].copy_from_slice(&source.raw()[span]);
     }
 }
 

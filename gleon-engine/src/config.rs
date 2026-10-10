@@ -141,22 +141,45 @@ pub struct DiffConfig {
     )]
     #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 255.0)))]
     pub color_tolerance: f64,
-    /// Pixel mode: a differing pixel counts as equal when none of its RGBA bytes differs by more
-    /// than this, `[0, 255]` (default 0). For GPU and color-conversion drift, not for text.
-    #[serde(default)]
+    /// Pixel mode, outside text: a differing pixel counts as equal when none of its RGBA bytes
+    /// differs by more than this, `[0, 254]` (default 0: off). For GPU and color-conversion
+    /// drift.
+    #[serde(default, deserialize_with = "deserialize_pixel_option")]
+    #[cfg_attr(feature = "schemars", schemars(range(max = 254)))]
     pub channel_tolerance: u8,
-    /// Pixel mode: a differing pixel counts as equal when it looks anti-aliased in either image
-    /// (the detection of pixelmatch: between a darker and a brighter neighbor that sit in flat areas
-    /// of both images). Default off.
+    /// Pixel mode, outside text: a differing pixel counts as equal when it looks anti-aliased in
+    /// either image (the detection of pixelmatch: between a darker and a brighter neighbor that
+    /// sit in flat areas of both images). Default off.
     #[serde(default)]
     pub anti_alias: bool,
-    /// Pixel mode: a differing pixel outside text counts as equal when the Sobel gradient of the
-    /// baseline's luma there (8-bit units, capped at 255) exceeds this, `[0, 255]`: the edges a
-    /// sub-pixel shift or another rasterizer moves (Skia Gold's edge mask). Default 0 (off);
-    /// 255 hides nothing. Hides every change that lies on edges too: on the calibration corpus a
-    /// missing glyph, a card moved by 1px and, at 64, a missing small icon pass.
-    #[serde(default)]
+    /// Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the
+    /// baseline's luma there (8-bit units, capped at 255) exceeds this, `[0, 254]`: the edges a
+    /// sub-pixel shift or another rasterizer moves (Skia Gold's edge mask). Default 0: off. Hides
+    /// every change that lies on edges too: on the calibration corpus a missing glyph, a card
+    /// moved by 1px and, at 64, a missing small icon pass; the lower the value, the more pixels
+    /// count as edges.
+    #[serde(default, deserialize_with = "deserialize_pixel_option")]
+    #[cfg_attr(feature = "schemars", schemars(range(max = 254)))]
     pub edge_threshold: u8,
+}
+
+/// The largest `channel_tolerance` and `edge_threshold`: 255 would make every pixel equal or
+/// hide nothing (gradients are capped at 255), so it is no valid setting.
+pub const MAX_PIXEL_OPTION: u8 = 254;
+
+fn deserialize_pixel_option<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    u8::deserialize(deserializer).and_then(|value| {
+        if value <= MAX_PIXEL_OPTION {
+            Ok(value)
+        } else {
+            Err(serde::de::Error::custom(
+                "pixel options must be between 0 and 254 (0 turns one off)",
+            ))
+        }
+    })
 }
 
 /// The largest `color_tolerance`: a whole 8-bit channel.
@@ -347,5 +370,16 @@ mod tests {
         ] {
             assert!(serde_yaml::from_str::<DiffConfig>(bad).is_err(), "{bad}");
         }
+        // 255 would compare nothing (every pixel within 255) or hide nothing (gradients are
+        // capped at 255): a config error, not a silent extreme.
+        let err = |yaml: &str| {
+            serde_yaml::from_str::<DiffConfig>(yaml)
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(err("channel_tolerance: 255").contains("between 0 and 254"));
+        assert!(err("edge_threshold: 255").contains("between 0 and 254"));
+        let edge: DiffConfig = serde_yaml::from_str("edge_threshold: 254").unwrap();
+        assert_eq!(edge.edge_threshold, 254);
     }
 }

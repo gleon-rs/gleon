@@ -646,3 +646,100 @@ screenshots:
     let saved_actual_bytes = fs::read(&expected_actual_file).unwrap();
     assert_eq!(saved_actual_bytes, actual_png_bytes);
 }
+
+/// The pixel options of a rule reach the engine through `gleon diff`: real PNGs of an edge whose
+/// anti-aliasing another rasterizer drew differently fail exactly and pass with `anti_alias`,
+/// and the case report counts the tolerated pixels.
+#[test]
+fn test_diff_applies_the_pixel_options_of_a_rule() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    init_workspace(&ctx).unwrap();
+    fs::copy(
+        fixtures.join("pixel_options_config.yaml"),
+        root.join(".gleon/gleon.yaml"),
+    )
+    .unwrap();
+    for dir in ["strict", "aa"] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+        fs::copy(
+            fixtures.join("aa_edge_baseline_10x10.png"),
+            root.join(dir).join("edge.png"),
+        )
+        .unwrap();
+    }
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    stage_workspace(&ctx, None).unwrap();
+    for dir in ["strict", "aa"] {
+        fs::copy(
+            fixtures.join("aa_edge_actual_10x10.png"),
+            root.join(dir).join("edge.png"),
+        )
+        .unwrap();
+    }
+
+    let result = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_eq!((result.total_tests, result.failed_tests), (2, 1));
+
+    let strict = case_report(root, "strict/edge");
+    assert_eq!(strict.outcome, CaseOutcome::Mismatch);
+    let aa = case_report(root, "aa/edge");
+    assert_eq!(aa.outcome, CaseOutcome::Match);
+    assert!(
+        matches!(
+            aa.metrics,
+            Some(gleon_core::case::Metrics::Pixel {
+                diff_pixels: 0,
+                tolerated_pixels: 10,
+                edge_pixels: 0,
+                ..
+            })
+        ),
+        "{:?}",
+        aa.metrics
+    );
+    assert!(matches!(
+        aa.comparison.tolerance,
+        gleon_model::tolerance::Tolerance::Pixel {
+            anti_alias: true,
+            ..
+        }
+    ));
+}
+
+/// A screenshot of another size than its baseline keeps a diff of both sizes beside the two
+/// images.
+#[test]
+fn test_diff_keeps_a_diff_of_both_sizes_for_a_dimension_mismatch() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    init_workspace(&ctx).unwrap();
+    fs::write(
+        root.join(".gleon/gleon.yaml"),
+        "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"shots/*.png\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("shots")).unwrap();
+    fs::copy(
+        fixtures.join("baseline_100x100.png"),
+        root.join("shots/size.png"),
+    )
+    .unwrap();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    stage_workspace(&ctx, None).unwrap();
+    fs::copy(fixtures.join("200x100.png"), root.join("shots/size.png")).unwrap();
+
+    run_diff(&ctx, &DiffOptions::default()).unwrap();
+    let report = case_report(root, "shots/size");
+    assert_eq!(report.outcome, CaseOutcome::DimensionMismatch);
+    let diff = report
+        .artifacts
+        .and_then(|artifacts| artifacts.diff)
+        .expect("a diff of both sizes");
+    let diff = image::open(root.join(diff)).unwrap();
+    assert_eq!((diff.width(), diff.height()), (200, 100));
+}

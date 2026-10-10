@@ -26,6 +26,14 @@ pub enum ToleranceError {
     /// A `color_tolerance` outside `[0, 255]` (NaN included).
     #[error("`color_tolerance` must be between 0 and 255 (got {0})")]
     ColorTolerance(f64),
+    /// A pixel option above [`gleon_engine::config::MAX_PIXEL_OPTION`].
+    #[error("`{name}` must be between 0 and 254 (got {value})")]
+    PixelOption {
+        /// Option name (`channel_tolerance` or `edge_threshold`).
+        name: &'static str,
+        /// The rejected value.
+        value: u8,
+    },
 }
 
 /// Comparison tolerance.
@@ -43,16 +51,19 @@ pub enum Tolerance {
         /// Largest tolerated fraction of differing pixels, `[0, 1]`.
         #[schemars(range(min = 0.0, max = 1.0))]
         max_diff_ratio: f64,
-        /// A differing pixel counts as equal when no RGBA byte differs by more than this
-        /// (0: off).
-        #[serde(default, skip_serializing_if = "is_zero")]
+        /// A differing pixel outside text counts as equal when no RGBA byte differs by more than
+        /// this, `[0, 254]` (0: off).
+        #[serde(default, skip_serializing_if = "crate::serde_skip::is_default")]
+        #[schemars(range(max = 254))]
         channel_tolerance: u8,
-        /// A differing pixel counts as equal when it looks anti-aliased in either image.
-        #[serde(default, skip_serializing_if = "is_false")]
+        /// A differing pixel outside text counts as equal when it looks anti-aliased in either
+        /// image.
+        #[serde(default, skip_serializing_if = "crate::serde_skip::is_default")]
         anti_alias: bool,
         /// A differing pixel outside text counts as equal when the Sobel gradient of the golden's
-        /// luma there exceeds this (0: off; 255 hides nothing).
-        #[serde(default, skip_serializing_if = "is_zero")]
+        /// luma there exceeds this, `[0, 254]` (0: off).
+        #[serde(default, skip_serializing_if = "crate::serde_skip::is_default")]
+        #[schemars(range(max = 254))]
         edge_threshold: u8,
     },
     /// Tolerates rendering noise under the engine's SSIM policy.
@@ -64,22 +75,6 @@ pub enum Tolerance {
         #[schemars(range(min = 0.0, max = 255.0))]
         color_tolerance: f64,
     },
-}
-
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde passes skip_serializing_if a reference"
-)]
-const fn is_zero(value: &u8) -> bool {
-    *value == 0
-}
-
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde passes skip_serializing_if a reference"
-)]
-const fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 impl Tolerance {
@@ -158,7 +153,23 @@ impl Tolerance {
         };
         match *self {
             Self::Exact {} => Ok(()),
-            Self::Pixel { max_diff_ratio, .. } => ratio("max_diff_ratio", max_diff_ratio),
+            Self::Pixel {
+                max_diff_ratio,
+                channel_tolerance,
+                edge_threshold,
+                ..
+            } => {
+                let option = |name, value| {
+                    if value <= gleon_engine::config::MAX_PIXEL_OPTION {
+                        Ok(())
+                    } else {
+                        Err(ToleranceError::PixelOption { name, value })
+                    }
+                };
+                ratio("max_diff_ratio", max_diff_ratio)
+                    .and_then(|()| option("channel_tolerance", channel_tolerance))
+                    .and_then(|()| option("edge_threshold", edge_threshold))
+            }
             Self::Ssim {
                 min_similarity,
                 color_tolerance,
@@ -235,16 +246,17 @@ impl Tolerance {
     }
 }
 
-/// How much text may differ, in pixel and exact mode.
+/// How much text may differ, under any [`Tolerance`].
 ///
 /// The largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel
 /// tile of the text regions an integration reports (lines of its render tree); everything else
-/// is compared strictly.
+/// is compared under the tolerance (in SSIM mode the text is left out of both of its gates), and
+/// no pixel option applies to text.
 ///
 /// Operating systems draw glyphs differently (their font engines, hinting): across them 40% or
 /// more of a tile of text differs while a changed digit of the same width is about a quarter, so
-/// no share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking
-/// it: layout stays exact, text content is not compared. Lower values compare text, at the
+/// no share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as
+/// masking it: the layout is compared, text content is not. Lower values compare text, at the
 /// risk of failing on another OS's rendering. Against a golden of the platform it runs on, the
 /// default is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -389,6 +401,28 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn test_validate_rejects_pixel_options_of_255() {
+        let options = |channel_tolerance, edge_threshold| Tolerance::Pixel {
+            max_diff_ratio: 0.0,
+            channel_tolerance,
+            anti_alias: false,
+            edge_threshold,
+        };
+        assert!(options(254, 254).validate().is_ok());
+        assert_eq!(
+            options(255, 0).validate(),
+            Err(ToleranceError::PixelOption {
+                name: "channel_tolerance",
+                value: 255
+            })
+        );
+        assert_eq!(
+            options(0, 255).validate().unwrap_err().to_string(),
+            "`edge_threshold` must be between 0 and 254 (got 255)"
+        );
     }
 
     #[test]

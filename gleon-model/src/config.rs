@@ -736,6 +736,19 @@ impl GleonConfig {
                     rule.diff.color_tolerance
                 )));
             }
+            if rule.mode != Mode::Pixel {
+                let diff = &rule.diff;
+                let set = [
+                    ("channel_tolerance", diff.channel_tolerance != 0),
+                    ("anti_alias", diff.anti_alias),
+                    ("edge_threshold", diff.edge_threshold != 0),
+                ];
+                if let Some((key, _)) = set.into_iter().find(|&(_, is_set)| is_set) {
+                    return Err(ConfigError::Validation(format!(
+                        "screenshots[{i}].diff.{key} applies to `mode: pixel` only"
+                    )));
+                }
+            }
             if let Some(text) = &rule.text_tolerance {
                 text.validate().map_err(|e| {
                     ConfigError::Validation(format!("screenshots[{i}].text_tolerance: {e}"))
@@ -1031,6 +1044,36 @@ screenshots:
             result.unwrap_err(),
             ConfigError::Validation(msg) if msg.contains("threshold must be between 0.0 and 1.0")
         ));
+    }
+
+    /// Pixel options set on an SSIM rule would silently do nothing: a config error naming them.
+    #[test]
+    fn test_pixel_options_need_a_pixel_rule() {
+        let yaml = |mode: &str, diff: &str| {
+            format!(
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n    diff: {diff}\n"
+            )
+        };
+        for (diff, key) in [
+            ("{ anti_alias: true }", "anti_alias"),
+            ("{ channel_tolerance: 4 }", "channel_tolerance"),
+            ("{ edge_threshold: 64 }", "edge_threshold"),
+        ] {
+            let err = GleonConfig::from_yaml_str(&yaml("ssim", diff)).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!(
+                    "screenshots[0].diff.{key} applies to `mode: pixel` only"
+                )),
+                "{err}"
+            );
+            assert!(
+                GleonConfig::from_yaml_str(&yaml("pixel", diff)).is_ok(),
+                "{diff}"
+            );
+        }
+        // Off (the defaults `gleon init` writes) is fine in any mode.
+        let off = "{ channel_tolerance: 0, anti_alias: false, edge_threshold: 0 }";
+        assert!(GleonConfig::from_yaml_str(&yaml("ssim", off)).is_ok());
     }
 
     /// `text_tolerance` is a share, for pixel and SSIM rules alike.

@@ -27,4 +27,5 @@ pub mod hash;
 pub mod naming;
 pub mod platform;
 pub mod rules;
+mod serde_skip;
 pub mod tolerance;

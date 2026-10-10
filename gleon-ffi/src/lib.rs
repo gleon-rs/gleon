@@ -130,13 +130,14 @@ mod handles {
         pub candidate_format: u8,
         /// `0` the `.gleon/gleon.yaml` rule, `1` exact, `2` pixel, `3` SSIM.
         pub tolerance_kind: u8,
-        /// Pixel tolerance (`tolerance_kind` 2): a differing pixel counts as equal when no RGBA
-        /// byte differs by more than this (0: off).
+        /// Pixel tolerance (`tolerance_kind` 2), outside text: a differing pixel counts as equal
+        /// when no RGBA byte differs by more than this, `[0, 254]` (0: off).
         pub channel_tolerance: u8,
-        /// Pixel tolerance (`tolerance_kind` 2): `1` lets anti-aliased pixels pass, `0` not.
+        /// Pixel tolerance (`tolerance_kind` 2), outside text: `1` lets anti-aliased pixels
+        /// pass, `0` not.
         pub anti_alias: u8,
-        /// Pixel tolerance (`tolerance_kind` 2): differing pixels on the golden's edges (Sobel
-        /// gradient above this) pass, outside text (0: off).
+        /// Pixel tolerance (`tolerance_kind` 2), outside text: differing pixels on the golden's
+        /// edges (Sobel gradient above this) pass, `[0, 254]` (0: off).
         pub edge_threshold: u8,
     }
 
@@ -551,10 +552,11 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 /// `3` SSIM (`min_similarity`, `color_tolerance`).
 ///
 /// `mask_count` pixel masks `[x, y, width, height]` are at `masks`. `text_region_count` text
-/// regions `[x, y, width, height]` (candidate pixels) are at `text_regions`, compared in pixel
-/// and exact mode under `call.text_tolerance`: the largest share of differing pixels in any tile
+/// regions `[x, y, width, height]` (candidate pixels) are at `text_regions`, compared under
+/// every tolerance by `call.text_tolerance`: the largest share of differing pixels in any tile
 /// of text, `[0, 1]` (NaN: the rule's `text_tolerance`, else 0.05 against a golden of this
-/// platform and 1, so text never fails, against any other).
+/// platform and 1, so text never fails, against any other); in SSIM mode the text is left out of
+/// both gates, and no pixel option applies to it.
 ///
 /// # Safety
 /// `call` must point to a readable [`GleonCall`] (any alignment) or be null, `summary` to a

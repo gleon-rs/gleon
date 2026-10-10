@@ -1044,6 +1044,21 @@ metrics:
         assert_eq!(diff.dimensions(), (5, 4));
     }
 
+    /// A dimension mismatch without a diff (its canvas over the decoding budget) removes the
+    /// diff an earlier failure left: no stale image beside the new failure.
+    #[test]
+    fn test_a_dimension_mismatch_without_a_diff_removes_a_stale_one() {
+        let fixture = Fixture::new(None);
+        let session = fixture.session(None);
+        fixture.run(&session, Mode::Compare, &png(4, 4, true));
+        assert_eq!(fixture.failures().len(), 3);
+        // 16384x1 against 1x16384: a 268 MP canvas.
+        fs::write(&fixture.golden, png(16384, 1, false)).unwrap();
+        let finished = fixture.run(&session, Mode::Compare, &png(1, 16384, false));
+        assert_eq!(finished.verdict, Verdict::DimensionMismatch);
+        assert_eq!(fixture.failures(), ["a_masterImage.png", "a_testImage.png"]);
+    }
+
     #[test]
     fn test_a_corrupt_candidate_is_an_image_error_without_artifacts() {
         let fixture = Fixture::new(None);

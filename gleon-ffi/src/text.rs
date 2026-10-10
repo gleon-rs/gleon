@@ -100,6 +100,7 @@ pub fn console_line(
             Some(&Metrics::Pixel {
                 diff_pixels,
                 tolerated_pixels,
+                edge_pixels,
                 diff_ratio,
                 headroom,
                 text,
@@ -116,6 +117,9 @@ pub fn console_line(
             );
             if tolerated_pixels > 0 {
                 let _infallible = write!(detail, ", {tolerated_pixels} tolerated");
+            }
+            if edge_pixels > 0 {
+                let _infallible = write!(detail, ", {edge_pixels} on edges");
             }
             write_text_clause(&mut detail, text, text_tolerance);
             detail
@@ -268,6 +272,7 @@ mod tests {
             total_pixels: 100,
             diff_pixels: 2,
             tolerated_pixels: 0,
+            edge_pixels: 0,
             diff_ratio: 0.02,
             headroom: -0.01,
             text: None,
@@ -289,6 +294,7 @@ mod tests {
             total_pixels: 100,
             diff_pixels: 2,
             tolerated_pixels: 40,
+            edge_pixels: 3,
             diff_ratio: 0.02,
             headroom: -0.01,
             text: None,
@@ -303,12 +309,13 @@ mod tests {
                 Some(&tolerated),
                 None
             ),
-            "gleon ✗ a.png  pixel 2.00% (2 px, ≤1.00%, -1.00%), 40 tolerated  3 ms"
+            "gleon ✗ a.png  pixel 2.00% (2 px, ≤1.00%, -1.00%), 40 tolerated, 3 on edges  3 ms"
         );
         let unchanged = Metrics::Pixel {
             total_pixels: 100_000,
             diff_pixels: 0,
             tolerated_pixels: 0,
+            edge_pixels: 0,
             diff_ratio: 0.0,
             headroom: 0.0,
             text: None,
@@ -342,6 +349,7 @@ mod tests {
             total_pixels: 100_000,
             diff_pixels: 0,
             tolerated_pixels: 0,
+            edge_pixels: 0,
             diff_ratio: 0.0,
             headroom: 0.0,
             text: Some(TextMetrics {

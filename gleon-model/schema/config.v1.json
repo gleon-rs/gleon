@@ -74,16 +74,16 @@
       "type": "object",
       "properties": {
         "anti_alias": {
-          "description": "Pixel mode: a differing pixel counts as equal when it looks anti-aliased in either image\n(the detection of pixelmatch: between a darker and a brighter neighbor that sit in flat areas\nof both images). Default off.",
+          "description": "Pixel mode, outside text: a differing pixel counts as equal when it looks anti-aliased in\neither image (the detection of pixelmatch: between a darker and a brighter neighbor that\nsit in flat areas of both images). Default off.",
           "type": "boolean",
           "default": false
         },
         "channel_tolerance": {
-          "description": "Pixel mode: a differing pixel counts as equal when none of its RGBA bytes differs by more\nthan this, `[0, 255]` (default 0). For GPU and color-conversion drift, not for text.",
+          "description": "Pixel mode, outside text: a differing pixel counts as equal when none of its RGBA bytes\ndiffers by more than this, `[0, 254]` (default 0: off). For GPU and color-conversion\ndrift.",
           "type": "integer",
           "format": "uint8",
           "default": 0,
-          "maximum": 255,
+          "maximum": 254,
           "minimum": 0
         },
         "color_tolerance": {
@@ -95,11 +95,11 @@
           "minimum": 0.0
         },
         "edge_threshold": {
-          "description": "Pixel mode: a differing pixel outside text counts as equal when the Sobel gradient of the\nbaseline's luma there (8-bit units, capped at 255) exceeds this, `[0, 255]`: the edges a\nsub-pixel shift or another rasterizer moves (Skia Gold's edge mask). Default 0 (off);\n255 hides nothing. Hides every change that lies on edges too: on the calibration corpus a\nmissing glyph, a card moved by 1px and, at 64, a missing small icon pass.",
+          "description": "Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the\nbaseline's luma there (8-bit units, capped at 255) exceeds this, `[0, 254]`: the edges a\nsub-pixel shift or another rasterizer moves (Skia Gold's edge mask). Default 0: off. Hides\nevery change that lies on edges too: on the calibration corpus a missing glyph, a card\nmoved by 1px and, at 64, a missing small icon pass; the lower the value, the more pixels\ncount as edges.",
           "type": "integer",
           "format": "uint8",
           "default": 0,
-          "maximum": 255,
+          "maximum": 254,
           "minimum": 0
         },
         "min_similarity": {
@@ -319,7 +319,7 @@
       ]
     },
     "TextTolerance": {
-      "description": "How much text may differ, in pixel and exact mode.\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared strictly.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking\nit: layout stays exact, text content is not compared. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",
+      "description": "How much text may differ, under any [`Tolerance`].\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared under the tolerance (in SSIM mode the text is left out of both of its gates), and\nno pixel option applies to text.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as\nmasking it: the layout is compared, text content is not. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",
       "type": "number",
       "format": "double",
       "maximum": 1.0,

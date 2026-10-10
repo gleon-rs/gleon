@@ -147,13 +147,15 @@ screenshots:
       threshold: 0.01 # 'pixel': allowed fraction of differing pixels [0.0 - 1.0] (default: 0.01; 0: exact)
       min_similarity: 0.8 # 'ssim': minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
       color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
-      # 'pixel' only, all off by default: differing pixels that count as equal (rendering noise
-      # of shapes; not a substitute for 'ssim' or per-platform goldens).
-      channel_tolerance: 0 # no RGBA byte differs by more than this [0 - 255]: GPU and color drift
+      # 'pixel' only (a config error on an 'ssim' rule), all off by default, never inside text:
+      # differing pixels that count as equal (rendering noise of shapes; not a substitute for
+      # 'ssim' or per-platform goldens). Case reports count them as `tolerated_pixels` and
+      # `edge_pixels`.
+      channel_tolerance: 0 # no RGBA byte differs by more than this [0 - 254]: GPU and color drift
       anti_alias: false # the pixel looks anti-aliased in either image (the detection of pixelmatch)
-      # Outside text: the Sobel gradient of the golden's luma there exceeds this [0 - 255]
-      # (Skia Gold's edge mask). Every change on edges passes too: a missing glyph or small icon,
-      # a 1px move (see gleon-engine/tests/ssim_corpus.rs). 0 is off, 255 hides nothing.
+      # The Sobel gradient of the golden's luma there exceeds this [0 - 254] (Skia Gold's edge
+      # mask). Every change on edges passes too: a missing glyph or small icon, a 1px move (see
+      # gleon-engine/tests/ssim_corpus.rs); the lower the value, the more pixels are edges.
       edge_threshold: 0
     # Optional: integrations that report the text of a screenshot (the Flutter package) compare it
     # under this tolerance (in 'ssim' mode left out of both of its gates), the rest under the

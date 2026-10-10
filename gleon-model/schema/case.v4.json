@@ -434,6 +434,12 @@
               "type": "number",
               "format": "double"
             },
+            "edge_pixels": {
+              "description": "Differing pixels on the golden's edges the edge mask hid, counted as equal; left out\nwhen there are none. Apart from `tolerated_pixels`: only this option hides changes\nthat lie on edges (a missing glyph or small icon).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
             "headroom": {
               "description": "`max_diff_ratio - diff_ratio` (exact: `-diff_ratio`); negative means it failed.",
               "type": "number",
@@ -455,7 +461,7 @@
               ]
             },
             "tolerated_pixels": {
-              "description": "Differing pixels the tolerance's options let pass (channel tolerance, anti-aliasing,\nedges), counted as equal; left out when there are none.",
+              "description": "Differing pixels the channel tolerance or the anti-aliasing detection let pass,\ncounted as equal; left out when there are none.",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -825,7 +831,7 @@
       ]
     },
     "TextTolerance": {
-      "description": "How much text may differ, in pixel and exact mode.\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared strictly.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking\nit: layout stays exact, text content is not compared. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",
+      "description": "How much text may differ, under any [`Tolerance`].\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared under the tolerance (in SSIM mode the text is left out of both of its gates), and\nno pixel option applies to text.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as\nmasking it: the layout is compared, text content is not. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",
       "type": "number",
       "format": "double",
       "maximum": 1.0,
@@ -853,21 +859,21 @@
           "type": "object",
           "properties": {
             "anti_alias": {
-              "description": "A differing pixel counts as equal when it looks anti-aliased in either image.",
+              "description": "A differing pixel outside text counts as equal when it looks anti-aliased in either\nimage.",
               "type": "boolean"
             },
             "channel_tolerance": {
-              "description": "A differing pixel counts as equal when no RGBA byte differs by more than this\n(0: off).",
+              "description": "A differing pixel outside text counts as equal when no RGBA byte differs by more than\nthis, `[0, 254]` (0: off).",
               "type": "integer",
               "format": "uint8",
-              "maximum": 255,
+              "maximum": 254,
               "minimum": 0
             },
             "edge_threshold": {
-              "description": "A differing pixel outside text counts as equal when the Sobel gradient of the golden's\nluma there exceeds this (0: off; 255 hides nothing).",
+              "description": "A differing pixel outside text counts as equal when the Sobel gradient of the golden's\nluma there exceeds this, `[0, 254]` (0: off).",
               "type": "integer",
               "format": "uint8",
-              "maximum": 255,
+              "maximum": 254,
               "minimum": 0
             },
             "kind": {
