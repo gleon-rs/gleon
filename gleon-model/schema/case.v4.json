@@ -96,8 +96,8 @@
       "description": "Version of this format (`CASE_SCHEMA_VERSION`).",
       "type": "integer",
       "format": "uint32",
-      "maximum": 3,
-      "minimum": 3
+      "maximum": 4,
+      "minimum": 4
     },
     "source": {
       "description": "What produced the candidate.",
@@ -147,7 +147,7 @@
           "pattern": "^\\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\\.\\.?(/|$))[a-z0-9_.-]+(/(?!\\.\\.?(/|$))[a-z0-9_.-]+)*/candidate\\.png$"
         },
         "diff": {
-          "description": "The diff visualization (mismatches only): `<artifacts dir>/<platform key>/<name>/diff.png`.",
+          "description": "The diff visualization (mismatches and dimension mismatches):\n`<artifacts dir>/<platform key>/<name>/diff.png`.",
           "type": [
             "string",
             "null"
@@ -312,7 +312,7 @@
           "minimum": 0
         },
         "text_tolerance": {
-          "description": "The tolerance of the text regions the integration reported (pixel and exact only);\nabsent when there were none.",
+          "description": "The tolerance of the text regions the integration reported (under every tolerance);\nabsent when there were none.",
           "anyOf": [
             {
               "$ref": "#/$defs/TextTolerance"
@@ -424,7 +424,7 @@
           "type": "object",
           "properties": {
             "diff_pixels": {
-              "description": "Pixels whose RGBA bytes differ.",
+              "description": "Pixels whose RGBA bytes differ (beyond the tolerance's options).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -433,6 +433,12 @@
               "description": "`diff_pixels / total_pixels` (0 for an empty image).",
               "type": "number",
               "format": "double"
+            },
+            "edge_pixels": {
+              "description": "Differing pixels on the golden's edges the edge mask hid, counted as equal; left out\nwhen there are none. Apart from `tolerated_pixels`: only this option hides changes\nthat lie on edges (a missing glyph or small icon).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
             },
             "headroom": {
               "description": "`max_diff_ratio - diff_ratio` (exact: `-diff_ratio`); negative means it failed.",
@@ -453,6 +459,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "tolerated_pixels": {
+              "description": "Differing pixels the channel tolerance or the anti-aliasing detection let pass,\ncounted as equal; left out when there are none.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
             },
             "total_pixels": {
               "description": "Pixels compared strictly (masked pixels and text under `comparison.text_tolerance` left out).",
@@ -535,6 +547,17 @@
               "description": "Largest envelope deviation over the changed pixels, `color_tolerance` not subtracted.",
               "type": "number",
               "format": "double"
+            },
+            "text": {
+              "description": "The text regions, judged by their tiles under `comparison.text_tolerance` and left out\nof both gates; the worst tile is a `text` entry of `regions`.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TextMetrics"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "additionalProperties": false,
@@ -658,6 +681,16 @@
           "description": "Text compared under `comparison.text_tolerance`: the tile of its text regions with the largest\nshare of differing pixels.",
           "type": "string",
           "const": "text"
+        },
+        {
+          "description": "SSIM: the bounding box of the changed pixels, with the policy's metrics inside it (its\n`mean_ssim` not diluted by the unchanged rest of the golden).",
+          "type": "string",
+          "const": "changed"
+        },
+        {
+          "description": "SSIM: the bounding box of the pixels failing the policy, with its metrics inside it.",
+          "type": "string",
+          "const": "failing"
         }
       ]
     },
@@ -763,7 +796,7 @@
       "additionalProperties": false
     },
     "TextMetrics": {
-      "description": "What the text regions of a pixel or exact comparison measured.",
+      "description": "What the text regions of a comparison measured.",
       "type": "object",
       "properties": {
         "diff_pixels": {
@@ -798,7 +831,7 @@
       ]
     },
     "TextTolerance": {
-      "description": "How much text may differ, in pixel and exact mode.\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared strictly.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as masking\nit: layout stays exact, text content is not compared. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",
+      "description": "How much text may differ, under any [`Tolerance`].\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared under the tolerance (in SSIM mode the text is left out of both of its gates), and\nno pixel option applies to text.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as\nmasking it: the layout is compared, text content is not. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",
       "type": "number",
       "format": "double",
       "maximum": 1.0,
@@ -822,9 +855,27 @@
           ]
         },
         {
-          "description": "Tolerates a fraction of differing pixels.",
+          "description": "Tolerates a fraction of differing pixels, and differing pixels its options let pass.",
           "type": "object",
           "properties": {
+            "anti_alias": {
+              "description": "A differing pixel outside text counts as equal when it looks anti-aliased in either\nimage.",
+              "type": "boolean"
+            },
+            "channel_tolerance": {
+              "description": "A differing pixel outside text counts as equal when no RGBA byte differs by more than\nthis, `[0, 254]` (0: off).",
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 254,
+              "minimum": 0
+            },
+            "edge_threshold": {
+              "description": "A differing pixel outside text counts as equal when the Sobel gradient of the golden's\nluma there (unnormalized like Skia Gold's: a sharp step of 16 gives 64) exceeds this,\n`[0, 254]` (0: off).",
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 254,
+              "minimum": 0
+            },
             "kind": {
               "type": "string",
               "const": "pixel"

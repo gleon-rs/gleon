@@ -6,7 +6,7 @@
 
 use gleon_engine::{
     ComparisonResult, PixelRegions, Pixels, Region, compare_images,
-    config::{Mode, Zone},
+    config::Zone,
     decode::{DecodeError, decode_rgba, fits_budget},
     masking::{apply_masks, resolve_zones},
 };
@@ -99,8 +99,8 @@ pub fn is_rgba_len(width: u32, height: u32, len: usize) -> bool {
     u64::try_from(len).ok() == Some(u64::from(width) * u64::from(height) * 4)
 }
 
-/// The text of a candidate, compared under its own tolerance in pixel and exact mode (SSIM
-/// compares it like everything else).
+/// The text of a candidate, judged by its tiles under its own tolerance (in SSIM mode left out
+/// of both gates).
 #[derive(Debug, Clone, Copy)]
 pub struct Text<'a> {
     /// Text regions in candidate pixels; [`compare`] clips them to the image.
@@ -128,12 +128,15 @@ pub enum Compared {
         /// The PNG-encoded diff visualization.
         diff_png: Vec<u8>,
     },
-    /// Different image sizes; no pixel comparison was attempted.
+    /// Different image sizes; only the area both cover was compared, for the diff.
     DimensionMismatch {
         /// Width and height of the golden.
         golden: (u32, u32),
         /// Width and height of the candidate.
         candidate: (u32, u32),
+        /// The PNG-encoded diff of both sizes; `None` when its canvas is over the decoding
+        /// budget.
+        diff_png: Option<Vec<u8>>,
     },
 }
 
@@ -238,8 +241,9 @@ pub fn decode_masked(
 /// Compares the PNG `golden` with `candidate` under `tolerance`, with `masks` and `text`.
 ///
 /// Masks apply to images of the same size (like [`decode_masked`]): in pixel and exact mode their
-/// pixels are neither compared nor counted, in SSIM mode they are painted black in both. Text
-/// applies in pixel and exact mode: its regions are compared under its tolerance, masks winning.
+/// pixels are neither compared nor counted, in SSIM mode the candidate takes the golden's pixels
+/// there. Text regions are judged by their tiles under their tolerance, masks winning (in SSIM
+/// mode left out of both gates the same way).
 ///
 /// # Errors
 /// Returns [`CompareError`] for an image that cannot be decoded, raw pixels of the wrong length,
@@ -260,10 +264,12 @@ pub fn compare(
     let (masks, clamped_masks) = if same_size {
         resolve_zones(masks, width, height)
     } else {
-        (Vec::new(), 0)
+        // Only for the diff of both sizes (in golden pixels): no warning, the sizes are the
+        // finding.
+        (resolve_zones(masks, width, height).0, 0)
     };
     let (mode, config) = tolerance.engine_config();
-    let text = text.filter(|text| mode == Mode::Pixel && same_size && !text.regions.is_empty());
+    let text = text.filter(|text| same_size && !text.regions.is_empty());
     let text_regions: Vec<Region> = text
         .iter()
         .flat_map(|text| text.regions)
@@ -278,7 +284,8 @@ pub fn compare(
     let measured = |measurement| {
         Metrics::from_measurement(&measurement, tolerance, text_tolerance.as_ref())
             .map(|metrics| {
-                let regions = RegionMetrics::of(metrics, &measurement, text_tolerance.as_ref());
+                let regions =
+                    RegionMetrics::of(metrics, &measurement, tolerance, text_tolerance.as_ref());
                 (metrics, regions)
             })
             .ok_or(CompareError::Internal)
@@ -302,9 +309,14 @@ pub fn compare(
         ComparisonResult::DimensionMismatch {
             baseline_size,
             actual_size,
+            diff_image,
         } => Compared::DimensionMismatch {
             golden: baseline_size,
             candidate: actual_size,
+            diff_png: diff_image
+                .map(|diff| encode_png(&diff))
+                .transpose()
+                .map_err(CompareError::Diff)?,
         },
         ComparisonResult::TooLarge {
             size: (width, height),
@@ -396,6 +408,8 @@ mod tests {
                 metrics: Metrics::Pixel {
                     total_pixels: 100,
                     diff_pixels: 0,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     diff_ratio: 0.0,
                     headroom: 0.0,
                     text: None,
@@ -403,6 +417,8 @@ mod tests {
                 regions: vec![RegionMetrics::whole_image(Metrics::Pixel {
                     total_pixels: 100,
                     diff_pixels: 0,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     diff_ratio: 0.0,
                     headroom: 0.0,
                     text: None,
@@ -429,9 +445,7 @@ mod tests {
     fn test_pixel_threshold_tolerates_small_change() {
         let a = png(10, 10, |_, _| RED);
         let b = png(10, 10, one_blue_pixel);
-        let tolerance = Tolerance::Pixel {
-            max_diff_ratio: 0.05,
-        };
+        let tolerance = Tolerance::pixel(0.05);
         assert!(matches!(
             compared(&a, &b, &tolerance),
             Compared::Match {
@@ -485,26 +499,44 @@ mod tests {
         assert_eq!(clipped.clamped_masks, 1);
     }
 
-    /// Images of different sizes are not masked: their sizes are the finding.
+    /// Images of different sizes: their sizes are the finding (no clamped-mask warning), and
+    /// the diff shows both, masked pixels unmarked.
     #[test]
-    fn test_dimension_mismatch_reports_sizes_without_masking() {
+    fn test_dimension_mismatch_reports_sizes_with_a_diff_of_both() {
         let a = png(10, 10, |_, _| RED);
-        let b = png(12, 10, |_, _| RED);
+        let b = png(12, 10, |x, y| {
+            if (x, y) == (1, 1) || (x, y) == (8, 8) {
+                Rgba([0, 0, 0, 255])
+            } else {
+                RED
+            }
+        });
         let mask = Zone {
             x: 0,
             y: 0,
             width: Dimension::Percent(50.0),
             height: Dimension::Pixels(20),
         };
-        assert_eq!(
-            compare(&a, Candidate::Png(&b), &EXACT, &[mask], None).unwrap(),
-            Comparison {
-                compared: Compared::DimensionMismatch {
-                    golden: (10, 10),
-                    candidate: (12, 10),
-                },
-                clamped_masks: 0,
-            }
+        let comparison = compare(&a, Candidate::Png(&b), &EXACT, &[mask], None).unwrap();
+        let diff = |png: &[u8]| decode_rgba(png).unwrap();
+        assert!(
+            matches!(
+                &comparison,
+                Comparison {
+                    compared: Compared::DimensionMismatch {
+                        golden: (10, 10),
+                        candidate: (12, 10),
+                        diff_png: Some(png),
+                    },
+                    clamped_masks: 0,
+                } if diff(png).dimensions() == (12, 10)
+                    // Masked: the darkened golden; unmasked: magenta; the candidate's own
+                    // columns: green stripes.
+                    && diff(png).get_pixel(1, 1).0 == [127, 0, 0, 255]
+                    && diff(png).get_pixel(8, 8).0 == [255, 0, 255, 255]
+                    && diff(png).get_pixel(10, 0).0 == [0, 200, 83, 255]
+            ),
+            "{comparison:?}"
         );
     }
 
@@ -686,6 +718,8 @@ mod tests {
         let pixel = Measurement::Pixel {
             checked_pixels: 1,
             diff_count: 0,
+            tolerated_count: 0,
+            edge_count: 0,
             text: None,
         };
         assert!(Metrics::from_measurement(&pixel, &SSIM, None).is_none());

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use gleon_model::{
-    case::{CaseErrorKind, CaseReport, Metrics},
+    case::{CaseErrorKind, CaseReport, Metrics, text},
     platform::PlatformKey,
 };
 use minijinja::context;
@@ -33,6 +33,8 @@ struct HtmlFailureDto<'a> {
     diff_count: Option<u64>,
     actual_size: Option<String>,
     baseline_size: Option<String>,
+    /// The regions of the comparison besides the whole image, with their metrics.
+    regions: Vec<String>,
 }
 
 fn size(width: Option<u32>, height: Option<u32>) -> Option<String> {
@@ -72,6 +74,11 @@ fn html_failure_dto<'a>(
         },
         actual_size: size(report.candidate.width, report.candidate.height),
         baseline_size: size(report.golden.width, report.golden.height),
+        regions: report
+            .regions
+            .iter()
+            .filter_map(text::region_summary)
+            .collect(),
     }
 }
 
@@ -205,6 +212,8 @@ mod tests {
         mismatch.metrics = Some(Metrics::Pixel {
             total_pixels: 100,
             diff_pixels: 0,
+            tolerated_pixels: 0,
+            edge_pixels: 0,
             diff_ratio: 0.0,
             headroom: 0.0,
             text: Some(gleon_model::case::TextMetrics {
@@ -230,6 +239,64 @@ mod tests {
             text.headroom = 0.82;
         }
         assert!(html(mismatch).contains("(0 diffs)"));
+    }
+
+    /// The regions of an SSIM comparison (where the change is, where it fails) are listed with
+    /// their own metrics.
+    #[test]
+    fn test_generate_html_lists_the_regions_of_a_comparison() {
+        use gleon_engine::Region;
+        use gleon_model::case::{RegionKind, RegionMetrics, SsimHeadroom};
+
+        let ssim = |min_ssim, mean_ssim| Metrics::Ssim {
+            min_ssim,
+            mean_ssim,
+            max_excess: 0.0,
+            peak_excess: 3.0,
+            changed_pixels: 9,
+            changed_region: None,
+            failing_pixels: 9,
+            failing_region: None,
+            headroom: SsimHeadroom {
+                similarity: min_ssim - 0.8,
+                color: 5.0,
+            },
+            text: None,
+        };
+        let rect = |x| {
+            Some(Region {
+                x,
+                y: 2,
+                width: 3,
+                height: 4,
+            })
+        };
+        let mut mismatch = report("a", CaseOutcome::Mismatch);
+        mismatch.regions = vec![
+            RegionMetrics::whole_image(ssim(0.5, 0.99)),
+            RegionMetrics {
+                kind: RegionKind::Changed,
+                rect: rect(1),
+                metrics: ssim(0.5, 0.71),
+            },
+            RegionMetrics {
+                kind: RegionKind::Failing,
+                rect: rect(7),
+                metrics: ssim(0.5, 0.62),
+            },
+        ];
+        let cases = Cases::new("/w/.gleon/runs/latest", vec![mismatch]);
+        let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            html.contains("changed area (1, 2) 3x4px: min local SSIM 0.500, mean 0.710"),
+            "{html}"
+        );
+        assert!(
+            html.contains("failing area (7, 2) 3x4px: min local SSIM 0.500, mean 0.620"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -301,6 +368,7 @@ mod tests {
         mismatch.artifacts.as_mut().unwrap().diff = None;
         let mut dimensions = report("b", CaseOutcome::DimensionMismatch);
         dimensions.candidate.width = None;
+        dimensions.artifacts.as_mut().unwrap().diff = None;
         let cases = Cases::new("/w/.gleon/runs/latest", vec![mismatch, dimensions]);
         let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
             .unwrap()
@@ -309,6 +377,20 @@ mod tests {
         assert!(!html.contains("Diff Image"), "{html}");
         assert!(html.contains("Actual</div>"), "{html}");
         assert!(!html.contains("None"), "{html}");
+    }
+
+    /// A dimension mismatch shows its diff of both sizes next to the two images.
+    #[test]
+    fn test_generate_html_shows_the_diff_of_a_dimension_mismatch() {
+        let cases = Cases::new(
+            "/w/.gleon/runs/latest",
+            vec![report("b", CaseOutcome::DimensionMismatch)],
+        );
+        let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
+            .unwrap()
+            .unwrap();
+        assert!(html.contains("Diff Image (both sizes)"), "{html}");
+        assert!(html.contains("diff.png"), "{html}");
     }
 
     /// A run of two platforms names the platform of each case; a run of one does not.

@@ -9,6 +9,7 @@
     missing_docs,
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
+
 //! End-to-end integration test verifying sparse multi-platform fallback baselines.
 //!
 //! Tests the full multi-platform lifecycle:
@@ -22,6 +23,8 @@
 //! 8. Revert test1 on Linux to match macOS, run approve, verify Linux override is automatically pruned.
 
 #![cfg(not(miri))]
+
+mod common;
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -81,18 +84,8 @@ async fn test_sparse_multi_platform_fallback_full_lifecycle() {
     let macos_key = macos_platform.key().unwrap();
     let linux_key = linux_platform.key().unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-fallback_platform:
-  os: macos
-  arch: aarch64
-screenshots:
-  - include:
-      - "test/goldens/**/*.png"
-    mode: pixel
-"#;
+    common::copy_config(base_path, "macos_fallback");
     let config_file = gleon_dir.join("gleon.yaml");
-    std::fs::write(&config_file, config_yaml).unwrap();
     let config = GleonConfig::load_from_file(&config_file).unwrap();
 
     let mut macos_ctx = ResolvedContext::default();

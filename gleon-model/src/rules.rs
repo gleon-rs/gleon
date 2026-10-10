@@ -263,9 +263,7 @@ screenshots:
             RuleMatch::Matched {
                 index: 1,
                 name: "test/unit/a".to_owned(),
-                tolerance: Tolerance::Pixel {
-                    max_diff_ratio: 0.02
-                },
+                tolerance: Tolerance::pixel(0.02),
                 text_tolerance: None,
                 masks: vec![],
             }

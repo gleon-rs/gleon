@@ -1,0 +1,9 @@
+# Goldens recorded on macOS: other platforms fall back to them.
+required_version: ">=0.1.0"
+fallback_platform:
+  os: macos
+  arch: aarch64
+screenshots:
+  - include:
+      - "test/goldens/**/*.png"
+    mode: pixel

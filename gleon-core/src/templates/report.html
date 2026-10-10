@@ -71,6 +71,13 @@
             font-size: 1.1rem;
         }
 
+        .test-regions {
+            margin: 0 0 0.75rem;
+            padding-left: 1.25rem;
+            font-size: 0.875rem;
+            color: var(--muted, inherit);
+        }
+
         .test-error {
             color: var(--danger);
             font-size: 0.875rem;
@@ -246,6 +253,11 @@
                 <div class="test-title">{{ failure.name }} / {{ failure.image }}</div>
                 <div class="test-error">{{ failure.error }}</div>
             </div>
+            {% if failure.regions %}
+            <ul class="test-regions">
+                {% for region in failure.regions %}<li>{{ region }}</li>{% endfor %}
+            </ul>
+            {% endif %}
             
             {% if failure.outcome == "mismatch" and failure.baseline_path and failure.actual_path %}
             <div class="comparison-grid">
@@ -279,6 +291,12 @@
                     <div class="image-title">Baseline{% if failure.baseline_size %} ({{ failure.baseline_size }}){% endif %}</div>
                     <img class="img-static" src="{{ failure.baseline_path | escape }}" alt="Baseline" loading="lazy">
                 </div>
+                {% if failure.diff_path %}
+                <div class="image-container" id="dim-diff-container-{{ loop.index }}">
+                    <div class="image-title">Diff Image (both sizes)</div>
+                    <img class="img-static" src="{{ failure.diff_path | escape }}" alt="Diff" loading="lazy">
+                </div>
+                {% endif %}
             </div>
             {% elif failure.outcome == "missing" and failure.actual_path %}
             <div class="comparison-grid">

@@ -44,7 +44,7 @@ screenshots:
   - include: "test/**/goldens/**/*.png"
     mode: pixel
     diff:
-      threshold: 0.1
+      threshold: 0.01
 
 exclude:
   - "**/build/**"
@@ -143,13 +143,25 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "test/**/goldens/**/*.png" # Single pattern or list of glob patterns
     mode: pixel # 'pixel' (exact per-pixel compare) or 'ssim' (tolerates rendering noise, see below)
-    diff:
-      threshold: 0.1 # 'pixel': allowed fraction of differing pixels [0.0 - 1.0] (default: 0.1)
+    diff: # each key belongs to one mode: another value than its default in the other is a config error
+      threshold: 0.01 # 'pixel': allowed fraction of differing pixels [0.0 - 1.0] (default: 0.01; 0: exact)
       min_similarity: 0.8 # 'ssim': minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
       color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
-    # Optional, 'pixel' only: integrations that report the text of a screenshot (the Flutter package)
-    # compare it under this tolerance and everything else strictly: the text passes while every
-    # 16x16 square of it has at most this share of differing pixels [0.0 - 1.0]. Unset, the default
+      # 'pixel' only (a config error on an 'ssim' rule), all off by default, never inside text:
+      # differing pixels that count as equal (rendering noise of shapes; not a substitute for
+      # 'ssim' or per-platform goldens). Case reports count them as `tolerated_pixels` and
+      # `edge_pixels`.
+      channel_tolerance: 0 # no RGBA byte differs by more than this [0 - 254]: GPU and color drift
+      anti_alias: false # the pixel looks anti-aliased in either image (the detection of pixelmatch)
+      # The Sobel gradient of the golden's luma there exceeds this [0 - 254] (Skia Gold's edge
+      # mask, unnormalized: a sharp step of 16 gives 64). Every change on edges passes too: a
+      # missing glyph or small icon, a 1px move (see gleon-engine/tests/ssim_corpus.rs); the lower
+      # the value, the more pixels are edges.
+      edge_threshold: 0
+    # Optional: integrations that report the text of a screenshot (the Flutter package) compare it
+    # under this tolerance (in 'ssim' mode left out of both of its gates), the rest under the
+    # rule's mode: the text passes while every 16x16 square of it has at most this share of
+    # differing pixels [0.0 - 1.0]. Unset, the default
     # depends on the golden: 0.05 against a golden of the platform the test runs on (see
     # `fallback_platform`), else 1 (text never fails, because operating systems rasterize glyphs
     # differently, about 40% of a square, more than a changed character does). A value set here
@@ -197,7 +209,7 @@ Remote blob storage (AWS S3, Cloudflare R2, Google Cloud Storage) is configured 
 
 ### Case reports (`metrics`)
 
-Case reports are the one result format of gleon (schema: [`gleon-model/schema/case.v3.json`](../gleon-model/schema/case.v3.json)): `gleon diff` writes one per screenshot, integrations one per golden with metrics enabled. A report holds the golden and candidate SHA-256 and size, the effective tolerance and masks, the outcome (`identical`, `match`, `mismatch`, `dimension_mismatch`, `error` with its kind, `updated`, `missing`), the metrics including their headroom to the thresholds (for example `min_ssim - min_similarity` and `color_tolerance - peak_excess` in SSIM mode) and the paths of the images a failure keeps in the artifacts directory. Passing goldens report their margin too, so thresholds can be tuned from measurements instead of guesses.
+Case reports are the one result format of gleon (schema: [`gleon-model/schema/case.v4.json`](../gleon-model/schema/case.v4.json)): `gleon diff` writes one per screenshot, integrations one per golden with metrics enabled. A report holds the golden and candidate SHA-256 and size, the effective tolerance and masks, the outcome (`identical`, `match`, `mismatch`, `dimension_mismatch`, `error` with its kind, `updated`, `missing`), the metrics including their headroom to the thresholds (for example `min_ssim - min_similarity` and `color_tolerance - peak_excess` in SSIM mode) and the paths of the images a failure keeps in the artifacts directory. Passing goldens report their margin too, so thresholds can be tuned from measurements instead of guesses.
 
 Reports and images are kept per platform: `.gleon/runs/latest/cases/<platform>/<test name>.json` and `<artifacts dir>/<platform>/<test name>/{golden,candidate,diff}.png`, where `<platform>` is the platform key (`macos-aarch64`, `linux-x86_64`, `os=ios-sim+arch=arm` when the OS or architecture contains `-`, then `+<renderer>` and `+<key>=<value>` per label) and `<test name>` the same on every platform. A report lists only images of its own platform and name, and readers skip a report anywhere else (the flat `cases/<test name>.json` of an older gleon, a copy) with a warning; `gleon clean` removes them. Several platforms in one workspace therefore never overwrite each other: a macOS host and a Linux container on a bind-mounted checkout, or several `gleon diff --platform` runs; `gleon diff` clears only its own platform's previous reports and images. To read them as one joint run, give the processes of every platform the same `GLEON_RUN_ID` (`gleon test` keeps a preset one); the HTML and Markdown reports then name the platform next to each test (`test/goldens/a (linux-x86_64)`), while `junit.xml` always names the platform as the `classname` and the test as the `name`, so CI tools track a test case the same way in every run. `gleon diff` exits with the result of its own cases, but renders `report.md`, `junit.xml` and `report.html` from the cases of `gleon diff` in its run on every platform: the joint run when the platforms share `GLEON_RUN_ID`, its own cases otherwise. Downloaded runs of several CI jobs can also be copied into one `latest/` without clashes.
 

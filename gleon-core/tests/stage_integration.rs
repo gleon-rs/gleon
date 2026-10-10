@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use std::{fs, path::Path};
 
 use gleon_core::{
@@ -62,13 +64,7 @@ fn test_stage_real_fixture_updates_index_and_makes_workspace_clean() {
     let screenshot_file = screenshot_dir.join("form.png");
     fs::write(&screenshot_file, &real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let options = ContextOptions {
         branch: Some("main".to_string()),
@@ -133,13 +129,7 @@ fn test_stage_partial_path_filter_preserves_existing_entries() {
     fs::write(screenshot_dir.join("form1.png"), &real_png_bytes).unwrap();
     fs::write(screenshot_dir.join("form2.png"), &real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -190,13 +180,7 @@ fn test_stage_idempotent_unchanged_screenshots() {
     fs::create_dir_all(&screenshot_dir).unwrap();
     fs::write(screenshot_dir.join("form.png"), &real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -228,13 +212,7 @@ fn test_stage_orphan_manifest_cleanup() {
     fs::write(screenshot_dir.join("form1.png"), &real_png_bytes).unwrap();
     fs::write(screenshot_dir.join("form2.png"), &real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -280,13 +258,7 @@ fn test_stage_absolute_path_filter() {
     fs::write(&form1_abs, &real_png_bytes).unwrap();
     fs::write(screenshot_dir.join("form2.png"), &real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -309,13 +281,7 @@ fn test_stage_corrupt_screenshot_returns_error() {
     fs::create_dir_all(&screenshot_dir).unwrap();
     fs::write(screenshot_dir.join("corrupt.png"), b"not a valid png").unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 

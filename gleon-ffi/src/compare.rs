@@ -95,6 +95,7 @@ mod tests {
                 compared: Compared::DimensionMismatch {
                     golden: (10, 10),
                     candidate: (12, 10),
+                    diff_png: Some(_),
                 },
                 ..
             })

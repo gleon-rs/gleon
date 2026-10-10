@@ -1,0 +1,8 @@
+# unmasked.yaml after a mask over the center pixel (50, 50) was added.
+required_version: ">=0.1.0"
+screenshots:
+  - include: "unmasked_app/**/*.png"
+    masks:
+      - path: "**/*.png"
+        zones:
+          - { x: 50, y: 50, width: 1, height: 1 }

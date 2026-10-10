@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use std::{fs, path::Path};
 
 use gleon_core::{
@@ -74,13 +76,7 @@ fn test_diff_full_flow_with_real_fixtures() {
     let screenshot_file = screenshot_dir.join("form.png");
     fs::write(&screenshot_file, &baseline_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let options = ContextOptions {
         branch: Some("main".to_string()),
@@ -155,13 +151,7 @@ fn test_diff_cross_platform_backslash_manifest_keys() {
     fs::create_dir_all(&screenshot_dir).unwrap();
     fs::write(screenshot_dir.join("form.png"), &baseline_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -197,13 +187,7 @@ fn test_diff_missing_baseline_returns_missing_baseline() {
     fs::create_dir_all(&screenshot_dir).unwrap();
     fs::write(screenshot_dir.join("unstaged.png"), &baseline_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -262,13 +246,7 @@ fn test_diff_missing_blob_file_and_corrupt_images() {
     let screenshot_file = screenshot_dir.join("form.png");
     fs::write(&screenshot_file, &baseline_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -363,20 +341,7 @@ fn test_diff_with_mask_rules_ignores_masked_differences() {
     fs::write(&screenshot_file, &baseline_png_bytes).unwrap();
 
     // Config mask covering pixel (50, 50)
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "masked_app/**/*.png"
-    masks:
-      - path: "**/*.png"
-        zones:
-          - x: 50
-            y: 50
-            width: 1
-            height: 1
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "masked_center");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -414,17 +379,7 @@ fn test_diff_baseline_staged_before_mask_configuration() {
     fs::write(&screenshot_file, &baseline_png_bytes).unwrap();
 
     // 1. Initial config WITHOUT masks
-    let initial_config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "unmasked_app/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(
-        base_path.join(".gleon").join("gleon.yaml"),
-        initial_config_yaml,
-    )
-    .unwrap();
+    common::copy_config(base_path, "unmasked");
 
     let options = ContextOptions::default();
     let ctx = ResolvedContext::from_options(&options, base_path).unwrap();
@@ -433,24 +388,7 @@ screenshots:
     stage_workspace(&ctx, None).expect("stage_workspace should succeed");
 
     // 3. Update config AFTER staging to ADD mask covering pixel (50, 50)
-    let masked_config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "unmasked_app/**/*.png"
-    masks:
-      - path: "**/*.png"
-        zones:
-          - x: 50
-            y: 50
-            width: 1
-            height: 1
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(
-        base_path.join(".gleon").join("gleon.yaml"),
-        masked_config_yaml,
-    )
-    .unwrap();
+    common::copy_config(base_path, "unmasked_then_masked");
 
     // 4. Modify actual screenshot at (50, 50)
     let modified_png_bytes =
@@ -477,12 +415,7 @@ fn test_diff_fallback_platform_integration() {
         .join("fixtures");
 
     // 1. Setup gleon.yaml with fallback_platform
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::copy(
-        fixtures_dir.join("fallback_config.yaml"),
-        base_path.join(".gleon").join("gleon.yaml"),
-    )
-    .unwrap();
+    common::copy_config(base_path, "fallback");
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
     init_workspace(&ctx_init).unwrap();
@@ -547,12 +480,7 @@ fn test_diff_nested_test_name_directory_creation() {
     let screenshot_file = nested_dir.join("form.png");
     fs::write(&screenshot_file, &baseline_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "auth/login/*.png"
-"#;
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "auth_login");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -600,13 +528,7 @@ fn test_diff_missing_baseline_saved_and_approved() {
     let screenshot_file = screenshot_dir.join("form.png");
     fs::write(&screenshot_file, &actual_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let options = ContextOptions {
         branch: Some("main".to_string()),
@@ -645,4 +567,106 @@ screenshots:
     // Verify the content is exactly the same as the original PNG
     let saved_actual_bytes = fs::read(&expected_actual_file).unwrap();
     assert_eq!(saved_actual_bytes, actual_png_bytes);
+}
+
+/// The pixel options of a rule reach the engine through `gleon diff`: real PNGs of an edge whose
+/// anti-aliasing another rasterizer drew differently fail exactly and pass with `anti_alias`,
+/// and the case report counts the tolerated pixels.
+#[test]
+fn test_diff_applies_the_pixel_options_of_a_rule() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    init_workspace(&ctx).unwrap();
+    common::copy_config(root, "pixel_options");
+    // One anti-aliased column moves from 128 to 100 on a black-to-white edge.
+    let dirs = ["strict", "aa", "channel", "short", "edges"];
+    for dir in dirs {
+        fs::create_dir_all(root.join(dir)).unwrap();
+        fs::copy(
+            fixtures.join("aa_edge_baseline_10x10.png"),
+            root.join(dir).join("edge.png"),
+        )
+        .unwrap();
+    }
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    stage_workspace(&ctx, None).unwrap();
+    for dir in dirs {
+        fs::copy(
+            fixtures.join("aa_edge_actual_10x10.png"),
+            root.join(dir).join("edge.png"),
+        )
+        .unwrap();
+    }
+
+    let result = run_diff(&ctx, &DiffOptions::default()).unwrap();
+    assert_eq!((result.total_tests, result.failed_tests), (5, 2));
+
+    for failing in ["strict", "short"] {
+        let report = case_report(root, &format!("{failing}/edge"));
+        assert_eq!(report.outcome, CaseOutcome::Mismatch, "{failing}");
+    }
+    for (passing, tolerated, edges) in [("aa", 10, 0), ("channel", 10, 0), ("edges", 0, 10)] {
+        let report = case_report(root, &format!("{passing}/edge"));
+        assert_eq!(report.outcome, CaseOutcome::Match, "{passing}");
+        assert!(
+            matches!(
+                report.metrics,
+                Some(gleon_core::case::Metrics::Pixel {
+                    diff_pixels: 0,
+                    tolerated_pixels,
+                    edge_pixels,
+                    ..
+                }) if (tolerated_pixels, edge_pixels) == (tolerated, edges)
+            ),
+            "{passing}: {:?}",
+            report.metrics
+        );
+    }
+    assert!(matches!(
+        case_report(root, "edges/edge").comparison.tolerance,
+        gleon_model::tolerance::Tolerance::Pixel {
+            edge_threshold: 64,
+            ..
+        }
+    ));
+}
+
+/// A screenshot of another size than its baseline keeps a diff of both sizes beside the two
+/// images.
+#[test]
+fn test_diff_keeps_a_diff_of_both_sizes_for_a_dimension_mismatch() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    init_workspace(&ctx).unwrap();
+    common::copy_config(root, "pixel_options");
+    fs::create_dir_all(root.join("size")).unwrap();
+    fs::copy(
+        fixtures.join("diff_1px_black_center_100x100.png"),
+        root.join("size/size.png"),
+    )
+    .unwrap();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    stage_workspace(&ctx, None).unwrap();
+    fs::copy(fixtures.join("200x100.png"), root.join("size/size.png")).unwrap();
+
+    run_diff(&ctx, &DiffOptions::default()).unwrap();
+    let report = case_report(root, "size/size");
+    assert_eq!(report.outcome, CaseOutcome::DimensionMismatch);
+    let diff = report
+        .artifacts
+        .and_then(|artifacts| artifacts.diff)
+        .expect("a diff of both sizes");
+    let diff = image::open(root.join(diff)).unwrap().to_rgba8();
+    assert_eq!(diff.dimensions(), (200, 100));
+    // The overlap differs everywhere but under the mask, which keeps the darkened golden.
+    let golden = image::open(fixtures.join("diff_1px_black_center_100x100.png"))
+        .unwrap()
+        .to_rgba8();
+    let darkened = |[r, g, b, a]: [u8; 4]| [r / 2, g / 2, b / 2, a];
+    assert_eq!(diff.get_pixel(5, 5).0, darkened(golden.get_pixel(5, 5).0));
+    assert_eq!(diff.get_pixel(50, 50).0, [255, 0, 255, 255]);
 }

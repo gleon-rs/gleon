@@ -1,0 +1,4 @@
+# Matches any file under Auth/, whatever its extension and case.
+required_version: ">=0.1.0"
+screenshots:
+  - include: "Auth/**"

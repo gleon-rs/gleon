@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "name": "test/goldens/counter_initial",
   "golden": {
     "path": "test/goldens/macos-aarch64/counter_initial.png",

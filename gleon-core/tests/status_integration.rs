@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use std::{fs, path::Path};
 
 use gleon_core::{
@@ -56,13 +58,7 @@ fn test_status_fresh_workspace_reports_added_with_real_fixture() {
     fs::write(&screenshot_file, real_png_bytes).unwrap();
 
     // 3. Write custom config targeting billing/**/*.png
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
     let report = check_status(&ctx).expect("check_status should succeed");
@@ -114,20 +110,7 @@ fn test_status_with_mask_rules_is_clean_after_staging() {
     fs::create_dir_all(&screenshot_dir).unwrap();
     fs::write(screenshot_dir.join("screen.png"), real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "masked_app/**/*.png"
-    masks:
-      - path: "**/*.png"
-        zones:
-          - x: 0
-            y: 0
-            width: 50
-            height: 50
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "masked_quarter");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -158,13 +141,7 @@ fn test_status_reports_modified() {
     let screenshot_file = screenshot_dir.join("form.png");
     fs::write(&screenshot_file, &real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -204,13 +181,7 @@ fn test_status_reports_deleted() {
     let screenshot_file = screenshot_dir.join("form.png");
     fs::write(&screenshot_file, &real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -239,12 +210,7 @@ fn test_status_fallback_platform_integration() {
         .join("fixtures");
 
     // 1. Setup gleon.yaml with fallback_platform
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::copy(
-        fixtures_dir.join("fallback_config.yaml"),
-        base_path.join(".gleon").join("gleon.yaml"),
-    )
-    .unwrap();
+    common::copy_config(base_path, "fallback");
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
     init_workspace(&ctx_init).unwrap();
@@ -303,19 +269,7 @@ fn test_status_missing_baseline_blob_returns_modified() {
     let screenshot_file = screenshot_dir.join("form.png");
     fs::write(&screenshot_file, &baseline_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "masked_app/*.png"
-    masks:
-      - path: "**/*.png"
-        zones:
-          - x: 0
-            y: 0
-            width: 10
-            height: 10
-"#;
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "masked_corner");
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
@@ -358,20 +312,7 @@ fn test_status_with_corrupt_image() {
     let real_png_bytes = fs::read(fixtures_dir.join("200x100.png")).unwrap();
     fs::write(&screenshot_file, &real_png_bytes).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "billing/**/*.png"
-    masks:
-      - path: "**/*.png"
-        zones:
-          - x: 0
-            y: 0
-            width: 100
-            height: 50
-"#;
-    fs::create_dir_all(base_path.join(".gleon")).unwrap();
-    fs::write(base_path.join(".gleon").join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "billing_masked_top");
 
     let ctx_stage = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
     stage_workspace(&ctx_stage, None).unwrap();

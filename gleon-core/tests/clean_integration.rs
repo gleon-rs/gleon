@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use std::fs;
 
 use gleon_core::{
@@ -36,13 +38,7 @@ fn test_clean_workspace_full_flow_with_git_untracking() {
     fs::create_dir_all(&runs_dir).unwrap();
     fs::write(runs_dir.join("run_metadata.json"), b"{}").unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "packages/app/test/goldens/**/*.png"
-    mode: pixel
-"#;
-    fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "monorepo_goldens");
 
     // 3. Create sample golden files
     let goldens_dir = base_path
@@ -114,13 +110,7 @@ fn test_clean_workspace_dry_run_leaves_state_intact() {
     fs::create_dir_all(&runs_dir).unwrap();
     fs::write(runs_dir.join("data.txt"), b"temp").unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "test/goldens/**/*.png"
-    mode: pixel
-"#;
-    fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "goldens");
 
     let goldens_dir = base_path.join("test").join("goldens");
     fs::create_dir_all(&goldens_dir).unwrap();
@@ -151,13 +141,7 @@ fn test_clean_workspace_outside_git_repository() {
     let gleon_dir = base_path.join(".gleon");
     fs::create_dir_all(&gleon_dir).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "test/goldens/**/*.png"
-    mode: pixel
-"#;
-    fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "goldens");
 
     let goldens_dir = base_path.join("test").join("goldens");
     fs::create_dir_all(&goldens_dir).unwrap();
@@ -191,13 +175,7 @@ fn test_clean_workspace_untracks_mixed_case_paths() {
 
     let gleon_dir = base_path.join(".gleon");
     fs::create_dir_all(&gleon_dir).unwrap();
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include: "test/Goldens/**/*.png"
-    mode: pixel
-"#;
-    fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "goldens_mixed_case");
 
     let goldens_dir = base_path.join("test").join("Goldens");
     fs::create_dir_all(&goldens_dir).unwrap();

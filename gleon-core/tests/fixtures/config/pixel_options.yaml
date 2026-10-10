@@ -1,0 +1,28 @@
+required_version: ">=0.1.0"
+screenshots:
+  # Exact: the anti-aliasing of another rasterizer fails.
+  - include: "strict/*.png"
+    mode: pixel
+    diff: { threshold: 0 }
+  # Exact but for anti-aliased pixels.
+  - include: "aa/*.png"
+    mode: pixel
+    diff: { threshold: 0, anti_alias: true }
+  # Exact but for channels within 28 (the fixture's drift) or 27 (one short of it).
+  - include: "channel/*.png"
+    mode: pixel
+    diff: { threshold: 0, channel_tolerance: 28 }
+  - include: "short/*.png"
+    mode: pixel
+    diff: { threshold: 0, channel_tolerance: 27 }
+  # Exact but for the golden's edges.
+  - include: "edges/*.png"
+    mode: pixel
+    diff: { threshold: 0, edge_threshold: 64 }
+  # Another size, with a mask over its top-left corner.
+  - include: "size/*.png"
+    mode: pixel
+    masks:
+      - path: "size/*.png"
+        zones:
+          - { x: 0, y: 0, width: 10, height: 10 }

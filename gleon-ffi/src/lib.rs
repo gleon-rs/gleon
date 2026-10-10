@@ -66,7 +66,7 @@ use session::{ArtifactNames, Integration, Session, SessionOptions};
 
 /// Version of the C contract. Bumped on any breaking change so the caller can refuse a
 /// mismatched native library instead of misreading it.
-pub const ABI_VERSION: u32 = 11;
+pub const ABI_VERSION: u32 = 12;
 
 /// Session flag: goldens belong to workspaces.
 ///
@@ -130,6 +130,15 @@ mod handles {
         pub candidate_format: u8,
         /// `0` the `.gleon/gleon.yaml` rule, `1` exact, `2` pixel, `3` SSIM.
         pub tolerance_kind: u8,
+        /// Pixel tolerance (`tolerance_kind` 2), outside text: a differing pixel counts as equal
+        /// when no RGBA byte differs by more than this, `[0, 254]` (0: off).
+        pub channel_tolerance: u8,
+        /// Pixel tolerance (`tolerance_kind` 2), outside text: `1` lets anti-aliased pixels
+        /// pass, `0` not.
+        pub anti_alias: u8,
+        /// Pixel tolerance (`tolerance_kind` 2), outside text: differing pixels on the golden's
+        /// edges (Sobel gradient above this) pass, `[0, 254]` (0: off).
+        pub edge_threshold: u8,
     }
 
     /// The verdict of a call and the texts to show, owned by `texts`; written unaligned to the
@@ -169,6 +178,9 @@ mod handles {
         assert!(offset_of!(GleonCall, mode) == 40);
         assert!(offset_of!(GleonCall, candidate_format) == 41);
         assert!(offset_of!(GleonCall, tolerance_kind) == 42);
+        assert!(offset_of!(GleonCall, channel_tolerance) == 43);
+        assert!(offset_of!(GleonCall, anti_alias) == 44);
+        assert!(offset_of!(GleonCall, edge_threshold) == 45);
         assert!(size_of::<GleonSummary>() == 64);
         assert!(offset_of!(GleonSummary, verdict) == 0);
         assert!(offset_of!(GleonSummary, error_kind) == 1);
@@ -434,6 +446,13 @@ fn call_tolerance(call: &GleonCall) -> Result<Option<Tolerance>, String> {
         1 => Tolerance::Exact {},
         2 => Tolerance::Pixel {
             max_diff_ratio: call.max_diff_ratio,
+            channel_tolerance: call.channel_tolerance,
+            anti_alias: match call.anti_alias {
+                0 => false,
+                1 => true,
+                other => return Err(format!("`anti_alias` must be 0 or 1 (got {other})")),
+            },
+            edge_threshold: call.edge_threshold,
         },
         3 => Tolerance::Ssim {
             min_similarity: call.min_similarity,
@@ -529,13 +548,15 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 /// straight (not premultiplied) RGBA8 pixels of a `candidate_width` x `candidate_height` capture
 /// (exactly `4 * width * height` bytes), which spares the integration encoding a PNG on every
 /// passing comparison; `tolerance_kind` `0` uses the `.gleon/gleon.yaml` rule, `1` exact, `2`
-/// pixel (`max_diff_ratio`), `3` SSIM (`min_similarity`, `color_tolerance`).
+/// pixel (`max_diff_ratio` and the options `channel_tolerance`, `anti_alias`, `edge_threshold`),
+/// `3` SSIM (`min_similarity`, `color_tolerance`).
 ///
 /// `mask_count` pixel masks `[x, y, width, height]` are at `masks`. `text_region_count` text
-/// regions `[x, y, width, height]` (candidate pixels) are at `text_regions`, compared in pixel
-/// and exact mode under `call.text_tolerance`: the largest share of differing pixels in any tile
+/// regions `[x, y, width, height]` (candidate pixels) are at `text_regions`, compared under
+/// every tolerance by `call.text_tolerance`: the largest share of differing pixels in any tile
 /// of text, `[0, 1]` (NaN: the rule's `text_tolerance`, else 0.05 against a golden of this
-/// platform and 1, so text never fails, against any other).
+/// platform and 1, so text never fails, against any other); in SSIM mode the text is left out of
+/// both gates, and no pixel option applies to it.
 ///
 /// # Safety
 /// `call` must point to a readable [`GleonCall`] (any alignment) or be null, `summary` to a
@@ -755,6 +776,9 @@ mod tests {
                 mode: self.mode,
                 candidate_format: self.format.0,
                 tolerance_kind,
+                channel_tolerance: 0,
+                anti_alias: 0,
+                edge_threshold: 0,
             };
             let mut buffer = vec![0u8; size_of::<GleonCall>() + 1];
             unsafe {
@@ -1033,27 +1057,54 @@ mod tests {
 
     #[test]
     fn test_call_tolerances() {
+        let call = |tolerance_kind, max_diff_ratio, min_similarity, color_tolerance| GleonCall {
+            max_diff_ratio,
+            min_similarity,
+            color_tolerance,
+            text_tolerance: f64::NAN,
+            candidate_width: 0,
+            candidate_height: 0,
+            mode: 0,
+            candidate_format: 0,
+            tolerance_kind,
+            channel_tolerance: 0,
+            anti_alias: 0,
+            edge_threshold: 0,
+        };
         let tolerance = |tolerance_kind, max_diff_ratio, min_similarity, color_tolerance| {
-            call_tolerance(&GleonCall {
+            call_tolerance(&call(
+                tolerance_kind,
                 max_diff_ratio,
                 min_similarity,
                 color_tolerance,
-                text_tolerance: f64::NAN,
-                candidate_width: 0,
-                candidate_height: 0,
-                mode: 0,
-                candidate_format: 0,
-                tolerance_kind,
-            })
+            ))
         };
-        assert_eq!(tolerance(0, 9.0, 9.0, 9.0), Ok(None));
-        assert_eq!(tolerance(1, 9.0, 9.0, 9.0), Ok(Some(Tolerance::Exact {})));
+        // The pixel options cross the contract; an anti-aliasing flag is 0 or 1.
+        let options = GleonCall {
+            channel_tolerance: 4,
+            anti_alias: 1,
+            edge_threshold: 64,
+            ..call(2, 0.01, 9.0, 9.0)
+        };
         assert_eq!(
-            tolerance(2, 0.1, 9.0, 9.0),
+            call_tolerance(&options),
             Ok(Some(Tolerance::Pixel {
-                max_diff_ratio: 0.1
+                max_diff_ratio: 0.01,
+                channel_tolerance: 4,
+                anti_alias: true,
+                edge_threshold: 64,
             }))
         );
+        assert_eq!(
+            call_tolerance(&GleonCall {
+                anti_alias: 2,
+                ..options
+            }),
+            Err("`anti_alias` must be 0 or 1 (got 2)".to_owned())
+        );
+        assert_eq!(tolerance(0, 9.0, 9.0, 9.0), Ok(None));
+        assert_eq!(tolerance(1, 9.0, 9.0, 9.0), Ok(Some(Tolerance::Exact {})));
+        assert_eq!(tolerance(2, 0.1, 9.0, 9.0), Ok(Some(Tolerance::pixel(0.1))));
         assert_eq!(
             tolerance(3, 9.0, 0.8, 8.0),
             Ok(Some(Tolerance::Ssim {
@@ -1063,7 +1114,7 @@ mod tests {
         );
         assert!(matches!(
             tolerance(2, -0.0, 0.0, 0.0),
-            Ok(Some(Tolerance::Pixel { max_diff_ratio })) if max_diff_ratio.is_sign_positive()
+            Ok(Some(Tolerance::Pixel { max_diff_ratio, .. })) if max_diff_ratio.is_sign_positive()
         ));
     }
 

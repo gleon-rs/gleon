@@ -11,6 +11,8 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
+mod common;
+
 use std::fs;
 
 use assert_cmd::Command;
@@ -30,14 +32,7 @@ fn test_cli_clean_dry_run_and_execution() {
     let runs_dir = gleon_dir.join("runs");
     fs::create_dir_all(&runs_dir).unwrap();
 
-    let config_yaml = r#"
-required_version: ">=0.1.0"
-screenshots:
-  - include:
-      - "test/goldens/**/*.png"
-    mode: pixel
-"#;
-    fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
+    common::copy_config(base_path, "config/goldens");
 
     let goldens_dir = base_path.join("test").join("goldens");
     fs::create_dir_all(&goldens_dir).unwrap();

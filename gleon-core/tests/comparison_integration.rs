@@ -155,13 +155,14 @@ fn test_integration_dimension_mismatch_real_files() {
 
     assert!(
         matches!(
-            result,
+            &result,
             ComparisonResult::DimensionMismatch {
                 baseline_size: (100, 100),
-                actual_size: (200, 100)
-            }
+                actual_size: (200, 100),
+                diff_image: Some(diff),
+            } if diff.dimensions() == (200, 100)
         ),
-        "Expected DimensionMismatch, got: {result:?}"
+        "Expected DimensionMismatch with a diff, got: {result:?}"
     );
 }
 

@@ -120,6 +120,11 @@ fn read(name: &str) -> Vec<u8> {
 
 /// Compares `render` with the golden, exactly outside its text regions.
 fn judge(render: &Render, text: TextTolerance) -> Compared {
+    judge_under(render, &Tolerance::Exact {}, text)
+}
+
+/// Compares `render` with the golden under `tolerance` outside its text regions.
+fn judge_under(render: &Render, tolerance: &Tolerance, text: TextTolerance) -> Compared {
     let regions: Vec<Region> = render
         .regions
         .iter()
@@ -133,7 +138,7 @@ fn judge(render: &Render, text: TextTolerance) -> Compared {
     compare(
         &read(GOLDEN.name),
         Candidate::Png(&read(render.name)),
-        &Tolerance::Exact {},
+        tolerance,
         &[],
         Some(Text {
             regions: &regions,
@@ -196,6 +201,48 @@ fn test_the_default_compares_layout_not_text() {
             "{}: {:?}",
             render.name,
             measured(&compared)
+        );
+    }
+}
+
+/// SSIM judges text by the same tiles and leaves it out of both gates (policy 4): the matrix of
+/// the exact comparison holds under the default SSIM tolerance too.
+#[test]
+fn test_ssim_with_text_follows_the_same_matrix() {
+    let ssim = Tolerance::Ssim {
+        min_similarity: 0.8,
+        color_tolerance: 8.0,
+    };
+    for tolerance in [TextTolerance::DEFAULT, STRICT] {
+        assert!(matches!(
+            judge_under(&GOLDEN, &ssim, tolerance),
+            Compared::Match { .. }
+        ));
+    }
+    println!("render  ssim, text ignored  ssim, text <= 10%");
+    for render in &REGRESSIONS {
+        let ignored = judge_under(render, &ssim, TextTolerance::DEFAULT);
+        let strict = judge_under(render, &ssim, STRICT);
+        let verdict = |compared: &Compared| match compared {
+            Compared::Match { .. } => "pass",
+            _ => "FAIL",
+        };
+        println!(
+            "{:<7} {:>18}  {:>17}",
+            render.name,
+            verdict(&ignored),
+            verdict(&strict)
+        );
+        assert!(
+            matches!(strict, Compared::Mismatch { .. }),
+            "{} passes SSIM with text compared",
+            render.name
+        );
+        assert_eq!(
+            matches!(ignored, Compared::Match { .. }),
+            TEXT_ONLY.contains(&render.name),
+            "{} under SSIM with text ignored",
+            render.name
         );
     }
 }

@@ -37,6 +37,21 @@ const SSIM: Tolerance = Tolerance::Ssim {
     min_similarity: 0.99,
     color_tolerance: 8.0,
 };
+/// Every pixel option on.
+const OPTIONS: Tolerance = Tolerance::Pixel {
+    max_diff_ratio: 0.0,
+    channel_tolerance: 8,
+    anti_alias: true,
+    edge_threshold: 64,
+};
+/// The anti-aliasing detection and the edge mask without a channel tolerance: the most work
+/// per differing pixel (nothing short-cuts them).
+const AA_EDGES: Tolerance = Tolerance::Pixel {
+    max_diff_ratio: 0.0,
+    channel_tolerance: 0,
+    anti_alias: true,
+    edge_threshold: 64,
+};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -96,15 +111,23 @@ struct Frame {
     golden: Vec<u8>,
     same: RgbaImage,
     changed: RgbaImage,
+    /// Every pixel differs (the colors inverted).
+    inverted: RgbaImage,
 }
 
 impl Frame {
     fn new(name: &'static str, golden: RgbaImage, changed: RgbaImage) -> Self {
+        let mut inverted = golden.clone();
+        for pixel in inverted.pixels_mut() {
+            let [r, g, b, a] = pixel.0;
+            pixel.0 = [255 - r, 255 - g, 255 - b, a];
+        }
         Self {
             name,
             golden: encode_png(&golden).unwrap(),
             same: golden,
             changed,
+            inverted,
         }
     }
 }
@@ -157,7 +180,7 @@ fn run_cases(runs: usize, prints: bool) {
         let compared = |candidate: Candidate<'_>, tolerance: &Tolerance, text| {
             black_box(compare(&frame.golden, candidate, tolerance, &[], text).unwrap());
         };
-        let cases: [Case<'_>; 7] = [
+        let cases: [Case<'_>; 12] = [
             (
                 "decode golden",
                 Box::new(|| {
@@ -181,8 +204,28 @@ fn run_cases(runs: usize, prints: bool) {
                 Box::new(|| compared(Candidate::Png(&other_png), &EXACT, None)),
             ),
             (
+                "raw pass, pixel options",
+                Box::new(|| compared(raw(&frame.same), &OPTIONS, None)),
+            ),
+            (
+                "raw fail, pixel options",
+                Box::new(|| compared(raw(&frame.changed), &OPTIONS, None)),
+            ),
+            (
+                "raw full change, aa + edges",
+                Box::new(|| compared(raw(&frame.inverted), &AA_EDGES, None)),
+            ),
+            (
                 "raw pass, ssim",
                 Box::new(|| compared(raw(&frame.same), &SSIM, None)),
+            ),
+            (
+                "raw pass, ssim + text",
+                Box::new(|| compared(raw(&frame.same), &SSIM, text)),
+            ),
+            (
+                "raw fail, ssim + text",
+                Box::new(|| compared(raw(&frame.changed), &SSIM, text)),
             ),
             (
                 "raw fail, ssim",

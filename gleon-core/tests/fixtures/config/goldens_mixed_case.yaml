@@ -1,0 +1,5 @@
+# Goldens in a mixed-case directory (test/Goldens).
+required_version: ">=0.1.0"
+screenshots:
+  - include: "test/Goldens/**/*.png"
+    mode: pixel
