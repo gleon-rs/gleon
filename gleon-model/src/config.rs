@@ -88,6 +88,10 @@ pub enum GlobError {
     /// `[^...]`, which reads as a class containing `^` (negation is `[!...]`).
     #[error("negate a character class with `[!...]`, not `[^...]`")]
     CaretNegation,
+    /// A character class only `/` could match (`[/]`): classes never match a separator, so it
+    /// would match nothing.
+    #[error("a character class never matches `/`; separate directories with a plain `/`")]
+    SeparatorClass,
     /// An empty pattern or segment, a leading `/`, or a `.` or `..` segment: workspace paths are
     /// relative to its root and have none of these, so such a pattern would never match.
     #[error("patterns are relative to the workspace root, e.g. `test/**/*.png`")]
@@ -113,6 +117,8 @@ impl GlobPattern {
             Some(GlobError::Backslash)
         } else if raw.contains("[^") {
             Some(GlobError::CaretNegation)
+        } else if has_separator_only_class(raw) {
+            Some(GlobError::SeparatorClass)
         } else if raw.ends_with('/') {
             Some(GlobError::TrailingSlash)
         } else if raw
@@ -136,6 +142,34 @@ impl GlobPattern {
     pub fn is_match<P: AsRef<Path>>(&self, path: P) -> bool {
         self.0.matches_path_with(path.as_ref(), GLOB_MATCH)
     }
+}
+
+/// Whether `raw` has a character class whose members are all `/` (`[/]`, `[//]`, `[/-/]`), in the
+/// `glob` crate's syntax: `[!` negates, and a `]` right after `[` or `[!` is a member. An unclosed
+/// class is left to the crate's own error.
+fn has_separator_only_class(raw: &str) -> bool {
+    let mut rest = raw;
+    while let Some(open) = rest.find('[') {
+        let class = &rest[open + 1..];
+        let (is_negated, members) = class
+            .strip_prefix('!')
+            .map_or((false, class), |members| (true, members));
+        let Some(first) = members.chars().next() else {
+            return false;
+        };
+        let Some(close) = members[first.len_utf8()..]
+            .find(']')
+            .map(|at| at + first.len_utf8())
+        else {
+            return false;
+        };
+        let items = &members[..close];
+        if !is_negated && items.replace("/-/", "").bytes().all(|byte| byte == b'/') {
+            return true;
+        }
+        rest = &members[close + 1..];
+    }
+    false
 }
 
 impl PartialEq for GlobPattern {
@@ -1225,6 +1259,36 @@ screenshots:
         // 5. Invalid pattern via new() directly
         let invalid_new = GlobPattern::new("test/[a-z");
         assert!(invalid_new.is_err());
+    }
+
+    /// A class only `/` could match matches nothing (classes never match a separator); one that
+    /// can match anything else is a class like any other.
+    #[test]
+    fn test_separator_only_classes_are_errors() {
+        for pattern in ["a[/]b.png", "a[//]b.png", "a[/-/]b.png", "x/[a]y[/]z.png"] {
+            assert!(
+                matches!(GlobPattern::new(pattern), Err(GlobError::SeparatorClass)),
+                "{pattern}"
+            );
+        }
+        for (pattern, path) in [
+            ("a-[!/]-b.png", "a-x-b.png"),
+            ("a-[x/]-b.png", "a-x-b.png"),
+            ("a[.-0]b.png", "a.b.png"),
+            ("a[]]b.png", "a]b.png"),
+            ("a-[!]]-b.png", "a-x-b.png"),
+            ("a-[é/]-b.png", "a-é-b.png"),
+        ] {
+            let glob = GlobPattern::new(pattern).unwrap();
+            assert!(glob.is_match(path), "{pattern} {path}");
+        }
+        // Unclosed classes are the crate's syntax errors.
+        for pattern in ["a[/b.png", "a.png["] {
+            assert!(
+                matches!(GlobPattern::new(pattern), Err(GlobError::Syntax(_))),
+                "{pattern}"
+            );
+        }
     }
 
     #[test]

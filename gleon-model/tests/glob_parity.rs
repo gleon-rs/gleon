@@ -134,16 +134,20 @@ fn test_former_globset_readings_are_errors() {
         "test/./goldens/*.png",
         "test//goldens/*.png",
         "test/..",
+        // Only `/` in a class, which never matches a separator.
+        "a[/]b.png",
+        "a[/-/]b.png",
     ] {
         assert!(GlobPattern::new(pattern).is_err(), "{pattern:?}");
     }
 }
 
 /// The one difference of matching that stays: a class never matches `/` (in globset it could,
-/// across directories), which is what `*` and `?` do too.
+/// across directories), which is what `*` and `?` do too. A class only `/` could match is an
+/// error (`test_former_globset_readings_are_errors`).
 #[test]
 fn test_classes_never_match_a_separator() {
-    for (pattern, path) in [("a[!x]b", "a/b"), ("test[/]a.png", "test/a.png")] {
+    for (pattern, path) in [("a[!x]b", "a/b"), ("test[a/]a.png", "test/a.png")] {
         assert!(
             !GlobPattern::new(pattern).unwrap().is_match(path),
             "{pattern}"
