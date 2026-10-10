@@ -3,9 +3,12 @@ screenshots:
 - include: '**/*.png'
   mode: pixel
   diff:
-    threshold: 0.1
+    threshold: 0.01
     min_similarity: 0.8
     color_tolerance: 8.0
+    channel_tolerance: 0
+    anti_alias: false
+    edge_threshold: 0
   masks: []
 exclude:
 - node_modules/**

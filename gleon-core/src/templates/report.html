@@ -279,6 +279,12 @@
                     <div class="image-title">Baseline{% if failure.baseline_size %} ({{ failure.baseline_size }}){% endif %}</div>
                     <img class="img-static" src="{{ failure.baseline_path | escape }}" alt="Baseline" loading="lazy">
                 </div>
+                {% if failure.diff_path %}
+                <div class="image-container" id="dim-diff-container-{{ loop.index }}">
+                    <div class="image-title">Diff Image (both sizes)</div>
+                    <img class="img-static" src="{{ failure.diff_path | escape }}" alt="Diff" loading="lazy">
+                </div>
+                {% endif %}
             </div>
             {% elif failure.outcome == "missing" and failure.actual_path %}
             <div class="comparison-grid">

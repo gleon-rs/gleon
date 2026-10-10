@@ -15,17 +15,18 @@ pub mod ssim;
 use image::RgbaImage;
 #[cfg(feature = "phash")]
 pub use phash::compute_phash;
-pub use pixel::{PixelRegions, TextAnalysis, TextTile};
-pub use ssim::{Region, SsimAnalysis, SsimPolicy};
+pub use pixel::{PixelOptions, PixelRegions, TextAnalysis, TextTile};
+pub use ssim::{Region, SsimAnalysis, SsimPolicy, SsimRegion};
 
 use crate::config::{DiffConfig, Mode};
 
-/// Version of the engine's tolerant decisions: the SSIM policy, the text tiles of the pixel mode.
+/// Version of the engine's tolerant decisions: the SSIM policy, the text tiles.
 ///
 /// Bumped whenever verdicts can change for the same inputs. 3: a text tile always counts
 /// [`pixel::TEXT_TILE`] squared pixels, so a thin or edge-clipped text region no longer turns one
-/// differing pixel into a large share.
-pub const POLICY_VERSION: u32 = 3;
+/// differing pixel into a large share. 4: SSIM mode judges text regions by their tiles too and
+/// leaves them out of both of its gates, like masks.
+pub const POLICY_VERSION: u32 = 4;
 
 /// The straight (not premultiplied) RGBA8 pixels of an image, row by row, borrowed: a decoded
 /// golden (`&RgbaImage`) or the raw capture of an integration, compared without a copy.
@@ -95,8 +96,11 @@ pub enum Measurement {
         /// Pixels compared strictly (neither masked nor text under a text tolerance), the base of
         /// the threshold.
         checked_pixels: u64,
-        /// Strictly compared pixels whose RGBA bytes differ.
+        /// Strictly compared pixels whose RGBA bytes differ (beyond the [`PixelOptions`]).
         diff_count: u64,
+        /// Differing pixels the [`PixelOptions`] let pass (channel tolerance, anti-aliasing,
+        /// edges), counted as equal.
+        tolerated_count: u64,
         /// The text regions, when a text tolerance applied to some.
         text: Option<TextAnalysis>,
     },
@@ -120,6 +124,12 @@ pub enum Measurement {
         failing_pixels: u64,
         /// Bounding box of the changed pixels that failed the policy.
         failing_region: Option<Region>,
+        /// The policy's metrics inside `changed_region`.
+        changed_local: Option<SsimRegion>,
+        /// The policy's metrics inside `failing_region`.
+        failing_local: Option<SsimRegion>,
+        /// The text regions, judged by their tiles, when a text tolerance applied to some.
+        text: Option<TextAnalysis>,
     },
 }
 
@@ -134,6 +144,9 @@ impl From<&SsimAnalysis> for Measurement {
             changed_region: analysis.changed_region,
             failing_pixels: analysis.failing_pixels,
             failing_region: analysis.failing_region,
+            changed_local: analysis.changed_local,
+            failing_local: analysis.failing_local,
+            text: None,
         }
     }
 }
@@ -165,16 +178,20 @@ pub enum ComparisonResult {
         baseline_size: (u32, u32),
         /// Dimensions of the actual image.
         actual_size: (u32, u32),
+        /// The visualization of both sizes ([`pixel::dimension_diff`]); `None` when its canvas
+        /// is over the decoding budget.
+        diff_image: Option<RgbaImage>,
     },
 }
 
 fn execute_pixel_comparison(
     baseline: Pixels<'_>,
     actual: Pixels<'_>,
-    threshold: f64,
+    config: &DiffConfig,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult {
-    let compared = pixel::compare(baseline, actual, regions);
+    let threshold = config.threshold;
+    let compared = pixel::compare(baseline, actual, regions, &PixelOptions::from(config));
     let analysis = compared.analysis;
     let strict_passes = if threshold == 0.0 || analysis.checked_pixels == 0 {
         analysis.diff_pixels == 0
@@ -193,6 +210,7 @@ fn execute_pixel_comparison(
     let measurement = Measurement::Pixel {
         checked_pixels: analysis.checked_pixels,
         diff_count: analysis.diff_pixels,
+        tolerated_count: analysis.tolerated_pixels + analysis.edge_pixels,
         text: analysis.text,
     };
     if strict_passes && text_passes {
@@ -209,9 +227,11 @@ fn execute_pixel_comparison(
 ///
 /// `regions` lie inside the images ([`masking::resolve_zones`]). In pixel mode masked pixels are
 /// neither compared nor counted and text is compared under its policy ([`pixel`]); in SSIM mode
-/// masked pixels are painted black in both images first and text regions do not apply.
+/// text is judged by the same tiles, then masks and text regions are painted black in both images
+/// for both gates.
 ///
-/// If dimensions do not match, returns `ComparisonResult::DimensionMismatch`.
+/// If dimensions do not match, returns `ComparisonResult::DimensionMismatch` with a diff of both
+/// sizes (masks and text do not apply: they name pixels of one size).
 ///
 /// # Panics
 /// Panics if a region reaches beyond the images.
@@ -231,40 +251,70 @@ pub fn compare_images<'a>(
         return ComparisonResult::DimensionMismatch {
             baseline_size: (w1, h1),
             actual_size: (w2, h2),
+            diff_image: pixel::dimension_diff(baseline, actual),
         };
     }
 
     match mode {
-        Mode::Pixel => execute_pixel_comparison(baseline, actual, config.threshold, regions),
+        Mode::Pixel => execute_pixel_comparison(baseline, actual, config, regions),
         Mode::Ssim if !ssim::fits_analysis_budget(w1, h1) => {
             ComparisonResult::TooLarge { size: (w1, h1) }
         }
-        Mode::Ssim => {
-            let policy = SsimPolicy {
-                min_similarity: config.min_similarity,
-                color_tolerance: config.color_tolerance,
-            };
-            let analysis = if regions.masks.is_empty() {
-                ssim::analyze(baseline, actual, &policy)
-            } else {
-                // Copies only here: the masks are painted black in both images.
-                let masked = |pixels: Pixels<'_>| {
-                    let mut image = pixels.to_image();
-                    masking::paint_black(&mut image, regions.masks);
-                    image
-                };
-                ssim::analyze(&masked(baseline), &masked(actual), &policy)
-            };
-            let measurement = Measurement::from(&analysis);
-            analysis
-                .diff_image
-                .map_or(ComparisonResult::Match { measurement }, |diff_image| {
-                    ComparisonResult::Mismatch {
-                        measurement,
-                        diff_image,
-                    }
-                })
-        }
+        Mode::Ssim => execute_ssim_comparison(baseline, actual, config, regions),
+    }
+}
+
+fn execute_ssim_comparison(
+    baseline: Pixels<'_>,
+    actual: Pixels<'_>,
+    config: &DiffConfig,
+    regions: &PixelRegions<'_>,
+) -> ComparisonResult {
+    let policy = SsimPolicy {
+        min_similarity: config.min_similarity,
+        color_tolerance: config.color_tolerance,
+    };
+    let has_text = regions.text_tolerance.is_some() && !regions.text.is_empty();
+    // Text is judged by its tiles as in pixel mode (masks winning), then painted out of both
+    // gates with the masks: glyphs of another rasterizer would fail the envelope.
+    let text = has_text.then(|| pixel::compare(baseline, actual, regions, &PixelOptions::STRICT));
+    let text_regions: &[Region] = if has_text { regions.text } else { &[] };
+    let painted: Vec<Region> = regions.masks.iter().chain(text_regions).copied().collect();
+    // Copies only here: the regions are painted black in both images.
+    let masked = (!painted.is_empty()).then(|| {
+        let paint = |pixels: Pixels<'_>| {
+            let mut image = pixels.to_image();
+            masking::paint_black(&mut image, &painted);
+            image
+        };
+        (paint(baseline), paint(actual))
+    });
+    let (analysed_baseline, analysed_actual) =
+        masked.as_ref().map_or((baseline, actual), |(b, a)| {
+            (Pixels::from(b), Pixels::from(a))
+        });
+    let analysis = ssim::analyze(analysed_baseline, analysed_actual, &policy);
+    let text_passes = text.as_ref().is_none_or(pixel::Compared::text_passes);
+    let mut measurement = Measurement::from(&analysis);
+    if let Measurement::Ssim {
+        text: measured_text,
+        ..
+    } = &mut measurement
+    {
+        *measured_text = text.as_ref().and_then(|text| text.analysis.text);
+    }
+    if analysis.passed() && text_passes {
+        return ComparisonResult::Match { measurement };
+    }
+    let mut diff_image = analysis
+        .diff_image
+        .unwrap_or_else(|| ssim::passing_diff(analysed_baseline, analysed_actual));
+    if let Some(text) = &text {
+        text.paint_text(&mut diff_image, baseline);
+    }
+    ComparisonResult::Mismatch {
+        measurement,
+        diff_image,
     }
 }
 
@@ -325,6 +375,7 @@ mod tests {
                 measurement: Measurement::Pixel {
                     checked_pixels: 128,
                     diff_count: 0,
+                    tolerated_count: 0,
                     text: Some(_),
                 }
             }
@@ -386,12 +437,89 @@ mod tests {
             }
         ));
 
-        // SSIM: the masked change is painted over, text regions do not apply.
+        // SSIM: the masked change is painted over.
         let mut masked = baseline.clone();
         masked.put_pixel(20, 2, Rgba([0, 0, 0, 255]));
         assert!(matches!(
             compare(&masked, Mode::Ssim),
             ComparisonResult::Match { .. }
+        ));
+    }
+
+    /// SSIM mode judges text by its tiles and leaves it out of both gates: glyphs of another
+    /// rasterizer pass under a lenient text tolerance, a dense change fails under a strict one, and
+    /// a change outside text still fails the SSIM policy.
+    #[test]
+    fn test_ssim_judges_text_by_tiles_and_paints_it_out() {
+        let white = Rgba([255, 255, 255, 255]);
+        let baseline = ImageBuffer::from_pixel(48, 32, white);
+        let text = [Region {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+        }];
+        let ssim = DiffConfig::default();
+        let compare = |actual: &RgbaImage, text_tolerance| {
+            compare_images(
+                &baseline,
+                actual,
+                Mode::Ssim,
+                &ssim,
+                &PixelRegions {
+                    masks: &[],
+                    text: &text,
+                    text_tolerance: Some(text_tolerance),
+                },
+            )
+        };
+        // A changed glyph: 4x4 black pixels inside the text region (16 of 256, 6.25%).
+        let mut glyph = baseline.clone();
+        for (x, y) in (4..8).flat_map(|x| (4..8).map(move |y| (x, y))) {
+            glyph.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+        }
+        assert!(
+            matches!(
+                compare(&glyph, 1.0),
+                ComparisonResult::Match {
+                    measurement: Measurement::Ssim {
+                        failing_pixels: 0,
+                        text: Some(TextAnalysis {
+                            diff_pixels: 16,
+                            ..
+                        }),
+                        ..
+                    }
+                }
+            ),
+            "text is out of the SSIM gates"
+        );
+        let ComparisonResult::Mismatch {
+            measurement:
+                Measurement::Ssim {
+                    failing_pixels: 0,
+                    text: Some(_),
+                    ..
+                },
+            diff_image,
+        } = compare(&glyph, 0.05)
+        else {
+            panic!("a dense text change fails its tiles");
+        };
+        assert_eq!(*diff_image.get_pixel(5, 5), Rgba([255, 165, 0, 255]));
+        // Unchanged text is the faded baseline, as everywhere else in an SSIM diff.
+        assert_eq!(*diff_image.get_pixel(12, 12), Rgba([255, 255, 255, 255]));
+        // Outside text the SSIM policy applies as before.
+        let mut outside = baseline.clone();
+        for (x, y) in (30..34).flat_map(|x| (20..24).map(move |y| (x, y))) {
+            outside.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+        }
+        assert!(matches!(
+            compare(&outside, 1.0),
+            ComparisonResult::Mismatch {
+                measurement: Measurement::Ssim { .. },
+                ..
+            }
         ));
     }
 
@@ -421,6 +549,7 @@ mod tests {
                 measurement: Measurement::Pixel {
                     checked_pixels: 4097 * 4096,
                     diff_count: 0,
+                    tolerated_count: 0,
                     text: None
                 }
             }
@@ -442,6 +571,7 @@ mod tests {
                 measurement: Measurement::Pixel {
                     checked_pixels: 0,
                     diff_count: 0,
+                    tolerated_count: 0,
                     text: None
                 }
             }
@@ -460,8 +590,9 @@ mod tests {
             result,
             ComparisonResult::DimensionMismatch {
                 baseline_size: (100, 100),
-                actual_size: (120, 100)
-            }
+                actual_size: (120, 100),
+                diff_image: Some(ref diff),
+            } if diff.dimensions() == (120, 100)
         ));
     }
 
@@ -488,6 +619,7 @@ mod tests {
                 measurement: Measurement::Pixel {
                     checked_pixels: 100,
                     diff_count: 5,
+                    tolerated_count: 0,
                     text: None
                 }
             }
@@ -505,6 +637,7 @@ mod tests {
                 measurement: Measurement::Pixel {
                     checked_pixels: 100,
                     diff_count: 5,
+                    tolerated_count: 0,
                     text: None
                 },
                 ..
@@ -530,6 +663,7 @@ mod tests {
                 measurement: Measurement::Pixel {
                     checked_pixels: 4,
                     diff_count: 1,
+                    tolerated_count: 0,
                     text: None
                 },
                 diff_image: ImageBuffer::from_fn(2, 2, |x, y| {

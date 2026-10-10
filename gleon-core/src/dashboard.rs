@@ -775,6 +775,7 @@ mod tests {
             metrics: diff_pixels.map(|diff_pixels| Metrics::Pixel {
                 total_pixels: 1000,
                 diff_pixels,
+                tolerated_pixels: 0,
                 diff_ratio: diff_pixels as f64 / 1000.0,
                 headroom: 0.0,
                 text: None,

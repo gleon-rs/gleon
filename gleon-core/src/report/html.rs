@@ -205,6 +205,7 @@ mod tests {
         mismatch.metrics = Some(Metrics::Pixel {
             total_pixels: 100,
             diff_pixels: 0,
+            tolerated_pixels: 0,
             diff_ratio: 0.0,
             headroom: 0.0,
             text: Some(gleon_model::case::TextMetrics {
@@ -301,6 +302,7 @@ mod tests {
         mismatch.artifacts.as_mut().unwrap().diff = None;
         let mut dimensions = report("b", CaseOutcome::DimensionMismatch);
         dimensions.candidate.width = None;
+        dimensions.artifacts.as_mut().unwrap().diff = None;
         let cases = Cases::new("/w/.gleon/runs/latest", vec![mismatch, dimensions]);
         let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
             .unwrap()
@@ -309,6 +311,20 @@ mod tests {
         assert!(!html.contains("Diff Image"), "{html}");
         assert!(html.contains("Actual</div>"), "{html}");
         assert!(!html.contains("None"), "{html}");
+    }
+
+    /// A dimension mismatch shows its diff of both sizes next to the two images.
+    #[test]
+    fn test_generate_html_shows_the_diff_of_a_dimension_mismatch() {
+        let cases = Cases::new(
+            "/w/.gleon/runs/latest",
+            vec![report("b", CaseOutcome::DimensionMismatch)],
+        );
+        let html = ReportGenerator::generate_html(&cases, Path::new("/w/.gleon/runs/latest"))
+            .unwrap()
+            .unwrap();
+        assert!(html.contains("Diff Image (both sizes)"), "{html}");
+        assert!(html.contains("diff.png"), "{html}");
     }
 
     /// A run of two platforms names the platform of each case; a run of one does not.

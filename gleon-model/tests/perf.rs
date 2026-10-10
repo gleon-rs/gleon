@@ -37,6 +37,13 @@ const SSIM: Tolerance = Tolerance::Ssim {
     min_similarity: 0.99,
     color_tolerance: 8.0,
 };
+/// Every pixel option on: the most work per differing pixel.
+const OPTIONS: Tolerance = Tolerance::Pixel {
+    max_diff_ratio: 0.0,
+    channel_tolerance: 8,
+    anti_alias: true,
+    edge_threshold: 64,
+};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -157,7 +164,7 @@ fn run_cases(runs: usize, prints: bool) {
         let compared = |candidate: Candidate<'_>, tolerance: &Tolerance, text| {
             black_box(compare(&frame.golden, candidate, tolerance, &[], text).unwrap());
         };
-        let cases: [Case<'_>; 7] = [
+        let cases: [Case<'_>; 9] = [
             (
                 "decode golden",
                 Box::new(|| {
@@ -179,6 +186,14 @@ fn run_cases(runs: usize, prints: bool) {
             (
                 "png same pixels, exact",
                 Box::new(|| compared(Candidate::Png(&other_png), &EXACT, None)),
+            ),
+            (
+                "raw pass, pixel options",
+                Box::new(|| compared(raw(&frame.same), &OPTIONS, None)),
+            ),
+            (
+                "raw fail, pixel options",
+                Box::new(|| compared(raw(&frame.changed), &OPTIONS, None)),
             ),
             (
                 "raw pass, ssim",

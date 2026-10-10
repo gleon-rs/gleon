@@ -24,8 +24,9 @@
 )]
 
 use gleon_engine::{
-    ComparisonResult, PixelRegions, compare_images,
+    ComparisonResult, PixelOptions, PixelRegions, compare_images,
     config::{DiffConfig, Mode},
+    pixel,
     ssim::{SsimPolicy, analyze},
 };
 use image::{Rgba, RgbaImage};
@@ -508,6 +509,130 @@ fn test_corpus_separates_benign_noise_from_regressions() {
         "policy misclassified:\n{}",
         failures.join("\n")
     );
+}
+
+/// The pixel-mode options on the same corpus, exact otherwise (threshold 0): which benign noise
+/// each one absorbs, and which regressions it hides. Prints a table of the differing pixels left
+/// (`diff`), tolerated (`tolerated`) and hidden on edges (`edge`) per configuration.
+#[test]
+fn test_pixel_options_on_the_corpus() {
+    let golden = render(Scene::default());
+    let configs: [(&str, PixelOptions); 8] = [
+        ("strict", PixelOptions::STRICT),
+        (
+            "channel 2",
+            PixelOptions {
+                channel_tolerance: 2,
+                ..PixelOptions::STRICT
+            },
+        ),
+        (
+            "channel 8",
+            PixelOptions {
+                channel_tolerance: 8,
+                ..PixelOptions::STRICT
+            },
+        ),
+        (
+            "aa",
+            PixelOptions {
+                anti_alias: true,
+                ..PixelOptions::STRICT
+            },
+        ),
+        (
+            "edge 64",
+            PixelOptions {
+                edge_threshold: 64,
+                ..PixelOptions::STRICT
+            },
+        ),
+        (
+            "edge 128",
+            PixelOptions {
+                edge_threshold: 128,
+                ..PixelOptions::STRICT
+            },
+        ),
+        (
+            "channel 2 + edge 64",
+            PixelOptions {
+                channel_tolerance: 2,
+                edge_threshold: 64,
+                ..PixelOptions::STRICT
+            },
+        ),
+        (
+            "channel 8 + aa + edge 64",
+            PixelOptions {
+                channel_tolerance: 8,
+                anti_alias: true,
+                edge_threshold: 64,
+            },
+        ),
+    ];
+    let mut cases: Vec<(&str, bool, RgbaImage)> = Vec::new();
+    for (expect_pass, scenes) in [(true, benign()), (false, regressions())] {
+        cases.extend(
+            scenes
+                .into_iter()
+                .map(|(name, scene)| (name, expect_pass, render(scene))),
+        );
+    }
+    cases.push((
+        "icon blurred (3x3 box)",
+        false,
+        blur_icon(render(Scene::default())),
+    ));
+    eprintln!(
+        "{:<40} {:<26} {:>6} {:>6} {:>6}",
+        "case", "options", "diff", "tolerated", "edge"
+    );
+    let mut verdicts = std::collections::BTreeMap::new();
+    for (name, _, candidate) in &cases {
+        for (label, options) in &configs {
+            let analysis =
+                pixel::compare(&golden, candidate, &PixelRegions::NONE, options).analysis;
+            eprintln!(
+                "{name:<40} {label:<26} {:>6} {:>6} {:>6}",
+                analysis.diff_pixels, analysis.tolerated_pixels, analysis.edge_pixels
+            );
+            verdicts.insert((*name, *label), analysis.diff_pixels == 0);
+        }
+    }
+    let passes = |name: &str, label: &str| verdicts[&(name, label)];
+    for (name, expect_pass, _) in &cases {
+        if *expect_pass {
+            // Exact fails every benign case: the options are what makes any of them pass.
+            assert!(!passes(name, "strict"), "{name} passes exactly");
+        } else {
+            // A channel tolerance up to 8 and the anti-aliasing detection hide no regression.
+            for label in ["channel 2", "channel 8", "aa"] {
+                assert!(!passes(name, label), "{label} hides {name}");
+            }
+        }
+    }
+    // What each option is for.
+    assert!(passes("color drift +2", "channel 2"));
+    assert!(!passes("color drift +2", "aa") && !passes("color drift +2", "edge 64"));
+    assert!(passes("anti-aliasing quality 4x vs 8x", "edge 64"));
+    assert!(passes("anti-aliasing quality 4x vs 8x", "edge 128"));
+    // The edge mask's price (Skia Gold's too): changes that lie on the baseline's edges pass,
+    // a small icon included at 64. Documented next to `edge_threshold`.
+    for name in ["icon missing", "glyph missing", "card shifted by 1px"] {
+        assert!(passes(name, "edge 64"), "edge 64 no longer hides {name}");
+    }
+    assert!(!passes("icon missing", "edge 128"));
+    assert!(passes("icon blurred (3x3 box)", "channel 8 + aa + edge 64"));
+    // A removed 1px line has no gradient at its own pixels: every configuration fails it.
+    for (label, _) in &configs {
+        assert!(!passes("1px divider removed", label), "{label}");
+    }
+    // Sub-pixel shifts move more than the edges' own pixels: exact with options still fails.
+    assert!(!passes(
+        "whole scene shifted by (0.3, 0.2)px",
+        "channel 8 + aa + edge 64"
+    ));
 }
 
 #[test]

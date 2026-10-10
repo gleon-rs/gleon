@@ -107,7 +107,7 @@ fn test_reports_of_a_real_flutter_run() {
 /// The case report the gleon Flutter package wrote for a deleted golden of its example (macOS,
 /// metrics off), verbatim.
 const FLUTTER_MISSING_CASE: &str = r#"{
-  "schema_version": 3,
+  "schema_version": 4,
   "name": "test/goldens/counter_three_taps",
   "golden": {
     "path": "test/goldens/counter_three_taps.png"
@@ -345,9 +345,9 @@ screenshots:
         .skip(1)
         .map(|rest| rest.split('"').next().unwrap().replace("&#x2f;", "/"))
         .collect();
-    // Pixel and SSIM mismatches: golden, candidate and diff; the dimension mismatch: two; the new
+    // Pixel and SSIM mismatches and the dimension mismatch: golden, candidate and diff; the new
     // screenshot: its candidate.
-    assert_eq!(sources.len(), 9, "{sources:?}");
+    assert_eq!(sources.len(), 10, "{sources:?}");
     for source in &sources {
         assert!(!source.starts_with('/'), "relative links only: {source}");
         assert!(latest.join(source).is_file(), "{source} must exist");

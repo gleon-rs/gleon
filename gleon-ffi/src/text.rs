@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 pub use gleon_model::case::text::{dimension_summary, metrics_summary, text_tolerance, tolerance};
 use gleon_model::{
     case::{
-        CaseOutcome, Metrics,
+        CaseOutcome, Metrics, TextMetrics,
         text::{MAX_DECIMALS, at_most_tight, color, decimal, percent, signed, similarity},
     },
     tolerance::{TextTolerance, Tolerance},
@@ -31,6 +31,34 @@ const fn symbol(outcome: CaseOutcome) -> &'static str {
     }
 }
 
+/// Appends the text of a console line to `detail`: text can fail on its own, so its line shows
+/// it too; ignored text only its share.
+fn write_text_clause(
+    detail: &mut String,
+    text: Option<TextMetrics>,
+    text_tolerance: Option<TextTolerance>,
+) {
+    match (text, text_tolerance) {
+        (Some(text), Some(TextTolerance(share))) if share >= 1.0 => {
+            let _infallible = write!(
+                detail,
+                "  text {}% of a tile (ignored)",
+                percent(text.worst_tile_diff_ratio)
+            );
+        }
+        (Some(text), Some(TextTolerance(share))) => {
+            let _infallible = write!(
+                detail,
+                "  text {}% of a tile ({}, {}%)",
+                percent(text.worst_tile_diff_ratio),
+                at_most_tight(share),
+                signed(decimal(text.headroom * 100.0, 2, MAX_DECIMALS))
+            );
+        }
+        _ => {}
+    }
+}
+
 /// The one-line console summary of a golden, e.g.
 /// `gleon ✓ test/goldens/swatch.png  ssim 0.931 (≥0.800, +0.131)  color 5.2 (≤8, +2.8)  12 ms`.
 pub fn console_line(
@@ -44,28 +72,34 @@ pub fn console_line(
 ) -> String {
     let detail = match (metrics, *tolerance) {
         (
-            Some(Metrics::Ssim {
+            Some(&Metrics::Ssim {
                 min_ssim,
                 peak_excess,
                 headroom,
+                text,
                 ..
             }),
             Tolerance::Ssim {
                 min_similarity,
                 color_tolerance,
             },
-        ) => format!(
-            "ssim {} (≥{}, {})  color {} (≤{}, {})",
-            similarity(*min_ssim),
-            similarity(min_similarity),
-            signed(similarity(headroom.similarity)),
-            color(*peak_excess),
-            decimal(color_tolerance, 0, 2),
-            signed(color(headroom.color))
-        ),
+        ) => {
+            let mut detail = format!(
+                "ssim {} (≥{}, {})  color {} (≤{}, {})",
+                similarity(min_ssim),
+                similarity(min_similarity),
+                signed(similarity(headroom.similarity)),
+                color(peak_excess),
+                decimal(color_tolerance, 0, 2),
+                signed(color(headroom.color))
+            );
+            write_text_clause(&mut detail, text, text_tolerance);
+            detail
+        }
         (
             Some(&Metrics::Pixel {
                 diff_pixels,
+                tolerated_pixels,
                 diff_ratio,
                 headroom,
                 text,
@@ -80,26 +114,10 @@ pub fn console_line(
                 at_most_tight(max_diff_ratio),
                 signed(decimal(headroom * 100.0, 2, MAX_DECIMALS))
             );
-            // Text can fail on its own, so its line shows it too; ignored text only its share.
-            match (text, text_tolerance) {
-                (Some(text), Some(TextTolerance(share))) if share >= 1.0 => {
-                    let _infallible = write!(
-                        detail,
-                        "  text {}% of a tile (ignored)",
-                        percent(text.worst_tile_diff_ratio)
-                    );
-                }
-                (Some(text), Some(TextTolerance(share))) => {
-                    let _infallible = write!(
-                        detail,
-                        "  text {}% of a tile ({}, {}%)",
-                        percent(text.worst_tile_diff_ratio),
-                        at_most_tight(share),
-                        signed(decimal(text.headroom * 100.0, 2, MAX_DECIMALS))
-                    );
-                }
-                _ => {}
+            if tolerated_pixels > 0 {
+                let _infallible = write!(detail, ", {tolerated_pixels} tolerated");
             }
+            write_text_clause(&mut detail, text, text_tolerance);
             detail
         }
         _ => match outcome {
@@ -137,7 +155,7 @@ pub fn clamped_masks(golden_uri: &str, count: usize) -> String {
 pub fn unused_text_tolerance(golden_uri: &str) -> String {
     format!(
         "gleon: the text tolerance of golden \"{golden_uri}\" did not apply: text is compared \
-         under it for widgets only, in pixel and exact mode."
+         under it for widgets only."
     )
 }
 
@@ -228,6 +246,7 @@ mod tests {
                 similarity: 0.131,
                 color: 2.8,
             },
+            text: None,
         };
         let default_ssim = Tolerance::Ssim {
             min_similarity: 0.8,
@@ -248,6 +267,7 @@ mod tests {
         let pixel = Metrics::Pixel {
             total_pixels: 100,
             diff_pixels: 2,
+            tolerated_pixels: 0,
             diff_ratio: 0.02,
             headroom: -0.01,
             text: None,
@@ -256,9 +276,7 @@ mod tests {
             console_line(
                 "a.png",
                 CaseOutcome::Mismatch,
-                &Tolerance::Pixel {
-                    max_diff_ratio: 0.01
-                },
+                &Tolerance::pixel(0.01),
                 None,
                 3.0,
                 Some(&pixel),
@@ -266,9 +284,31 @@ mod tests {
             ),
             "gleon ✗ a.png  pixel 2.00% (2 px, ≤1.00%, -1.00%)  3 ms"
         );
+        // Pixels the options let pass are counted apart.
+        let tolerated = Metrics::Pixel {
+            total_pixels: 100,
+            diff_pixels: 2,
+            tolerated_pixels: 40,
+            diff_ratio: 0.02,
+            headroom: -0.01,
+            text: None,
+        };
+        assert_eq!(
+            console_line(
+                "a.png",
+                CaseOutcome::Mismatch,
+                &Tolerance::pixel(0.01),
+                None,
+                3.0,
+                Some(&tolerated),
+                None
+            ),
+            "gleon ✗ a.png  pixel 2.00% (2 px, ≤1.00%, -1.00%), 40 tolerated  3 ms"
+        );
         let unchanged = Metrics::Pixel {
             total_pixels: 100_000,
             diff_pixels: 0,
+            tolerated_pixels: 0,
             diff_ratio: 0.0,
             headroom: 0.0,
             text: None,
@@ -290,9 +330,7 @@ mod tests {
             console_line(
                 "a.png",
                 CaseOutcome::Match,
-                &Tolerance::Pixel {
-                    max_diff_ratio: 1e-9
-                },
+                &Tolerance::pixel(1e-9),
                 None,
                 0.6,
                 Some(&unchanged),
@@ -303,9 +341,10 @@ mod tests {
         let text_only = Metrics::Pixel {
             total_pixels: 100_000,
             diff_pixels: 0,
+            tolerated_pixels: 0,
             diff_ratio: 0.0,
             headroom: 0.0,
-            text: Some(gleon_model::case::TextMetrics {
+            text: Some(TextMetrics {
                 pixels: 300,
                 diff_pixels: 46,
                 worst_tile_diff_ratio: 0.18,

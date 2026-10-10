@@ -723,6 +723,7 @@ pub(crate) mod fixtures {
             O::Match => Some(Metrics::Pixel {
                 total_pixels: 100,
                 diff_pixels: 0,
+                tolerated_pixels: 0,
                 diff_ratio: 0.0,
                 headroom: 0.01,
                 text: None,
@@ -730,6 +731,7 @@ pub(crate) mod fixtures {
             O::Mismatch => Some(Metrics::Pixel {
                 total_pixels: 100,
                 diff_pixels: 5,
+                tolerated_pixels: 0,
                 diff_ratio: 0.05,
                 headroom: -0.05,
                 text: None,
@@ -740,15 +742,10 @@ pub(crate) mod fixtures {
         let artifact =
             |file: &str| Some(format!(".gleon/runs/latest/artifacts/{key}/{name}/{file}"));
         let artifacts = match outcome {
-            O::Mismatch => Some(Artifacts {
+            O::Mismatch | O::DimensionMismatch => Some(Artifacts {
                 golden: artifact("golden.png"),
                 candidate: artifact("candidate.png"),
                 diff: artifact("diff.png"),
-            }),
-            O::DimensionMismatch => Some(Artifacts {
-                golden: artifact("golden.png"),
-                candidate: artifact("candidate.png"),
-                diff: None,
             }),
             O::Missing => Some(Artifacts {
                 candidate: artifact("candidate.png"),

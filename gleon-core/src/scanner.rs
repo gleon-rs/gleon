@@ -699,6 +699,7 @@ screenshots:
                     threshold: 0.0,
                     min_similarity: 0.99,
                     color_tolerance: 8.0,
+                    ..Default::default()
                 },
                 masks: vec![],
                 text_tolerance: None,

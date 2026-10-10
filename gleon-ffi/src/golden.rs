@@ -230,9 +230,8 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
         encoded: OnceCell::new(),
         started,
     };
-    // The call asked for a text tolerance that cannot apply (an SSIM rule, or a candidate
-    // without text regions): say so instead of comparing the text like everything else
-    // silently.
+    // The call asked for a text tolerance that cannot apply (a candidate without text regions:
+    // bytes or an image): say so instead of comparing the text like everything else silently.
     let unused_text = (request.text.is_some() && call.text().is_none())
         .then(|| text::unused_text_tolerance(request.golden_uri));
     let finished = match golden.as_ref().map(Option::as_deref) {
@@ -341,17 +340,21 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
                 String::new,
             )
             .warn(clamped_masks(uri, clamped)),
-        Compared::DimensionMismatch { golden, candidate } => {
+        Compared::DimensionMismatch {
+            golden,
+            candidate,
+            diff_png,
+        } => {
             let summary = text::dimension_summary(golden, candidate);
             let reason = format!("image sizes differ: {summary}.{}", call.fallback_clause());
             let details = Details {
                 message: Some(summary),
                 native: Some(native),
-                images: call.images(None),
+                images: call.images(diff_png.as_deref()),
                 ..Details::default()
             };
             call.finish(CaseOutcome::DimensionMismatch, details, || {
-                call.failure(&reason, None)
+                call.failure(&reason, diff_png.as_deref())
             })
         }
         Compared::Mismatch {
@@ -437,15 +440,11 @@ impl Call<'_> {
         }
     }
 
-    /// The tolerance of text that applies, for text regions in pixel or exact mode: the plan's,
-    /// else the default of the compared golden ([`TextTolerance::resolve`]).
+    /// The tolerance of text that applies, for text regions (any tolerance): the plan's, else
+    /// the default of the compared golden ([`TextTolerance::resolve`]).
     fn text(&self) -> Option<TextTolerance> {
-        let is_pixel = matches!(
-            self.plan.tolerance,
-            Tolerance::Exact {} | Tolerance::Pixel { .. }
-        );
         let is_own = self.plan.goldens.is_own && self.fallback.is_none();
-        (is_pixel && !self.request.text_regions.is_empty())
+        (!self.request.text_regions.is_empty())
             .then(|| TextTolerance::resolve(self.plan.text, is_own))
     }
 
@@ -1017,22 +1016,32 @@ metrics:
             fixture.failures(),
             ["a_gleonDiff.png", "a_masterImage.png", "a_testImage.png"]
         );
+        // The changed pixel is magenta, the rest the darkened golden.
+        let diff = fs::read(fixture.root.join("test/failures/a_gleonDiff.png")).unwrap();
+        let diff = gleon_engine::decode::decode_rgba(&diff).unwrap();
+        assert_eq!(diff.get_pixel(1, 1).0, [255, 0, 255, 255]);
+        let [r, g, b, a] = RED.0;
+        assert_eq!(diff.get_pixel(0, 0).0, [r / 2, g / 2, b / 2, a]);
         let again = fixture.run(&session, Mode::Compare, &png(4, 4, true));
         assert!(again.warning.is_empty(), "warned once per session");
     }
 
     #[test]
-    fn test_a_dimension_mismatch_has_no_diff_image_not_even_a_stale_one() {
+    fn test_a_dimension_mismatch_writes_a_diff_of_both_sizes() {
         let fixture = Fixture::new(None);
         let session = fixture.session(None);
-        fixture.run(&session, Mode::Compare, &png(4, 4, true));
-        assert_eq!(fixture.failures().len(), 3);
         let finished = fixture.run(&session, Mode::Compare, &png(5, 4, false));
         assert_eq!(finished.verdict, Verdict::DimensionMismatch);
         assert!(finished.message.starts_with(
             "Golden \"goldens/a.png\": image sizes differ: golden is 4x4px, test image is 5x4px."
         ));
-        assert_eq!(fixture.failures(), ["a_masterImage.png", "a_testImage.png"]);
+        assert_eq!(
+            fixture.failures(),
+            ["a_gleonDiff.png", "a_masterImage.png", "a_testImage.png"]
+        );
+        let diff = fs::read(fixture.root.join("test/failures/a_gleonDiff.png")).unwrap();
+        let diff = gleon_engine::decode::decode_rgba(&diff).unwrap();
+        assert_eq!(diff.dimensions(), (5, 4));
     }
 
     #[test]
@@ -1264,28 +1273,43 @@ metrics:
         let finished = fixture.compare_raw(&session, &glyph, None, text.clone(), loose);
         assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
 
-        // SSIM compares text like everything else; no text tolerance is recorded.
+        // SSIM judges text by the same tiles and leaves it out of its gates.
         let ssim = Tolerance::Ssim {
-            min_similarity: 0.5,
-            color_tolerance: 255.0,
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
         };
         let finished = fixture.compare_raw(&session, &glyph, Some(ssim), text.clone(), None);
         assert_eq!(finished.verdict, Verdict::Mismatch, "{}", finished.message);
-        assert_eq!(fixture.case().comparison.text_tolerance, None);
-        assert!(finished.warning.is_empty(), "the rule's text: no warning");
+        assert!(
+            finished.message.contains("text up to 12.50% of a tile")
+                && finished.message.contains("text ≤ 10.00% per tile"),
+            "{}",
+            finished.message
+        );
+        let case = fixture.case();
+        assert_eq!(case.comparison.text_tolerance, Some(TextTolerance(0.1)));
+        assert!(matches!(
+            case.metrics,
+            Some(Metrics::Ssim {
+                failing_pixels: 0,
+                text: Some(_),
+                ..
+            })
+        ));
+        let finished = fixture.compare_raw(&session, &glyph, Some(ssim), text.clone(), loose);
+        assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
+        assert!(finished.warning.is_empty(), "text applied: no warning");
 
-        // A text tolerance of the call that cannot apply warns: under SSIM, and without text
-        // regions (byte inputs).
-        for (tolerance, regions) in [(Some(ssim), text), (None, Vec::new())] {
-            let finished = fixture.compare_raw(&session, &glyph, tolerance, regions, loose);
-            assert!(
-                finished
-                    .warning
-                    .contains("the text tolerance of golden \"goldens/a.png\" did not apply"),
-                "{}",
-                finished.warning
-            );
-        }
+        // A text tolerance of the call that cannot apply warns: without text regions (byte
+        // inputs).
+        let finished = fixture.compare_raw(&session, &glyph, None, Vec::new(), loose);
+        assert!(
+            finished
+                .warning
+                .contains("the text tolerance of golden \"goldens/a.png\" did not apply"),
+            "{}",
+            finished.warning
+        );
     }
 
     /// A platform other than this one.
@@ -1693,8 +1717,14 @@ screenshots:
 
         let dimension = fixture.run(&session, Mode::Compare, &png(5, 4, false));
         assert_eq!(dimension.verdict, Verdict::DimensionMismatch);
-        assert_eq!(fixture.artifacts(), ["candidate.png", "golden.png"]);
-        assert_eq!(fixture.case().artifacts.unwrap().diff, None);
+        assert_eq!(
+            fixture.artifacts(),
+            ["candidate.png", "diff.png", "golden.png"]
+        );
+        assert_eq!(
+            fixture.case().artifacts.unwrap().diff,
+            Some(artifact("diff.png"))
+        );
 
         let identical = fixture.run(&session, Mode::Compare, &png(4, 4, false));
         assert_eq!(identical.verdict, Verdict::Identical);
@@ -2075,9 +2105,7 @@ screenshots:
     #[test]
     fn test_a_match_within_the_call_tolerance_is_recorded() {
         let fixture = Fixture::new(Some(METRICS));
-        let tolerance = Tolerance::Pixel {
-            max_diff_ratio: 0.1,
-        };
+        let tolerance = Tolerance::pixel(0.1);
         let finished = fixture.run_with(
             &fixture.session(None),
             Mode::Compare,

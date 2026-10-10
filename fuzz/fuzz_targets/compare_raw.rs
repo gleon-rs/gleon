@@ -17,6 +17,13 @@ fuzz_target!(|input: (&[u8], u8, u8, &[u8])| {
     };
     for tolerance in [
         Tolerance::Exact {},
+        // Every pixel option reads neighbors: 0x0, 1x1 and 1xN images included.
+        Tolerance::Pixel {
+            max_diff_ratio: 0.0,
+            channel_tolerance: 4,
+            anti_alias: true,
+            edge_threshold: 64,
+        },
         Tolerance::Ssim {
             min_similarity: 0.9,
             color_tolerance: 8.0,

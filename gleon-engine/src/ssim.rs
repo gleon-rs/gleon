@@ -84,6 +84,26 @@ pub struct Region {
     pub height: u32,
 }
 
+/// The metrics of the policy inside one region of the images (see
+/// [`SsimAnalysis::changed_local`]), from the planes the analysis computed anyway.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SsimRegion {
+    /// The region, in full-resolution pixels.
+    pub region: Region,
+    /// Lowest local SSIM of the windows centered in the region (at half resolution).
+    pub min_ssim: f64,
+    /// Mean local SSIM of those windows: unlike [`SsimAnalysis::mean_ssim`] not diluted by the
+    /// unchanged rest of the image.
+    pub mean_ssim: f64,
+    /// Largest envelope deviation over the region's changed pixels, as
+    /// [`SsimAnalysis::peak_excess`].
+    pub peak_excess: f64,
+    /// Pixels of the region whose RGBA bytes differ.
+    pub changed_pixels: u64,
+    /// Pixels of the region failing the policy.
+    pub failing_pixels: u64,
+}
+
 /// Result of [`analyze`].
 #[derive(Debug, Clone)]
 pub struct SsimAnalysis {
@@ -111,6 +131,11 @@ pub struct SsimAnalysis {
     pub failing_pixels: u64,
     /// Bounding box of the changed pixels responsible for the failure.
     pub failing_region: Option<Region>,
+    /// The metrics inside [`Self::changed_region`] (`None` for identical images): where the
+    /// noise (or the change) is, without the unchanged rest diluting the mean.
+    pub changed_local: Option<SsimRegion>,
+    /// The metrics inside [`Self::failing_region`] (`None` when the policy passed).
+    pub failing_local: Option<SsimRegion>,
     /// Diff visualization, present only when the policy fails: the baseline faded out, tolerated
     /// differences in yellow, failing pixels in red.
     pub diff_image: Option<RgbaImage>,
@@ -255,6 +280,8 @@ fn pixel_excess(base: Img<'_>, cand: Img<'_>, x: usize, y: usize) -> f32 {
 
 /// Envelope gate result over the changed rect.
 struct EnvelopeGate {
+    /// Excess of every pixel of the changed rect (`f32::MIN` for unchanged ones).
+    excess: Vec<f32>,
     /// Failing mask over the changed rect.
     failing: Vec<bool>,
     /// Largest excess beyond the tolerance among *failing* regions; tolerated regions don't
@@ -336,6 +363,7 @@ fn envelope_gate(base: Img<'_>, cand: Img<'_>, changed: Rect, tolerance: f32) ->
         }
     }
     EnvelopeGate {
+        excess,
         failing,
         max_excess,
         peak_excess,
@@ -381,12 +409,8 @@ fn gaussian_weights() -> [f32; 2 * RADIUS + 1] {
     weights
 }
 
-/// Local SSIM for eval rows `band` of the coarse image, flagging `ssim < threshold` in `fails`
-/// (one byte per eval-rect pixel of those rows). Returns the band's SSIM sum and minimum.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "internal kernel; grouping the planes into a struct would only add indirection"
-)]
+/// Local SSIM for eval rows `band` of the coarse image, written to `values` (one per eval-rect
+/// pixel of those rows). Returns the band's SSIM sum and minimum.
 fn ssim_band(
     luma_b: &[f32],
     luma_a: &[f32],
@@ -394,8 +418,7 @@ fn ssim_band(
     eval: Rect,
     band: (usize, usize),
     weights: &[f32; 2 * RADIUS + 1],
-    threshold: f64,
-    fails: &mut [u8],
+    values: &mut [f32],
 ) -> (f64, f32) {
     let cw = crop.width();
     let ew = eval.width();
@@ -446,22 +469,16 @@ fn ssim_band(
                 / (mb.mul_add(mb, ma.mul_add(ma, C1)) * (var_b + var_a + C2));
             sum += f64::from(ssim);
             min = min.min(ssim);
-            if f64::from(ssim) < threshold {
-                fails[bi * ew + ei] = 1;
-            }
+            values[bi * ew + ei] = ssim;
         }
     }
     (sum, min)
 }
 
-/// Coarse SSIM gate around `changed` (full-resolution rect); returns the failing coarse mask over
-/// the returned coarse eval rect, the SSIM sum over it, its minimum and the coarse pixel count.
-fn structural_gate(
-    base: Img<'_>,
-    cand: Img<'_>,
-    changed: Rect,
-    threshold: f64,
-) -> (Rect, Vec<u8>, f64, f32) {
+/// Local SSIM around `changed` (full-resolution rect); returns the coarse eval rect, the local
+/// SSIM of each of its pixels (the gate fails where it is below `min_similarity`), their sum and
+/// their minimum.
+fn structural_gate(base: Img<'_>, cand: Img<'_>, changed: Rect) -> (Rect, Vec<f32>, f64, f32) {
     let (cw, ch) = (base.width.div_ceil(2), base.height.div_ceil(2));
     let coarse_changed = Rect {
         x0: changed.x0 / 2,
@@ -474,11 +491,11 @@ fn structural_gate(
     let (luma_b, luma_a) = (coarse_luma(base, crop), coarse_luma(cand, crop));
     let weights = gaussian_weights();
     let ew = eval.width();
-    let mut fails = vec![0u8; ew * eval.height()];
+    let mut values = vec![1.0f32; ew * eval.height()];
     let (sum, min) = par::map_chunks_mut(
-        &mut fails,
+        &mut values,
         ew * BAND_ROWS,
-        |band_index, band_fails| {
+        |band_index, band_values| {
             let y0 = eval.y0 + band_index * BAND_ROWS;
             let y1 = (y0 + BAND_ROWS).min(eval.y1);
             ssim_band(
@@ -488,14 +505,13 @@ fn structural_gate(
                 eval,
                 (y0, y1),
                 &weights,
-                threshold,
-                band_fails,
+                band_values,
             )
         },
         || (0.0, 1.0),
         |a, b| (a.0 + b.0, a.1.min(b.1)),
     );
-    (eval, fails, sum, min)
+    (eval, values, sum, min)
 }
 
 /// Bounding box and count of pixels whose RGBA bytes differ, or `None` if the images are identical.
@@ -573,6 +589,8 @@ pub fn analyze<'a>(
             changed_region: None,
             failing_pixels: 0,
             failing_region: None,
+            changed_local: None,
+            failing_local: None,
             diff_image: None,
         };
     };
@@ -583,42 +601,27 @@ pub fn analyze<'a>(
     )]
     let tolerance = policy.color_tolerance as f32;
     let EnvelopeGate {
+        excess,
         failing: envelope_fails,
         max_excess,
         peak_excess,
     } = envelope_gate(base, cand, changed, tolerance);
-    let (coarse_eval, coarse_fails, ssim_sum, min_ssim) =
-        structural_gate(base, cand, changed, policy.min_similarity);
-
-    // Full-resolution failing mask: envelope failures plus pixels under failing coarse windows.
-    let fail_rect = Rect {
-        x0: coarse_eval.x0 * 2,
-        y0: coarse_eval.y0 * 2,
-        x1: (coarse_eval.x1 * 2).min(width),
-        y1: (coarse_eval.y1 * 2).min(height),
-    };
-    let fw = fail_rect.width();
-    let mut failing = vec![false; fw * fail_rect.height()];
-    let mut failing_pixels = 0u64;
-    let mut changed_failing = BBox::default();
-    let mut any_failing = BBox::default();
-    for y in fail_rect.y0..fail_rect.y1 {
-        for x in fail_rect.x0..fail_rect.x1 {
-            let envelope = changed.contains(x, y)
-                && envelope_fails[(y - changed.y0) * changed.width() + (x - changed.x0)];
-            let structural = coarse_fails
-                [(y / 2 - coarse_eval.y0) * coarse_eval.width() + (x / 2 - coarse_eval.x0)]
-                == 1;
-            if envelope || structural {
-                failing[(y - fail_rect.y0) * fw + (x - fail_rect.x0)] = true;
-                failing_pixels += 1;
-                any_failing.add(x, y);
-                if base.rgba(x, y) != cand.rgba(x, y) {
-                    changed_failing.add(x, y);
-                }
-            }
-        }
-    }
+    let (coarse_eval, coarse_ssim, ssim_sum, min_ssim) = structural_gate(base, cand, changed);
+    let Failing {
+        rect: fail_rect,
+        mask: failing,
+        pixels: failing_pixels,
+        region: failing_region,
+        inside_changed,
+    } = failing_mask(
+        base,
+        cand,
+        changed,
+        &envelope_fails,
+        coarse_eval,
+        &coarse_ssim,
+        policy.min_similarity,
+    );
 
     let coarse_total = (width.div_ceil(2) * height.div_ceil(2)) as u64;
     let coarse_evaluated = (coarse_eval.width() * coarse_eval.height()) as u64;
@@ -628,6 +631,14 @@ pub fn analyze<'a>(
     )]
     let mean_ssim = (ssim_sum + (coarse_total - coarse_evaluated) as f64) / coarse_total as f64;
     let diff_image = (failing_pixels > 0).then(|| render_diff(base, cand, fail_rect, &failing));
+    let planes = Planes {
+        changed,
+        excess: &excess,
+        coarse_eval,
+        coarse_ssim: &coarse_ssim,
+        fail_rect,
+        failing: &failing,
+    };
     SsimAnalysis {
         mean_ssim,
         min_ssim: f64::from(min_ssim),
@@ -636,13 +647,220 @@ pub fn analyze<'a>(
         changed_pixels,
         changed_region: BBox(Some(changed)).to_region(),
         failing_pixels,
-        failing_region: if changed_failing.0.is_some() {
-            changed_failing.to_region()
-        } else {
-            any_failing.to_region()
-        },
+        failing_region: failing_region.to_region(),
+        // Every changed pixel lies inside `changed`: only its windows need a scan.
+        changed_local: Some(SsimRegion {
+            changed_pixels,
+            peak_excess: f64::from(peak_excess.max(0.0)),
+            failing_pixels: inside_changed,
+            ..planes.windows(changed)
+        }),
+        failing_local: failing_region.0.map(|rect| planes.local(rect)),
         diff_image,
     }
+}
+
+/// The full-resolution pixels failing the policy.
+struct Failing {
+    /// The rect the mask covers: the coarse eval rect at full resolution.
+    rect: Rect,
+    /// Failing pixels over `rect`.
+    mask: Vec<bool>,
+    /// Their number.
+    pixels: u64,
+    /// Bounding box of the failing pixels that changed, else of all failing ones.
+    region: BBox,
+    /// Failing pixels inside the bounding box of the changed pixels.
+    inside_changed: u64,
+}
+
+/// The failing mask: envelope failures over `changed` plus the pixels under coarse windows of
+/// `coarse_ssim` (over `coarse_eval`) below `min_similarity`.
+fn failing_mask(
+    base: Img<'_>,
+    cand: Img<'_>,
+    changed: Rect,
+    envelope_fails: &[bool],
+    coarse_eval: Rect,
+    coarse_ssim: &[f32],
+    min_similarity: f64,
+) -> Failing {
+    let rect = Rect {
+        x0: coarse_eval.x0 * 2,
+        y0: coarse_eval.y0 * 2,
+        x1: (coarse_eval.x1 * 2).min(base.width),
+        y1: (coarse_eval.y1 * 2).min(base.height),
+    };
+    let fw = rect.width();
+    let mut mask = vec![false; fw * rect.height()];
+    let (mut pixels, mut inside_changed) = (0u64, 0u64);
+    let (mut changed_failing, mut any_failing) = (BBox::default(), BBox::default());
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            let in_changed = changed.contains(x, y);
+            let envelope =
+                in_changed && envelope_fails[(y - changed.y0) * changed.width() + (x - changed.x0)];
+            let structural = f64::from(
+                coarse_ssim
+                    [(y / 2 - coarse_eval.y0) * coarse_eval.width() + (x / 2 - coarse_eval.x0)],
+            ) < min_similarity;
+            if envelope || structural {
+                mask[(y - rect.y0) * fw + (x - rect.x0)] = true;
+                pixels += 1;
+                inside_changed += u64::from(in_changed);
+                any_failing.add(x, y);
+                if base.rgba(x, y) != cand.rgba(x, y) {
+                    changed_failing.add(x, y);
+                }
+            }
+        }
+    }
+    Failing {
+        rect,
+        mask,
+        pixels,
+        inside_changed,
+        region: if changed_failing.0.is_some() {
+            changed_failing
+        } else {
+            any_failing
+        },
+    }
+}
+
+/// The planes of one analysis, for the metrics of a region ([`SsimRegion`]).
+struct Planes<'a> {
+    /// The bounding box of the changed pixels: none lies outside it.
+    changed: Rect,
+    /// Envelope excess over `changed` (`f32::MIN` for unchanged pixels).
+    excess: &'a [f32],
+    coarse_eval: Rect,
+    /// Local SSIM over `coarse_eval`.
+    coarse_ssim: &'a [f32],
+    fail_rect: Rect,
+    /// Failing mask over `fail_rect`.
+    failing: &'a [bool],
+}
+
+impl Planes<'_> {
+    /// The metrics inside `rect` (full resolution, inside the image): the windows centered in
+    /// its half-resolution projection, the changed and failing pixels in it, row by row over the
+    /// planes the analysis computed.
+    fn local(&self, rect: Rect) -> SsimRegion {
+        let (mut peak, mut changed_pixels) = (f32::MIN, 0u64);
+        if let Some(inside) = intersect(rect, self.changed) {
+            let width = self.changed.width();
+            for y in inside.y0..inside.y1 {
+                let row = (y - self.changed.y0) * width;
+                let (from, to) = (inside.x0 - self.changed.x0, inside.x1 - self.changed.x0);
+                let excess = &self.excess[row + from..row + to];
+                changed_pixels += excess.iter().filter(|&&e| e > f32::MIN).count() as u64;
+                peak = excess.iter().copied().fold(peak, f32::max);
+            }
+        }
+        let failing_pixels = intersect(rect, self.fail_rect).map_or(0, |inside| {
+            let width = self.fail_rect.width();
+            (inside.y0..inside.y1)
+                .map(|y| {
+                    let row = (y - self.fail_rect.y0) * width;
+                    let (from, to) = (inside.x0 - self.fail_rect.x0, inside.x1 - self.fail_rect.x0);
+                    self.failing[row + from..row + to]
+                        .iter()
+                        .filter(|&&failing| failing)
+                        .count() as u64
+                })
+                .sum()
+        });
+        SsimRegion {
+            peak_excess: f64::from(peak.max(0.0)),
+            changed_pixels,
+            failing_pixels,
+            ..self.windows(rect)
+        }
+    }
+
+    /// The region `rect` with the SSIM of the windows centered in its half-resolution projection;
+    /// no pixels counted.
+    fn windows(&self, rect: Rect) -> SsimRegion {
+        let eval = self.coarse_eval;
+        let (cx0, cy0) = ((rect.x0 / 2).max(eval.x0), (rect.y0 / 2).max(eval.y0));
+        let (cx1, cy1) = (
+            rect.x1.div_ceil(2).min(eval.x1),
+            rect.y1.div_ceil(2).min(eval.y1),
+        );
+        let (mut sum, mut min, mut windows) = (0.0f64, 1.0f32, 0u64);
+        for cy in cy0..cy1 {
+            let row = (cy - eval.y0) * eval.width();
+            for &ssim in &self.coarse_ssim[row + cx0 - eval.x0..row + cx1 - eval.x0] {
+                sum += f64::from(ssim);
+                min = min.min(ssim);
+                windows += 1;
+            }
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "window counts are far below 2^52, so the f64 conversion is exact"
+        )]
+        let mean_ssim = if windows == 0 {
+            1.0
+        } else {
+            sum / windows as f64
+        };
+        #[expect(
+            clippy::expect_used,
+            reason = "a non-empty rect always has a bounding box"
+        )]
+        let region = BBox(Some(rect)).to_region().expect("the rect is a region");
+        SsimRegion {
+            region,
+            min_ssim: f64::from(min),
+            mean_ssim,
+            peak_excess: 0.0,
+            changed_pixels: 0,
+            failing_pixels: 0,
+        }
+    }
+}
+
+/// The part of `a` inside `b`, if any.
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let rect = Rect {
+        x0: a.x0.max(b.x0),
+        y0: a.y0.max(b.y0),
+        x1: a.x1.min(b.x1),
+        y1: a.y1.min(b.y1),
+    };
+    (rect.x0 < rect.x1 && rect.y0 < rect.y1).then_some(rect)
+}
+
+/// The diff visualization of a passing analysis of `baseline` and `actual` (of the same size):
+/// the baseline faded towards white with the changed pixels in yellow, for a comparison that
+/// fails for another reason (its text).
+pub(crate) fn passing_diff<'a>(baseline: Pixels<'a>, actual: Pixels<'a>) -> RgbaImage {
+    let (width, height) = baseline.dimensions();
+    let img = |pixels: Pixels<'a>| Img {
+        raw: pixels.raw(),
+        width: width as usize,
+        height: height as usize,
+    };
+    let none = Rect {
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0,
+    };
+    render_diff(img(baseline), img(actual), none, &[])
+}
+
+/// A baseline pixel as the SSIM diff draws it: its luma faded towards white.
+pub(crate) fn faded(pixel: [u8; 4]) -> [u8; 4] {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "luma is within [0, 255], so the faded value is within [170, 255]"
+    )]
+    let faded = luma_over_white(pixel).mul_add(1.0 / 3.0, 170.0) as u8;
+    [faded, faded, faded, 255]
 }
 
 /// Baseline faded towards white, tolerated differences in yellow, failing pixels in red.
@@ -663,13 +881,7 @@ fn render_diff(base: Img<'_>, cand: Img<'_>, rect: Rect, failing: &[bool]) -> Rg
         } else if b != a {
             [255, 200, 0, 255]
         } else {
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "luma is within [0, 255], so the faded value is within [170, 255]"
-            )]
-            let faded = luma_over_white(*b).mul_add(1.0 / 3.0, 170.0) as u8;
-            [faded, faded, faded, 255]
+            faded(*b)
         };
     }
     #[expect(
@@ -854,5 +1066,40 @@ mod tests {
         assert!(!analyze(&base, &cand, &POLICY).passed());
         let one = solid(1, 1, [1, 2, 3, 255]);
         assert!(analyze(&one, &one, &POLICY).passed());
+    }
+
+    #[test]
+    fn test_local_metrics_of_the_changed_and_failing_regions() {
+        let base = ImageBuffer::from_pixel(200, 120, Rgba([255, 255, 255, 255]));
+        let policy = SsimPolicy {
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
+        };
+        // Identical images have no regions.
+        let same = analyze(&base, &base, &policy);
+        assert_eq!((same.changed_local, same.failing_local), (None, None));
+
+        // A failing 3x3 dot: its regions are measured where it is, not diluted.
+        let mut dot = base.clone();
+        for (x, y) in (100..103).flat_map(|x| (60..63).map(move |y| (x, y))) {
+            dot.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+        }
+        let a = analyze(&base, &dot, &policy);
+        let changed = a.changed_local.unwrap();
+        assert_eq!(Some(changed.region), a.changed_region);
+        assert_eq!(changed.changed_pixels, 9);
+        assert!(changed.mean_ssim < a.mean_ssim, "{changed:?} vs {a:?}");
+        assert_eq!(changed.min_ssim, a.min_ssim);
+        let failing = a.failing_local.unwrap();
+        assert_eq!(Some(failing.region), a.failing_region);
+        assert_eq!(failing.failing_pixels, 9);
+        assert!(failing.peak_excess > 64.0);
+
+        // Tolerated drift: a changed region, no failing one.
+        let drift = ImageBuffer::from_pixel(200, 120, Rgba([254, 255, 255, 255]));
+        let a = analyze(&base, &drift, &policy);
+        assert!(a.passed());
+        assert!(a.changed_local.is_some());
+        assert_eq!(a.failing_local, None);
     }
 }

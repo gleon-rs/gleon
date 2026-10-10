@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "name": "test/goldens/counter_three_taps",
   "golden": {
     "path": "test/goldens/counter_three_taps.png",

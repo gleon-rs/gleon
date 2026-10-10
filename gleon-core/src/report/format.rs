@@ -218,6 +218,7 @@ mod tests {
         tiny.metrics = Some(Metrics::Pixel {
             total_pixels: 4_000_000,
             diff_pixels: 1,
+            tolerated_pixels: 0,
             diff_ratio: 1.0 / 4_000_000.0,
             headroom: -1.0,
             text: None,

@@ -123,7 +123,7 @@ impl Serialize for Dimension {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DiffConfig {
-    /// Pixel comparison threshold [0.0, 1.0].
+    /// Largest share [0.0, 1.0] of differing pixels in pixel mode (default 0.01; 0: exact).
     #[serde(default = "default_threshold", deserialize_with = "deserialize_ratio")]
     #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
     pub threshold: f64,
@@ -141,6 +141,22 @@ pub struct DiffConfig {
     )]
     #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 255.0)))]
     pub color_tolerance: f64,
+    /// Pixel mode: a differing pixel counts as equal when none of its RGBA bytes differs by more
+    /// than this, `[0, 255]` (default 0). For GPU and color-conversion drift, not for text.
+    #[serde(default)]
+    pub channel_tolerance: u8,
+    /// Pixel mode: a differing pixel counts as equal when it looks anti-aliased in either image
+    /// (the detection of pixelmatch: between a darker and a brighter neighbor that sit in flat areas
+    /// of both images). Default off.
+    #[serde(default)]
+    pub anti_alias: bool,
+    /// Pixel mode: a differing pixel outside text counts as equal when the Sobel gradient of the
+    /// baseline's luma there (8-bit units, capped at 255) exceeds this, `[0, 255]`: the edges a
+    /// sub-pixel shift or another rasterizer moves (Skia Gold's edge mask). Default 0 (off);
+    /// 255 hides nothing. Hides every change that lies on edges too: on the calibration corpus a
+    /// missing glyph, a card moved by 1px and, at 64, a missing small icon pass.
+    #[serde(default)]
+    pub edge_threshold: u8,
 }
 
 /// The largest `color_tolerance`: a whole 8-bit channel.
@@ -188,6 +204,19 @@ impl Default for DiffConfig {
             threshold: default_threshold(),
             min_similarity: default_min_similarity(),
             color_tolerance: default_color_tolerance(),
+            channel_tolerance: 0,
+            anti_alias: false,
+            edge_threshold: 0,
+        }
+    }
+}
+
+impl From<&DiffConfig> for crate::pixel::PixelOptions {
+    fn from(config: &DiffConfig) -> Self {
+        Self {
+            channel_tolerance: config.channel_tolerance,
+            anti_alias: config.anti_alias,
+            edge_threshold: config.edge_threshold,
         }
     }
 }
@@ -208,7 +237,7 @@ pub struct Zone {
 }
 
 const fn default_threshold() -> f64 {
-    0.1
+    0.01
 }
 
 const fn default_min_similarity() -> f64 {
@@ -295,5 +324,28 @@ mod tests {
         assert!(err("color_tolerance: 256").contains("between 0 and 255"));
         let defaults: DiffConfig = serde_yaml::from_str("{}").unwrap();
         assert_eq!(defaults, DiffConfig::default());
+    }
+
+    #[test]
+    fn test_pixel_options_deserialize_and_reject_out_of_range_values() {
+        let config: DiffConfig =
+            serde_yaml::from_str("{channel_tolerance: 4, anti_alias: true, edge_threshold: 64}")
+                .unwrap();
+        assert_eq!(
+            (
+                config.channel_tolerance,
+                config.anti_alias,
+                config.edge_threshold
+            ),
+            (4, true, 64)
+        );
+        for bad in [
+            "channel_tolerance: 256",
+            "channel_tolerance: -1",
+            "edge_threshold: 1.5",
+            "anti_alias: \"yes\"",
+        ] {
+            assert!(serde_yaml::from_str::<DiffConfig>(bad).is_err(), "{bad}");
+        }
     }
 }

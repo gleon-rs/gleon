@@ -195,15 +195,10 @@ impl DiffRun<'_> {
             source,
         };
         let images = match judged.outcome {
-            CaseOutcome::Mismatch => ArtifactImages {
+            CaseOutcome::Mismatch | CaseOutcome::DimensionMismatch => ArtifactImages {
                 golden: judged.golden.as_deref(),
                 candidate: Some(&candidate),
                 diff: judged.diff.as_deref(),
-            },
-            CaseOutcome::DimensionMismatch => ArtifactImages {
-                golden: judged.golden.as_deref(),
-                candidate: Some(&candidate),
-                diff: None,
             },
             // Kept for `gleon approve`, unless it is no PNG at all.
             CaseOutcome::Missing => ArtifactImages {
@@ -329,8 +324,13 @@ impl DiffRun<'_> {
                     diff: Some(diff_png),
                     ..Judged::new(CaseOutcome::Mismatch)
                 },
-                Compared::DimensionMismatch { golden, candidate } => Judged {
+                Compared::DimensionMismatch {
+                    golden,
+                    candidate,
+                    diff_png,
+                } => Judged {
                     message: Some(text::dimension_summary(golden, candidate)),
+                    diff: diff_png,
                     ..Judged::new(CaseOutcome::DimensionMismatch)
                 },
             },
@@ -567,12 +567,7 @@ mod tests {
         assert_eq!(report.golden.path, "shots/a.png");
         assert_eq!(report.golden.sha256, report.candidate.sha256.clone());
         assert!(report.golden.blob.is_some());
-        assert_eq!(
-            report.comparison.tolerance,
-            Tolerance::Pixel {
-                max_diff_ratio: 0.0
-            }
-        );
+        assert_eq!(report.comparison.tolerance, Tolerance::pixel(0.0));
         assert!(report.artifacts.is_none());
 
         image::RgbaImage::from_fn(4, 4, |x, _| {

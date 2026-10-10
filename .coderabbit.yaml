@@ -73,7 +73,7 @@ reviews:
         structs (the Flutter package mirrors them as Dart `Struct`s). Verdict 0 stays an error, so
         an unwritten summary is never a pass; the summary is written to the caller's buffer, never
         returned by value (dart-lang/sdk#64368).
-        Changes to `gleon-model` types must regenerate `gleon-model/schema/*.json` (`case.v3`,
+        Changes to `gleon-model` types must regenerate `gleon-model/schema/*.json` (`case.v4`,
         `config.v1`)
         (`GLEON_UPDATE_SCHEMAS=1 cargo test -p gleon-model --test schema`); breaking case report
         changes need a new schema version. Engine policy changes must keep

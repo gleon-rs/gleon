@@ -96,8 +96,8 @@
       "description": "Version of this format (`CASE_SCHEMA_VERSION`).",
       "type": "integer",
       "format": "uint32",
-      "maximum": 3,
-      "minimum": 3
+      "maximum": 4,
+      "minimum": 4
     },
     "source": {
       "description": "What produced the candidate.",
@@ -147,7 +147,7 @@
           "pattern": "^\\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\\.\\.?(/|$))[a-z0-9_.-]+(/(?!\\.\\.?(/|$))[a-z0-9_.-]+)*/candidate\\.png$"
         },
         "diff": {
-          "description": "The diff visualization (mismatches only): `<artifacts dir>/<platform key>/<name>/diff.png`.",
+          "description": "The diff visualization (mismatches and dimension mismatches):\n`<artifacts dir>/<platform key>/<name>/diff.png`.",
           "type": [
             "string",
             "null"
@@ -424,7 +424,7 @@
           "type": "object",
           "properties": {
             "diff_pixels": {
-              "description": "Pixels whose RGBA bytes differ.",
+              "description": "Pixels whose RGBA bytes differ (beyond the tolerance's options).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -453,6 +453,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "tolerated_pixels": {
+              "description": "Differing pixels the tolerance's options let pass (channel tolerance, anti-aliasing,\nedges), counted as equal; left out when there are none.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
             },
             "total_pixels": {
               "description": "Pixels compared strictly (masked pixels and text under `comparison.text_tolerance` left out).",
@@ -535,6 +541,17 @@
               "description": "Largest envelope deviation over the changed pixels, `color_tolerance` not subtracted.",
               "type": "number",
               "format": "double"
+            },
+            "text": {
+              "description": "The text regions, judged by their tiles under `comparison.text_tolerance` and left out\nof both gates; the worst tile is a `text` entry of `regions`.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TextMetrics"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "additionalProperties": false,
@@ -658,6 +675,16 @@
           "description": "Text compared under `comparison.text_tolerance`: the tile of its text regions with the largest\nshare of differing pixels.",
           "type": "string",
           "const": "text"
+        },
+        {
+          "description": "SSIM: the bounding box of the changed pixels, with the policy's metrics inside it (its\n`mean_ssim` not diluted by the unchanged rest of the golden).",
+          "type": "string",
+          "const": "changed"
+        },
+        {
+          "description": "SSIM: the bounding box of the pixels failing the policy, with its metrics inside it.",
+          "type": "string",
+          "const": "failing"
         }
       ]
     },
@@ -763,7 +790,7 @@
       "additionalProperties": false
     },
     "TextMetrics": {
-      "description": "What the text regions of a pixel or exact comparison measured.",
+      "description": "What the text regions of a comparison measured.",
       "type": "object",
       "properties": {
         "diff_pixels": {
@@ -822,9 +849,27 @@
           ]
         },
         {
-          "description": "Tolerates a fraction of differing pixels.",
+          "description": "Tolerates a fraction of differing pixels, and differing pixels its options let pass.",
           "type": "object",
           "properties": {
+            "anti_alias": {
+              "description": "A differing pixel counts as equal when it looks anti-aliased in either image.",
+              "type": "boolean"
+            },
+            "channel_tolerance": {
+              "description": "A differing pixel counts as equal when no RGBA byte differs by more than this\n(0: off).",
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "edge_threshold": {
+              "description": "A differing pixel outside text counts as equal when the Sobel gradient of the golden's\nluma there exceeds this (0: off; 255 hides nothing).",
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
             "kind": {
               "type": "string",
               "const": "pixel"

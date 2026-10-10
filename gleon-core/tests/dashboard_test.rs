@@ -206,6 +206,7 @@ fn sample_history() -> DashboardHistory {
             metrics: Some(Metrics::Pixel {
                 total_pixels: 60_000,
                 diff_pixels: 128,
+                tolerated_pixels: 0,
                 diff_ratio: 128.0 / 60_000.0,
                 headroom: -128.0 / 60_000.0,
                 text: None,
@@ -230,6 +231,7 @@ fn sample_history() -> DashboardHistory {
                     similarity: -0.3,
                     color: 4.5,
                 },
+                text: None,
             }),
             ..failure(
                 "cart/header",
