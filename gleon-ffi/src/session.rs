@@ -798,18 +798,22 @@ metrics:
         let (_dir, root) = workspace(YAML, "a.png");
         let locked = root.join("test/goldens");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged process (root in a container) reads it anyway: nothing to test there.
+        let is_readable = fs::canonicalize(locked.join("a.png")).is_ok();
         let planned = session(None).plan(&locked.join("a.png"), None, vec![], None);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let failure = planned.map(drop).unwrap_err();
-        assert_eq!(failure.kind, ErrorKind::Io);
-        assert!(
-            failure
-                .message
-                .starts_with("gleon: cannot resolve the golden"),
-            "{}",
-            failure.message
-        );
+        if !is_readable {
+            let failure = planned.map(drop).unwrap_err();
+            assert_eq!(failure.kind, ErrorKind::Io);
+            assert!(
+                failure
+                    .message
+                    .starts_with("gleon: cannot resolve the golden"),
+                "{}",
+                failure.message
+            );
+        }
     }
 
     #[test]
