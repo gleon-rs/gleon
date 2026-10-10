@@ -7,9 +7,8 @@
 //! everything else of a test frame renders the same everywhere.
 
 use image::RgbaImage;
-use rayon::prelude::*;
 
-use crate::ssim::Region;
+use crate::{Pixels, par, ssim::Region};
 
 /// Side of the square tiles a text region is judged in: every square of this side inside the
 /// region, wherever it starts.
@@ -49,10 +48,12 @@ impl PixelRegions<'_> {
 /// A tile of a text region with its pixels and the text pixels that differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextTile {
-    /// The tile, inside its text region ([`TEXT_TILE`] square, or the region's size where it is
-    /// smaller).
+    /// The tile's part inside its text region ([`TEXT_TILE`] square, or the region's size where
+    /// it is smaller).
     pub region: Region,
-    /// Its pixels: text, and masked ones (which count as equal).
+    /// The pixels of the [`TEXT_TILE`] square, always: masked ones and those outside a region
+    /// thinner than a tile count as equal, so a thin or edge-clipped region (a 4x1 strip) never
+    /// turns one differing pixel into a large share.
     pub pixels: u64,
     /// Its text pixels that differ.
     pub diff_pixels: u64,
@@ -130,33 +131,73 @@ impl Compared {
     /// # Panics
     /// Panics if the images are not the compared ones (another size).
     #[must_use]
-    pub fn diff_image(&self, baseline: &RgbaImage, actual: &RgbaImage) -> RgbaImage {
-        let Some(classes) = &self.classes else {
-            return compare_pixels(baseline, actual).1;
-        };
-        assert_eq!(
-            classes.len(),
-            baseline.width() as usize * baseline.height() as usize,
-            "Image dimensions must match the comparison"
-        );
-        let mut diff = baseline.clone();
-        let raw: &mut [u8] = diff.as_mut();
-        raw.as_chunks_mut::<4>()
-            .0
-            .par_iter_mut()
-            .zip(classes.par_iter())
-            .for_each(|(pixel, class)| {
+    pub fn diff_image<'a>(
+        &self,
+        baseline: impl Into<Pixels<'a>>,
+        actual: impl Into<Pixels<'a>>,
+    ) -> RgbaImage {
+        let (baseline, actual) = (baseline.into(), actual.into());
+        let (width, height) = same_size(baseline, actual);
+        let pixels_per_row = (width as usize).max(1);
+        if let Some(classes) = &self.classes {
+            assert_eq!(
+                classes.len(),
+                width as usize * height as usize,
+                "Image dimensions must match the comparison"
+            );
+        }
+        let mut diff = vec![0u8; baseline.raw().len()];
+        par::for_each_chunk_mut(&mut diff, pixels_per_row * 4, |row, out| {
+            let start = row * pixels_per_row;
+            let rows = start * 4..(start + pixels_per_row) * 4;
+            let (expected, found) = (&baseline.raw()[rows.clone()], &actual.raw()[rows]);
+            let pixels = out.as_chunks_mut::<4>().0.iter_mut().zip(
+                expected
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(found.as_chunks::<4>().0),
+            );
+            for (i, (pixel, (expected, found))) in pixels.enumerate() {
+                let class = self.classes.as_ref().map_or_else(
+                    || {
+                        if expected == found {
+                            Class::Strict
+                        } else {
+                            Class::StrictDiff
+                        }
+                    },
+                    |classes| classes[start + i],
+                );
                 *pixel = match class {
                     Class::StrictDiff => MAGENTA,
                     Class::TextDiff if self.text_fails => ORANGE,
                     Class::Strict | Class::Text | Class::TextDiff | Class::Masked => {
-                        let [r, g, b, a] = *pixel;
+                        let [r, g, b, a] = *expected;
                         [r / 2, g / 2, b / 2, a]
                     }
                 };
-            });
-        diff
+            }
+        });
+        #[expect(
+            clippy::expect_used,
+            reason = "`diff` has the length of the baseline's pixels"
+        )]
+        RgbaImage::from_raw(width, height, diff).expect("the diff has width * height * 4 bytes")
     }
+}
+
+/// The size of `baseline` and `actual`.
+///
+/// # Panics
+/// Panics if they differ.
+fn same_size(baseline: Pixels<'_>, actual: Pixels<'_>) -> (u32, u32) {
+    assert_eq!(
+        baseline.dimensions(),
+        actual.dimensions(),
+        "Image dimensions must match for a pixel comparison"
+    );
+    baseline.dimensions()
 }
 
 /// Compares `baseline` and `actual` (of the same size) pixel by pixel under `regions`.
@@ -164,9 +205,15 @@ impl Compared {
 /// # Panics
 /// Panics if the images differ in size or a region reaches beyond them.
 #[must_use]
-pub fn compare(baseline: &RgbaImage, actual: &RgbaImage, regions: &PixelRegions<'_>) -> Compared {
+pub fn compare<'a>(
+    baseline: impl Into<Pixels<'a>>,
+    actual: impl Into<Pixels<'a>>,
+    regions: &PixelRegions<'_>,
+) -> Compared {
+    let (baseline, actual) = (baseline.into(), actual.into());
     if regions.is_none() {
-        let checked_pixels = u64::from(baseline.width()) * u64::from(baseline.height());
+        let (width, height) = same_size(baseline, actual);
+        let checked_pixels = u64::from(width) * u64::from(height);
         return Compared {
             analysis: PixelAnalysis {
                 checked_pixels,
@@ -197,16 +244,98 @@ const ORANGE: [u8; 4] = [255, 165, 0, 255];
 
 /// The class of every pixel (row-major) and the analysis.
 fn classify(
-    baseline: &RgbaImage,
-    actual: &RgbaImage,
+    baseline: Pixels<'_>,
+    actual: Pixels<'_>,
     regions: &PixelRegions<'_>,
 ) -> (Vec<Class>, PixelAnalysis) {
-    assert_eq!(
-        baseline.dimensions(),
-        actual.dimensions(),
-        "Image dimensions must match for a pixel comparison"
+    let (image_width, image_height) = same_size(baseline, actual);
+    let has_text = regions.text_tolerance.is_some() && !regions.text.is_empty();
+    let width = image_width as usize;
+    let mut classes = region_classes(image_width, image_height, regions, has_text);
+    let width = width.max(1);
+    // Blocks of whole rows of about `BLOCK` bytes: one task each with `parallel`.
+    let block = width * (BLOCK / 4 / width).max(1);
+    // Per block: (checked, differing, text, differing text) pixels.
+    let (checked_pixels, diff_pixels, text_pixels, text_diff) = par::map_chunks_mut(
+        &mut classes,
+        block,
+        |index, classes| {
+            let start = index * block * 4;
+            let end = start + classes.len() * 4;
+            let rows = classes
+                .chunks_exact_mut(width)
+                .zip(baseline.raw()[start..end].chunks_exact(width * 4))
+                .zip(actual.raw()[start..end].chunks_exact(width * 4));
+            let mut sums = (0, 0, 0, 0);
+            for ((classes, expected), found) in rows {
+                // An equal row (a whole passing frame, most rows of a failing one) is one
+                // `memcmp`: its pixels keep their classes and are only counted.
+                if expected == found {
+                    sums.0 += count(classes, Class::Strict);
+                    sums.2 += count(classes, Class::Text);
+                    continue;
+                }
+                let pairs = expected
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(found.as_chunks::<4>().0);
+                for (class, (expected, found)) in classes.iter_mut().zip(pairs) {
+                    match class {
+                        Class::Strict => {
+                            sums.0 += 1;
+                            if expected != found {
+                                sums.1 += 1;
+                                *class = Class::StrictDiff;
+                            }
+                        }
+                        Class::Text => {
+                            sums.2 += 1;
+                            if expected != found {
+                                sums.3 += 1;
+                                *class = Class::TextDiff;
+                            }
+                        }
+                        Class::StrictDiff | Class::TextDiff | Class::Masked => {}
+                    }
+                }
+            }
+            sums
+        },
+        || (0, 0, 0, 0),
+        |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
     );
-    let (image_width, image_height) = baseline.dimensions();
+    let mut analysis = PixelAnalysis {
+        checked_pixels,
+        diff_pixels,
+        text: None,
+    };
+    if has_text {
+        analysis.text = Some(TextAnalysis {
+            pixels: text_pixels,
+            diff_pixels: text_diff,
+            // Without a differing text pixel every tile is at 0%: no scan needed.
+            worst_tile: if text_diff > 0 {
+                worst_tile(&classes, width, regions.text)
+            } else {
+                None
+            },
+        });
+    }
+    (classes, analysis)
+}
+
+/// The class of every pixel (row-major) by `regions` alone: masks over text (when `has_text`)
+/// over strict.
+///
+/// # Panics
+/// Panics if a region reaches beyond the `image_width` x `image_height` image.
+fn region_classes(
+    image_width: u32,
+    image_height: u32,
+    regions: &PixelRegions<'_>,
+    has_text: bool,
+) -> Vec<Class> {
     let inside = |region: &Region| {
         region
             .x
@@ -222,8 +351,8 @@ fn classify(
         regions.masks.iter().chain(regions.text).all(inside),
         "a region reaches beyond the {image_width}x{image_height} image"
     );
-    let width = baseline.width() as usize;
-    let mut classes = vec![Class::Strict; width * baseline.height() as usize];
+    let width = image_width as usize;
+    let mut classes = vec![Class::Strict; width * image_height as usize];
     let mut mark = |region: &Region, class: Class| {
         let rows = region.y as usize * width..(region.y + region.height) as usize * width;
         let columns = region.x as usize..(region.x + region.width) as usize;
@@ -249,7 +378,6 @@ fn classify(
             }
         }
     };
-    let has_text = regions.text_tolerance.is_some() && !regions.text.is_empty();
     if has_text {
         regions
             .text
@@ -261,57 +389,15 @@ fn classify(
         .iter()
         .for_each(|region| mark(region, Class::Masked));
 
-    let mut analysis = PixelAnalysis {
-        checked_pixels: 0,
-        diff_pixels: 0,
-        text: None,
-    };
-    let (mut text_pixels, mut text_diff) = (0, 0);
-    let pairs = baseline
-        .as_raw()
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(actual.as_raw().as_chunks::<4>().0);
-    for (class, (expected, found)) in classes.iter_mut().zip(pairs) {
-        match class {
-            Class::Strict => {
-                analysis.checked_pixels += 1;
-                if expected != found {
-                    analysis.diff_pixels += 1;
-                    *class = Class::StrictDiff;
-                }
-            }
-            Class::Text => {
-                text_pixels += 1;
-                if expected != found {
-                    text_diff += 1;
-                    *class = Class::TextDiff;
-                }
-            }
-            Class::StrictDiff | Class::TextDiff | Class::Masked => {}
-        }
-    }
-    if has_text {
-        analysis.text = Some(TextAnalysis {
-            pixels: text_pixels,
-            diff_pixels: text_diff,
-            // Without a differing text pixel every tile is at 0%: no scan needed.
-            worst_tile: if text_diff > 0 {
-                worst_tile(&classes, width, regions.text)
-            } else {
-                None
-            },
-        });
-    }
-    (classes, analysis)
+    classes
 }
 
 /// The tile of `text` with the largest share of differing text pixels (the first of equal ones):
 /// every [`TEXT_TILE`]-pixel square inside a region (the region's own size when it is smaller),
 /// so a cluster is judged whole wherever it falls and no thin strip at a region's edge makes a
-/// tile of its own. Masked pixels of a tile count as equal, so a mask over most of a tile cannot
-/// turn one noisy pixel into a large share. `None` when no text pixel differs.
+/// tile of its own. Masked pixels of a tile count as equal, and so do the pixels of the square
+/// outside a region thinner than a tile (a small or edge-clipped region): neither can turn one
+/// noisy pixel into a large share. `None` when no text pixel differs.
 ///
 /// The column sums of the tile's rows slide down a region and the tile slides along them, so
 /// this takes one pass over each region. `text` lies inside the image ([`classify`]).
@@ -339,7 +425,7 @@ fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTi
                     width: tile_width,
                     height: tile_height,
                 },
-                pixels: u64::from(tile_width) * u64::from(tile_height),
+                pixels: u64::from(TEXT_TILE) * u64::from(TEXT_TILE),
                 diff_pixels,
             };
             // Shares compared exactly: a / b > c / d as a * d > c * b.
@@ -373,6 +459,11 @@ fn worst_tile(classes: &[Class], width: usize, text: &[Region]) -> Option<TextTi
     worst
 }
 
+/// The pixels of `classes` in `class`.
+fn count(classes: &[Class], class: Class) -> u64 {
+    classes.iter().filter(|&&other| other == class).count() as u64
+}
+
 /// Adds (or, without `add`, removes) the differing text pixels of `row` to the sums of its
 /// `columns` (`row` is as long as `columns`: a row of the region).
 fn add_row(columns: &mut [u64], row: &[Class], add: bool) {
@@ -383,102 +474,40 @@ fn add_row(columns: &mut [u64], row: &[Class], add: bool) {
     }
 }
 
-/// Compares two images of the same dimensions pixel-by-pixel.
-///
-/// Returns the number of mismatched pixels and a composite diff image
-/// where matching areas are darkened and mismatched areas are painted magenta.
-///
-/// # Panics
-/// Panics if `baseline` and `actual` do not have identical dimensions.
-#[must_use]
-pub fn compare_pixels(baseline: &RgbaImage, actual: &RgbaImage) -> (u64, RgbaImage) {
-    assert_eq!(
-        baseline.dimensions(),
-        actual.dimensions(),
-        "Image dimensions must match for compare_pixels: baseline={:?}, actual={:?}",
-        baseline.dimensions(),
-        actual.dimensions()
-    );
+/// Bytes per task of a pixel pass with `parallel` (whole pixels, or whole rows): enough work to
+/// outweigh a task, and an equal block of [`count_mismatched_pixels`] is one `memcmp`.
+const BLOCK: usize = 1 << 20;
 
-    let width = baseline.width();
-    let height = baseline.height();
-
-    let baseline_raw = baseline.as_raw();
-    let actual_raw = actual.as_raw();
-
-    let mut diff_raw = vec![0u8; baseline_raw.len()];
-
-    let b_chunks = baseline_raw.par_chunks_exact(4);
-    let a_chunks = actual_raw.par_chunks_exact(4);
-    let d_chunks = diff_raw.par_chunks_exact_mut(4);
-
-    let diff_count: u64 = b_chunks
-        .zip(a_chunks)
-        .zip(d_chunks)
-        .map(|((b_chunk, a_chunk), d_chunk)| {
-            if b_chunk == a_chunk {
-                // Darken matching pixel: divide R, G, B by 2, keep A
-                d_chunk[0] = b_chunk[0] / 2;
-                d_chunk[1] = b_chunk[1] / 2;
-                d_chunk[2] = b_chunk[2] / 2;
-                d_chunk[3] = b_chunk[3];
-                0u64
-            } else {
-                // Magenta: [255, 0, 255, 255]
-                d_chunk.copy_from_slice(&[255, 0, 255, 255]);
-                1u64
-            }
-        })
-        .sum();
-
-    // `diff_raw` is allocated above as exactly `baseline_raw.len()` bytes, which is always
-    // `width * height * 4` for a valid `RgbaImage`, so `from_raw` can never return `None`.
-    #[expect(
-        clippy::expect_used,
-        reason = "`diff_raw` is allocated as exactly `width * height * 4` bytes"
-    )]
-    let diff_image = RgbaImage::from_raw(width, height, diff_raw)
-        .expect("invariant: diff_raw length must be exactly width * height * 4");
-
-    (diff_count, diff_image)
-}
-
-/// Counts the number of mismatched pixels without allocating a diff image.
+/// The pixels whose RGBA bytes differ; equal images take one `memcmp`.
 ///
 /// # Panics
 /// Panics if `baseline` and `actual` do not have identical dimensions.
 #[must_use]
-pub fn count_mismatched_pixels(baseline: &RgbaImage, actual: &RgbaImage) -> u64 {
-    assert_eq!(
-        baseline.dimensions(),
-        actual.dimensions(),
-        "Image dimensions must match for count_mismatched_pixels: baseline={:?}, actual={:?}",
-        baseline.dimensions(),
-        actual.dimensions()
-    );
-
-    let baseline_raw = baseline.as_raw();
-    let actual_raw = actual.as_raw();
-
-    // Fast path: reinterpret the byte slices as u32 for cheaper, word-sized
-    // equality checks. RgbaImage guarantees the raw length is a multiple of 4.
-    // `try_cast_slice` never panics on misaligned input; it simply returns
-    // Err, in which case we fall back to the byte-chunk comparison below.
-    if let (Ok(b_u32), Ok(a_u32)) = (
-        bytemuck::try_cast_slice::<u8, u32>(baseline_raw),
-        bytemuck::try_cast_slice::<u8, u32>(actual_raw),
-    ) {
-        b_u32
-            .par_iter()
-            .zip(a_u32.par_iter())
-            .filter(|(b, a)| b != a)
-            .count() as u64
-    } else {
-        // Fallback for unaligned slice buffers
-        let b_chunks = baseline_raw.par_chunks_exact(4);
-        let a_chunks = actual_raw.par_chunks_exact(4);
-        b_chunks.zip(a_chunks).filter(|(b, a)| b != a).count() as u64
+fn count_mismatched_pixels(baseline: Pixels<'_>, actual: Pixels<'_>) -> u64 {
+    same_size(baseline, actual);
+    if baseline.raw() == actual.raw() {
+        return 0;
     }
+    let found = actual.raw();
+    par::map_chunks(
+        baseline.raw(),
+        BLOCK,
+        |index, expected| {
+            let start = index * BLOCK;
+            let found = &found[start..start + expected.len()];
+            if expected == found {
+                return 0;
+            }
+            let pairs = expected
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(found.as_chunks::<4>().0);
+            pairs.filter(|(expected, found)| expected != found).count() as u64
+        },
+        || 0,
+        |a, b| a + b,
+    )
 }
 
 #[cfg(all(test, not(miri)))]
@@ -498,32 +527,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compare_pixels_identical() {
+    fn test_identical_images_are_darkened_in_the_diff() {
         let img1 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         let img2 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
 
-        let (diff_count, diff_img) = compare_pixels(&img1, &img2);
-        assert_eq!(diff_count, 0);
+        let compared = compare(&img1, &img2, &PixelRegions::NONE);
+        assert_eq!(compared.analysis.diff_pixels, 0);
         // Matching pixels should be darkened: 255 / 2 = 127
+        let diff_img = compared.diff_image(&img1, &img2);
         assert_eq!(*diff_img.get_pixel(0, 0), Rgba([127, 0, 0, 255]));
 
-        assert_eq!(count_mismatched_pixels(&img1, &img2), 0);
+        assert_eq!(count_mismatched_pixels((&img1).into(), (&img2).into()), 0);
     }
 
     #[test]
-    fn test_compare_pixels_mismatch() {
+    fn test_strict_differences_are_magenta_in_the_diff() {
         let img1 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         let mut img2 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         img2.put_pixel(5, 5, Rgba([0, 255, 0, 255]));
 
-        let (diff_count, diff_img) = compare_pixels(&img1, &img2);
-        assert_eq!(diff_count, 1);
+        let compared = compare(&img1, &img2, &PixelRegions::NONE);
+        assert_eq!(compared.analysis.diff_pixels, 1);
+        let diff_img = compared.diff_image(&img1, &img2);
         // The mismatched pixel should be magenta
         assert_eq!(*diff_img.get_pixel(5, 5), Rgba([255, 0, 255, 255]));
         // The matching pixel should be darkened
         assert_eq!(*diff_img.get_pixel(0, 0), Rgba([127, 0, 0, 255]));
 
-        assert_eq!(count_mismatched_pixels(&img1, &img2), 1);
+        assert_eq!(count_mismatched_pixels((&img1).into(), (&img2).into()), 1);
+
+        // Over one block: the equal first block is skipped, the differing last one counted.
+        let wide = ImageBuffer::from_pixel(600, 600, Rgba([255, 0, 0, 255]));
+        let mut changed = wide.clone();
+        changed.put_pixel(599, 599, Rgba([0, 255, 0, 255]));
+        assert!(wide.as_raw().len() > BLOCK);
+        assert_eq!(
+            count_mismatched_pixels((&wide).into(), (&changed).into()),
+            1
+        );
     }
 
     const WHITE: Rgba<u8> = Rgba([255, 255, 255, 255]);
@@ -692,7 +733,7 @@ mod tests {
             text: &text,
             text_tolerance: Some(TEXT),
         };
-        let (classes, analysis) = classify(&baseline, &actual, &regions);
+        let (classes, analysis) = classify((&baseline).into(), (&actual).into(), &regions);
         let class_at = |x: usize, y: usize| classes[y * 64 + x];
         assert_eq!(
             [
@@ -763,7 +804,8 @@ mod tests {
             .unwrap();
         assert_eq!((worst.pixels, worst.diff_pixels), (256, 2), "{worst:?}");
 
-        // A region smaller than a tile is one tile of its own size.
+        // A region smaller than a tile is one tile of its own size, judged as a whole tile: the
+        // rest of the square counts as equal (one pixel of a 10x6 region is 1 of 256).
         let small = [region(4, 4, 10, 6)];
         let mut actual = ImageBuffer::from_pixel(32, 17, WHITE);
         actual.put_pixel(5, 5, BLACK);
@@ -781,7 +823,7 @@ mod tests {
         .worst_tile
         .unwrap();
         assert_eq!(worst.region, small[0]);
-        assert_eq!((worst.pixels, worst.diff_pixels), (60, 1));
+        assert_eq!((worst.pixels, worst.diff_pixels), (256, 1));
     }
 
     /// A mask over most of a tile leaves few text pixels; they are judged in the whole tile, so
@@ -828,10 +870,10 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Image dimensions must match")]
-    fn test_compare_pixels_unequal_dimensions_panics() {
+    fn test_compare_unequal_dimensions_panics() {
         let img1 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         let img2 = ImageBuffer::from_pixel(20, 10, Rgba([255, 0, 0, 255]));
-        let _ = compare_pixels(&img1, &img2);
+        let _ = compare(&img1, &img2, &PixelRegions::NONE);
     }
 
     #[test]
@@ -839,6 +881,73 @@ mod tests {
     fn test_count_mismatched_pixels_unequal_dimensions_panics() {
         let img1 = ImageBuffer::from_pixel(10, 10, Rgba([255, 0, 0, 255]));
         let img2 = ImageBuffer::from_pixel(10, 20, Rgba([255, 0, 0, 255]));
-        let _ = count_mismatched_pixels(&img1, &img2);
+        let _ = count_mismatched_pixels((&img1).into(), (&img2).into());
+    }
+
+    /// The row fast paths against a per-pixel reference: generated frames (equal rows, changed
+    /// rows, widths 0 and 1), masks and text regions anywhere inside, a fixed xorshift sequence.
+    #[test]
+    fn test_compare_counts_like_a_per_pixel_reference() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |below: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            u32::try_from(state % u64::from(below.max(1))).unwrap()
+        };
+        for _ in 0..500 {
+            let (width, height) = (next(20), 1 + next(12));
+            let baseline = ImageBuffer::from_fn(width, height, |x, y| {
+                Rgba([u8::try_from((x * 7 + y * 3) % 256).unwrap(), 0, 0, 255])
+            });
+            let mut actual = baseline.clone();
+            for _ in 0..next(4) {
+                if width > 0 {
+                    actual.put_pixel(next(width), next(height), BLACK);
+                }
+            }
+            let random_regions = |next: &mut dyn FnMut(u32) -> u32| {
+                (0..next(3))
+                    .map(|_| {
+                        let (x, y) = (next(width + 1), next(height + 1));
+                        region(x, y, next(width - x + 1), next(height - y + 1))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let masks = random_regions(&mut next);
+            let text = random_regions(&mut next);
+            let regions = PixelRegions {
+                masks: &masks,
+                text: &text,
+                text_tolerance: Some(TEXT),
+            };
+            let inside = |regions: &[Region], x: u32, y: u32| {
+                regions.iter().any(|r| {
+                    (r.x..r.x + r.width).contains(&x) && (r.y..r.y + r.height).contains(&y)
+                })
+            };
+            let (mut checked, mut diff, mut text_pixels, mut text_diff) = (0, 0, 0, 0);
+            for (x, y, expected) in baseline.enumerate_pixels() {
+                let differs = expected != actual.get_pixel(x, y);
+                if inside(&masks, x, y) {
+                } else if !text.is_empty() && inside(&text, x, y) {
+                    text_pixels += 1;
+                    text_diff += u64::from(differs);
+                } else {
+                    checked += 1;
+                    diff += u64::from(differs);
+                }
+            }
+            let analysis = compare(&baseline, &actual, &regions).analysis;
+            let context = format!("{width}x{height} masks {masks:?} text {text:?}");
+            assert_eq!(
+                (analysis.checked_pixels, analysis.diff_pixels),
+                (checked, diff),
+                "{context}"
+            );
+            let measured = analysis.text.map(|text| (text.pixels, text.diff_pixels));
+            let expected = (!text.is_empty()).then_some((text_pixels, text_diff));
+            assert_eq!(measured, expected, "{context}");
+        }
     }
 }

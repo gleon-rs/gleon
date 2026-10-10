@@ -68,9 +68,13 @@ reviews:
       instructions: >
         Permissive (MIT OR Apache-2.0) crates shared with the gleon Flutter package through
         gleon-ffi. They must not depend on BUSL crates (gleon-core, gleon). Any change to the
-        gleon-ffi C contract (signatures, packed string order, flags, `GleonSummary`, verdict and
-        error codes) must bump `ABI_VERSION`.
-        Changes to `gleon-model` types must regenerate `gleon-model/schema/*.v1.json`
+        gleon-ffi C contract (signatures, packed string order, flags, `GleonCall`, `GleonSummary`,
+        verdict and error codes) must bump `ABI_VERSION` and the layout assertions next to the
+        structs (the Flutter package mirrors them as Dart `Struct`s). Verdict 0 stays an error, so
+        an unwritten summary is never a pass; the summary is written to the caller's buffer, never
+        returned by value (dart-lang/sdk#64368).
+        Changes to `gleon-model` types must regenerate `gleon-model/schema/*.json` (`case.v3`,
+        `config.v1`)
         (`GLEON_UPDATE_SCHEMAS=1 cargo test -p gleon-model --test schema`); breaking case report
         changes need a new schema version. Engine policy changes must keep
         `gleon-engine/tests/ssim_corpus.rs` green and bump `POLICY_VERSION` when verdicts change.

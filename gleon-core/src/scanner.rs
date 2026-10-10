@@ -13,10 +13,6 @@ pub enum ScannerError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Error compiling a glob pattern.
-    #[error("Pattern compilation error: {0}")]
-    Pattern(#[from] globset::Error),
-
     /// Invalid test name format.
     #[error("Invalid test name '{name}': {reason}")]
     InvalidTestName {
@@ -56,15 +52,15 @@ impl FileScanner {
     /// Scans the workspace based on the rules in `GleonConfig` and a given base directory.
     ///
     /// # Errors
-    /// Returns [`ScannerError::Pattern`] if any include/exclude glob fails to compile, or
-    /// [`ScannerError::InvalidTestName`] if a derived test name fails validation.
+    /// Returns [`ScannerError::Io`] if the walk fails, or [`ScannerError::InvalidTestName`] if a
+    /// derived test name fails validation (globs were compiled when the config was parsed).
     pub fn scan_workspace(
         config: &GleonConfig,
         base_dir: &Path,
     ) -> Result<Vec<TestCase>, ScannerError> {
         // Rule selection is `gleon-model`'s, shared with the Flutter package through `gleon-ffi`;
         // the walker only prunes early what `RuleSet::select` would exclude anyway.
-        let rule_set = RuleSet::new(config)?;
+        let rule_set = RuleSet::new(config);
 
         let walker = Self::build_walker(base_dir, rule_set.exclude_set());
 
@@ -102,7 +98,7 @@ impl FileScanner {
                 }
             };
             let rel_path_str = Self::normalize_path_str(rel_path);
-            let Selection::Rule(index) = rule_set.select(&rel_path.to_string_lossy()) else {
+            let Selection::Rule(index) = rule_set.select_walked(&rel_path_str) else {
                 continue;
             };
             let test_name_norm =
@@ -142,7 +138,7 @@ impl FileScanner {
     }
 
     /// Builds a `WalkBuilder` configured for gleon directory scanning.
-    fn build_walker(base_dir: &Path, exclude_set: &globset::GlobSet) -> ignore::Walk {
+    fn build_walker(base_dir: &Path, exclude_set: &gleon_model::rules::Globs) -> ignore::Walk {
         let exclude_for_filter = exclude_set.clone();
         let base_dir_for_filter = base_dir.to_path_buf();
 
@@ -332,7 +328,7 @@ screenshots:
                 )
             })
             .collect();
-        let rules = RuleSet::new(&config).unwrap();
+        let rules = RuleSet::new(&config);
         let mut resolved: Vec<(String, bool)> = files
             .iter()
             .filter_map(|file| match rules.resolve(file).unwrap() {
@@ -658,9 +654,6 @@ screenshots:
         };
         assert!(!format!("{invalid_err:?}").is_empty());
         assert!(!format!("{invalid_err}").is_empty());
-
-        let pattern_err = ScannerError::Pattern(globset::Glob::new("[").unwrap_err());
-        assert!(!format!("{pattern_err:?}").is_empty());
     }
 
     #[test]
@@ -704,7 +697,6 @@ screenshots:
                 mode: gleon_engine::config::Mode::Pixel,
                 diff: gleon_engine::config::DiffConfig {
                     threshold: 0.0,
-                    anti_alias: false,
                     min_similarity: 0.99,
                     color_tolerance: 8.0,
                 },

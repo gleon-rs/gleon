@@ -13,7 +13,7 @@ pub use gleon_model::case::text::{dimension_summary, metrics_summary, text_toler
 use gleon_model::{
     case::{
         CaseOutcome, Metrics,
-        text::{MAX_DECIMALS, color, decimal, percent, signed, similarity},
+        text::{MAX_DECIMALS, at_most_tight, color, decimal, percent, signed, similarity},
     },
     tolerance::{TextTolerance, Tolerance},
 };
@@ -73,15 +73,11 @@ pub fn console_line(
             }),
             Tolerance::Pixel { .. } | Tolerance::Exact {},
         ) => {
-            // Exact is a zero threshold.
-            let max_diff_ratio = match *tolerance {
-                Tolerance::Pixel { max_diff_ratio } => max_diff_ratio,
-                Tolerance::Exact {} | Tolerance::Ssim { .. } => 0.0,
-            };
+            let max_diff_ratio = tolerance.max_diff_ratio();
             let mut detail = format!(
-                "pixel {}% ({diff_pixels} px, ≤{}%, {}%)",
+                "pixel {}% ({diff_pixels} px, {}, {}%)",
                 percent(diff_ratio),
-                percent(max_diff_ratio),
+                at_most_tight(max_diff_ratio),
                 signed(decimal(headroom * 100.0, 2, MAX_DECIMALS))
             );
             // Text can fail on its own, so its line shows it too; ignored text only its share.
@@ -96,9 +92,9 @@ pub fn console_line(
                 (Some(text), Some(TextTolerance(share))) => {
                     let _infallible = write!(
                         detail,
-                        "  text {}% of a tile (≤{}%, {}%)",
+                        "  text {}% of a tile ({}, {}%)",
                         percent(text.worst_tile_diff_ratio),
-                        percent(share),
+                        at_most_tight(share),
                         signed(decimal(text.headroom * 100.0, 2, MAX_DECIMALS))
                     );
                 }
@@ -168,7 +164,7 @@ pub fn missing_fallback(platform: &str, shared_uri: &str) -> String {
     )
 }
 
-/// An invalid `.gleon/gleon.yaml`, `GLEON_METRICS` value or golden name.
+/// An invalid `.gleon/gleon.yaml`, or a golden whose name its rules cannot take.
 pub fn config_error(config_path: &str, message: &str) -> String {
     format!("gleon: {config_path}: {message}")
 }
@@ -289,6 +285,21 @@ mod tests {
             ),
             "gleon ✓ a.png  pixel 0.00% (0 px, ≤0.00%, +0.00%)  1 ms"
         );
+        // A positive threshold too small to show is not `≤<0.0001%`.
+        assert_eq!(
+            console_line(
+                "a.png",
+                CaseOutcome::Match,
+                &Tolerance::Pixel {
+                    max_diff_ratio: 1e-9
+                },
+                None,
+                0.6,
+                Some(&unchanged),
+                None
+            ),
+            "gleon ✓ a.png  pixel 0.00% (0 px, <0.0001%, +0.00%)  1 ms"
+        );
         let text_only = Metrics::Pixel {
             total_pixels: 100_000,
             diff_pixels: 0,
@@ -358,25 +369,6 @@ mod tests {
             line(CaseOutcome::Missing, Some("ignored")),
             "gleon ? a.png  missing  1 ms"
         );
-    }
-
-    #[test]
-    fn test_outcome_names() {
-        for outcome in [
-            CaseOutcome::Identical,
-            CaseOutcome::Match,
-            CaseOutcome::Mismatch,
-            CaseOutcome::DimensionMismatch,
-            CaseOutcome::Error,
-            CaseOutcome::Updated,
-            CaseOutcome::Missing,
-        ] {
-            assert_eq!(
-                serde_json::to_value(outcome).unwrap(),
-                outcome.as_str(),
-                "the case report uses the same names"
-            );
-        }
     }
 
     #[test]

@@ -274,10 +274,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -1623,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "gleon"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1648,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "gleon-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1684,9 +1682,8 @@ dependencies = [
 
 [[package]]
 name = "gleon-engine"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
- "bytemuck",
  "hex",
  "image",
  "image_hasher",
@@ -1700,13 +1697,12 @@ dependencies = [
 
 [[package]]
 name = "gleon-ffi"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "gleon-engine",
  "gleon-model",
  "image",
- "rayon",
  "safer-ffi",
  "serde_json",
  "tempfile",
@@ -1714,10 +1710,11 @@ dependencies = [
 
 [[package]]
 name = "gleon-model"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "gleon-engine",
+ "glob",
  "globset",
  "image",
  "regex",
@@ -1731,6 +1728,12 @@ dependencies = [
  "tracing",
  "yaml_serde",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "globset"

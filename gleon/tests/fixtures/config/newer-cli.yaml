@@ -1,0 +1,5 @@
+required_version: ">=99.0.0"
+# A key of that newer CLI: the version is reported, not the key.
+future_option: true
+screenshots:
+  - include: "**/*.png"

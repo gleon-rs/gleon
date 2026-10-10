@@ -86,7 +86,8 @@ pub fn decode_rgba(bytes: &[u8]) -> Result<RgbaImage, DecodeError> {
     limited_reader(bytes)
         .map_err(DecodeError::Format)?
         .decode()
-        .map(|img| img.to_rgba8())
+        // Moves an RGBA8 image (every golden a Flutter test writes) instead of copying it.
+        .map(image::DynamicImage::into_rgba8)
         .map_err(DecodeError::Image)
 }
 

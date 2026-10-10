@@ -145,12 +145,7 @@ fn resolve_zone(zone: &Zone, img_w: u32, img_h: u32) -> Option<ResolvedZone> {
 
 #[inline]
 fn fill_black(slice: &mut [u8]) {
-    let pixel_val = u32::from_ne_bytes([0, 0, 0, 255]);
-    if let Ok(u32_slice) = bytemuck::try_cast_slice_mut::<u8, u32>(slice) {
-        u32_slice.fill(pixel_val);
-    } else {
-        slice.as_chunks_mut::<4>().0.fill([0, 0, 0, 255]);
-    }
+    slice.as_chunks_mut::<4>().0.fill([0, 0, 0, 255]);
 }
 
 /// Resolves a [`Dimension`] to an absolute pixel count relative to `dim_px`.

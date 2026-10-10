@@ -1,4 +1,8 @@
 words = [
+    "graya",
+    "PIL",
+    "trns",
+    "xorshift",
     "AGPL",
     "AKIAIOSFODNN",
     "APFS",
@@ -172,6 +176,6 @@ words = [
 ]
 # Schemas are generated from doc comments that are spell-checked in the Rust sources; their JSON
 # `\n` escapes would only produce false positives.
-ignore_paths = ["Cargo.lock", "**/LICENSE-*", "gleon-model/schema/*.json"]
+ignore_paths = ["Cargo.lock", "fuzz/Cargo.lock", "**/LICENSE-*", "gleon-model/schema/*.json"]
 # Hex digests (SHA-256 and perceptual hashes) in tests and fixtures.
 ignore_patterns = ['\b[0-9a-f]{16,}\b']

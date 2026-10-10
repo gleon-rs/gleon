@@ -53,7 +53,7 @@ pub const RUN_ID_ENV: &str = "GLEON_RUN_ID";
 pub enum Metrics {
     /// Exact and pixel tolerances.
     Pixel {
-        /// Pixels compared strictly (masked pixels and text under `comparison.text` left out).
+        /// Pixels compared strictly (masked pixels and text under `comparison.text_tolerance` left out).
         total_pixels: u64,
         /// Pixels whose RGBA bytes differ.
         diff_pixels: u64,
@@ -61,7 +61,7 @@ pub enum Metrics {
         diff_ratio: f64,
         /// `max_diff_ratio - diff_ratio` (exact: `-diff_ratio`); negative means it failed.
         headroom: f64,
-        /// The text regions, compared under `comparison.text` instead (left out of the pixels
+        /// The text regions, compared under `comparison.text_tolerance` instead (left out of the pixels
         /// above); the worst tile is a `text` entry of `regions`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<TextMetrics>,
@@ -151,10 +151,7 @@ impl Metrics {
                 },
                 Tolerance::Exact {} | Tolerance::Pixel { .. },
             ) => {
-                let max_diff_ratio = match *tolerance {
-                    Tolerance::Pixel { max_diff_ratio } => max_diff_ratio,
-                    Tolerance::Exact {} | Tolerance::Ssim { .. } => 0.0,
-                };
+                let max_diff_ratio = tolerance.max_diff_ratio();
                 let text = analysis.zip(text).map(|(analysis, text)| {
                     let worst = analysis.worst_tile.map_or(0.0, |tile| tile.diff_ratio());
                     TextMetrics {
@@ -258,7 +255,7 @@ impl Sha256Hex {
 
     /// The hex form of a raw 32-byte digest (always valid).
     #[must_use]
-    pub fn from_digest(digest: &[u8; 32]) -> Self {
+    fn from_digest(digest: &[u8; 32]) -> Self {
         use std::fmt::Write as _;
 
         let mut hex = String::with_capacity(64);
@@ -307,7 +304,7 @@ impl schemars::JsonSchema for Sha256Hex {
 pub enum RegionKind {
     /// Pixels compared as an image (the whole golden).
     Image,
-    /// Text compared under `comparison.text`: the tile of its text regions with the largest
+    /// Text compared under `comparison.text_tolerance`: the tile of its text regions with the largest
     /// share of differing pixels.
     Text,
 }
@@ -495,7 +492,8 @@ pub struct Artifacts {
         pattern = r"^\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\.\.?(/|$))[a-z0-9_.-]+(/(?!\.\.?(/|$))[a-z0-9_.-]+)*/golden\.png$"
     ))]
     pub golden: Option<String>,
-    /// The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`):
+    /// The candidate (mismatches, dimension mismatches, missing goldens and passes against another
+    /// platform's golden that differ from it, for `gleon approve`):
     /// `<artifacts dir>/<platform key>/<name>/candidate.png`.
     #[serde(
         default,
@@ -527,11 +525,11 @@ impl Artifacts {
 }
 
 /// File names of the images inside `<artifacts dir>/<platform>/<name>/`.
-pub const GOLDEN_ARTIFACT: &str = "golden.png";
+const GOLDEN_ARTIFACT: &str = "golden.png";
 /// See [`GOLDEN_ARTIFACT`].
-pub const CANDIDATE_ARTIFACT: &str = "candidate.png";
+const CANDIDATE_ARTIFACT: &str = "candidate.png";
 /// See [`GOLDEN_ARTIFACT`].
-pub const DIFF_ARTIFACT: &str = "diff.png";
+const DIFF_ARTIFACT: &str = "diff.png";
 
 /// The PNGs of a case to keep as [`Artifacts`]; `None` for an image the case has none of.
 #[derive(Debug, Clone, Copy, Default)]
@@ -566,24 +564,11 @@ pub fn write_artifacts(
 ) -> io::Result<Option<Artifacts>> {
     validate_canonical_test_name(name)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let folder = name
-        .split('/')
-        .fold(dir.to_path(root).join(platform), |folder, segment| {
-            folder.join(segment)
-        });
+    let folder = crate::naming::join_relative(&dir.to_path(root).join(platform), name);
     let relative = |file: &str| format!("{}/{platform}/{name}/{file}", dir.as_str());
     let write = |file: &str, bytes: Option<&[u8]>| -> io::Result<Option<String>> {
-        let path = folder.join(file);
-        bytes.map_or_else(
-            || match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-                _ => Ok(None),
-            },
-            |bytes| {
-                crate::fs::write_atomically(&path, bytes, Durability::Atomic)
-                    .map(|()| Some(relative(file)))
-            },
-        )
+        crate::fs::write_or_remove(&folder.join(file), bytes, Durability::Atomic)
+            .map(|()| bytes.map(|_| relative(file)))
     };
     let artifacts = Artifacts {
         golden: write(GOLDEN_ARTIFACT, images.golden)?,
@@ -627,7 +612,7 @@ pub struct Comparison {
     pub text_tolerance: Option<TextTolerance>,
     /// Ignored zones, applied to both images.
     pub masks: Vec<Zone>,
-    /// Version of the engine's tolerant (SSIM) decision policy.
+    /// Version of the engine's tolerant decisions (SSIM, text tiles): `gleon_engine::POLICY_VERSION`.
     pub policy_version: u32,
 }
 
@@ -643,7 +628,8 @@ pub enum CaseOutcome {
     Mismatch,
     /// Different image sizes; no pixel comparison was attempted.
     DimensionMismatch,
-    /// Invalid input or options; see `message`.
+    /// The golden could not be compared or written: invalid input or config, an I/O, image or
+    /// internal error (`error_kind`); see `message`.
     Error,
     /// The golden was rewritten from the candidate (update mode); nothing was compared.
     Updated,
@@ -856,9 +842,11 @@ pub struct CaseReport {
     /// Whole-image metrics; absent when no pixel comparison ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<Metrics>,
-    /// Per-region metrics (today a single whole-image region when `metrics` is present).
+    /// Per-region metrics when `metrics` is present: the whole image, then the worst tile of text
+    /// (when text was compared under a tolerance).
     pub regions: Vec<RegionMetrics>,
-    /// The images kept for the case (failures only).
+    /// The images kept for the case: of a failure, or the candidate of a recorded pass against
+    /// another platform's golden that differs from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<Artifacts>,
     /// Durations.
@@ -1185,19 +1173,9 @@ fn checked_workspace_path<E: serde::de::Error>(path: String) -> Result<String, E
 fn optional_artifact_path<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
-    let is_artifact_path = |path: &str| {
-        path.split('/').all(|name| {
-            !name.is_empty()
-                && name != "."
-                && name != ".."
-                && name.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'=')
-                })
-        })
-    };
     Option::<String>::deserialize(deserializer)?
         .map(|path| {
-            if is_artifact_path(&path) {
+            if crate::naming::is_portable_relative_path_with(&path, b"+=") {
                 Ok(path)
             } else {
                 Err(serde::de::Error::custom(format!(
@@ -1253,6 +1231,28 @@ pub mod text {
         }
     }
 
+    /// `ratio` as an upper bound in percent: `≤ 6.25%`, or `<0.0001%` for a positive ratio too
+    /// small to show (never `≤ <0.0001%`).
+    #[must_use]
+    pub fn at_most(ratio: f64) -> String {
+        bound(ratio, " ")
+    }
+
+    /// [`at_most`] without the space, as in console lines: `≤6.25%`, `<0.0001%`.
+    #[must_use]
+    pub fn at_most_tight(ratio: f64) -> String {
+        bound(ratio, "")
+    }
+
+    fn bound(ratio: f64, gap: &str) -> String {
+        let shown = percent(ratio);
+        if shown.starts_with('<') {
+            format!("{shown}%")
+        } else {
+            format!("≤{gap}{shown}%")
+        }
+    }
+
     /// A similarity with 3 to 4 decimals (`0.800`, `0.9995`).
     #[must_use]
     pub fn similarity(value: f64) -> String {
@@ -1281,7 +1281,7 @@ pub mod text {
         match *tolerance {
             Tolerance::Exact {} => "exact".to_owned(),
             Tolerance::Pixel { max_diff_ratio } => {
-                format!("pixel ≤ {}%", percent(max_diff_ratio))
+                format!("pixel {}", at_most(max_diff_ratio))
             }
             Tolerance::Ssim {
                 min_similarity,
@@ -1300,13 +1300,13 @@ pub mod text {
         if text.0 >= 1.0 {
             "text ignored".to_owned()
         } else {
-            format!("text ≤ {}% per tile", percent(text.0))
+            format!("text {} per tile", at_most(text.0))
         }
     }
 
     /// A region, e.g. `(4, 8) 16x32px`.
     #[must_use]
-    pub fn region(region: &Region) -> String {
+    pub(crate) fn region(region: &Region) -> String {
         format!(
             "({}, {}) {}x{}px",
             region.x, region.y, region.width, region.height
@@ -1445,7 +1445,18 @@ pub mod text {
             assert_eq!(tolerance(&pixel(0.01)), "pixel ≤ 1.00%");
             assert_eq!(tolerance(&pixel(0.00001)), "pixel ≤ 0.001%");
             assert_eq!(tolerance(&pixel(-0.0)), "pixel ≤ 0.00%");
-            assert_eq!(tolerance(&pixel(1e-9)), "pixel ≤ <0.0001%");
+            assert_eq!(tolerance(&pixel(1e-9)), "pixel <0.0001%");
+            assert_eq!(
+                text_tolerance(&TextTolerance(0.0625)),
+                "text ≤ 6.25% per tile"
+            );
+            assert_eq!(
+                text_tolerance(&TextTolerance(1e-9)),
+                "text <0.0001% per tile"
+            );
+            assert_eq!(text_tolerance(&TextTolerance::DEFAULT), "text ignored");
+            assert_eq!(at_most_tight(0.0625), "≤6.25%");
+            assert_eq!(at_most_tight(1e-9), "<0.0001%");
             let ssim = |min_similarity, color_tolerance| Tolerance::Ssim {
                 min_similarity,
                 color_tolerance,
@@ -1558,6 +1569,25 @@ pub mod text {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_outcome_names() {
+        for outcome in [
+            CaseOutcome::Identical,
+            CaseOutcome::Match,
+            CaseOutcome::Mismatch,
+            CaseOutcome::DimensionMismatch,
+            CaseOutcome::Error,
+            CaseOutcome::Updated,
+            CaseOutcome::Missing,
+        ] {
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                outcome.as_str(),
+                "the case report uses the names of `as_str`"
+            );
+        }
+    }
 
     fn ssim_measurement() -> Measurement {
         Measurement::Ssim {

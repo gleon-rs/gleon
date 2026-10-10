@@ -5,12 +5,15 @@
 //! pair of images gets one verdict and one message wherever it is compared.
 
 use gleon_engine::{
-    ComparisonResult, PixelRegions, Region, compare_images,
+    ComparisonResult, PixelRegions, Pixels, Region, compare_images,
     config::{Mode, Zone},
     decode::{DecodeError, decode_rgba, fits_budget},
     masking::{apply_masks, resolve_zones},
 };
-use image::{ExtendedColorType, ImageEncoder, RgbaImage, codecs::png::PngEncoder};
+use image::{
+    ExtendedColorType, ImageEncoder, RgbaImage,
+    codecs::png::{CompressionType, FilterType, PngEncoder},
+};
 
 use crate::{
     case::{CaseErrorKind, Metrics, RegionMetrics, text},
@@ -34,7 +37,7 @@ pub enum Candidate<'a> {
     },
 }
 
-impl Candidate<'_> {
+impl<'a> Candidate<'a> {
     /// The candidate as PNG: the given bytes, or the raw pixels encoded (`None` for pixels over
     /// the decoding budget, which no comparison could read back, of the wrong length, or an
     /// encoder failure).
@@ -51,19 +54,24 @@ impl Candidate<'_> {
                 if !fits_budget(width, height) || !is_rgba_len(width, height, pixels.len()) {
                     return None;
                 }
-                let mut png = Vec::new();
-                PngEncoder::new(&mut png)
-                    .write_image(pixels, width, height, ExtendedColorType::Rgba8)
+                encode(pixels, width, height)
                     .ok()
-                    .map(|()| std::borrow::Cow::Owned(png))
+                    .map(std::borrow::Cow::Owned)
             }
         }
     }
 
-    /// The decoded image, within the engine's decoding budget.
-    fn image(self) -> Result<RgbaImage, CompareError> {
+    /// The pixels, within the engine's decoding budget: a PNG decoded into `decoded`, raw pixels
+    /// as they are (never copied).
+    fn pixels<'s>(self, decoded: &'s mut Option<RgbaImage>) -> Result<Pixels<'s>, CompareError>
+    where
+        'a: 's,
+    {
         match self {
-            Self::Png(png) => decode_rgba(png).map_err(CompareError::Candidate),
+            Self::Png(png) => {
+                let image = decode_rgba(png).map_err(CompareError::Candidate)?;
+                Ok(Pixels::from(&*decoded.insert(image)))
+            }
             Self::Rgba {
                 width,
                 height,
@@ -75,16 +83,11 @@ impl Candidate<'_> {
                         height,
                     }));
                 }
-                // Checked before the copy, so a wrong length costs nothing.
-                if !is_rgba_len(width, height, pixels.len()) {
-                    return Err(CompareError::CandidatePixels {
-                        width,
-                        height,
-                        len: pixels.len(),
-                    });
-                }
-                // The length is right, so this cannot fail.
-                RgbaImage::from_raw(width, height, pixels.to_vec()).ok_or(CompareError::Internal)
+                Pixels::new(pixels, width, height).ok_or(CompareError::CandidatePixels {
+                    width,
+                    height,
+                    len: pixels.len(),
+                })
             }
         }
     }
@@ -250,7 +253,8 @@ pub fn compare(
     text: Option<Text<'_>>,
 ) -> Result<Comparison, CompareError> {
     let golden = decode_rgba(golden).map_err(CompareError::Golden)?;
-    let candidate = candidate.image()?;
+    let mut decoded = None;
+    let candidate = candidate.pixels(&mut decoded)?;
     let (width, height) = golden.dimensions();
     let same_size = golden.dimensions() == candidate.dimensions();
     let (masks, clamped_masks) = if same_size {
@@ -279,7 +283,7 @@ pub fn compare(
             })
             .ok_or(CompareError::Internal)
     };
-    let compared = match compare_images(&golden, &candidate, mode, &config, &regions) {
+    let compared = match compare_images(&golden, candidate, mode, &config, &regions) {
         ComparisonResult::Match { measurement } => {
             let (metrics, regions) = measured(measurement)?;
             Compared::Match { metrics, regions }
@@ -329,13 +333,18 @@ fn clip(region: &Region, width: u32, height: u32) -> Option<Region> {
 /// # Errors
 /// Returns the encoder's error.
 pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, image::ImageError> {
-    let mut bytes = Vec::new();
-    image
-        .write_to(
-            &mut std::io::Cursor::new(&mut bytes),
-            image::ImageFormat::Png,
-        )
-        .map(|()| bytes)
+    encode(image.as_raw(), image.width(), image.height())
+}
+
+/// Encodes the straight RGBA8 `pixels` of a `width` x `height` image as PNG with fast compression
+/// and adaptive filters (`Up` alone encodes a diff in half the time but makes it 1.3-3x larger,
+/// written twice per failure): the one PNG encoder of the comparisons (the candidate kept for
+/// `gleon approve`, the diff, [`encode_png`]).
+fn encode(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, image::ImageError> {
+    let mut png = Vec::new();
+    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive)
+        .write_image(pixels, width, height, ExtendedColorType::Rgba8)
+        .map(|()| png)
 }
 
 #[cfg(all(test, not(miri)))]

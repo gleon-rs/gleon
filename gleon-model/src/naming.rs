@@ -1,7 +1,10 @@
 //! Test name normalization and validation shared by the CLI scanner and manifest layers and by
 //! other integrations (a golden's case report is named after its test name).
 
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+};
 
 /// Directories unconditionally pruned during workspace traversal to prevent hanging or
 /// indexing build artifacts across frontend ecosystems (Flutter, Android, iOS, Web/Node, Rust, Go).
@@ -85,18 +88,36 @@ pub fn validate_canonical_test_name(name: &str) -> Result<(), TestNameError> {
     validate_test_name(name)
 }
 
+/// `root` joined with the `/`-separated relative `path`, segment by segment (so the platform's
+/// separator joins them).
+#[must_use]
+pub fn join_relative(root: &Path, path: &str) -> PathBuf {
+    let mut joined = root.to_path_buf();
+    for segment in path.split('/') {
+        joined.push(segment);
+    }
+    joined
+}
+
 /// Whether `path` is a portable path inside a workspace: `/`-separated names of ASCII letters,
 /// digits, `.`, `_` and `-`, without empty, `.` or `..` names (no absolute paths, no drive
 /// letters, no way out).
 #[must_use]
 pub fn is_portable_relative_path(path: &str) -> bool {
+    is_portable_relative_path_with(path, b"")
+}
+
+/// [`is_portable_relative_path`] whose names may also hold the bytes of `extra` (the `+` and `=`
+/// of a platform key).
+#[must_use]
+pub fn is_portable_relative_path_with(path: &str, extra: &[u8]) -> bool {
     path.split('/').all(|name| {
         !name.is_empty()
             && name != "."
             && name != ".."
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            && name.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-') || extra.contains(&b)
+            })
     })
 }
 

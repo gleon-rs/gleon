@@ -60,11 +60,51 @@ jobs:
         # nextest does not run doctests.
         run: cargo test --workspace --all-features --doc
 
+      - name: 📖 Check documentation links
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --workspace --all-features --no-deps
+
       - name: 📤 Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  library:
+    # The configuration the Flutter package ships: `gleon-ffi` builds `gleon-engine` without its
+    # `parallel` feature (sequential comparisons), which the feature-unified workspace run above
+    # never compiles. Miri checks the unsafe boundary of the C ABI.
+    name: 🧩 Library configuration and Miri
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 🦀 Set up Rust (pinned nightly from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          components: clippy, miri
+
+      - name: 🔍 Lint the library crates without features
+        run: cargo clippy --locked -p gleon-engine -p gleon-ffi --all-targets -- -D warnings
+
+      - name: 🧪 Test the sequential engine (incl. the SSIM corpus)
+        run: cargo test --locked -p gleon-engine
+
+      - name: 🔬 Build the Miri sysroot
+        # The sysroot is the toolchain's own std, built from a manifest cargo generates: its
+        # warnings (`unused_dependencies` on nightly) are not ours, so the action's
+        # `CARGO_BUILD_WARNINGS=deny` would fail the build. The tests below still deny warnings.
+        run: cargo miri setup
+        env:
+          CARGO_BUILD_WARNINGS: warn
+
+      - name: 🔬 Run the ABI tests under Miri
+        run: cargo miri test --locked -p gleon-ffi --lib
 
   host-platforms:
     # The integration crates depend on the host (`std::env::consts`: per-platform golden

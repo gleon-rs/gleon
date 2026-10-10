@@ -130,6 +130,7 @@ impl From<&Cli> for gleon_core::context::ContextOptions {
             platform: cli.platform.clone(),
             branch: cli.branch.clone(),
             target_branch: cli.target_branch.clone(),
+            cli_version: Some(env!("CARGO_PKG_VERSION")),
         }
     }
 }

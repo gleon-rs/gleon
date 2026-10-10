@@ -14,7 +14,7 @@ workspace = true
 keygen = []
 
 [dependencies]
-gleon-engine = { path = "../gleon-engine" }
+gleon-engine = { path = "../gleon-engine", features = ["parallel", "phash"] }
 gleon-model = { path = "../gleon-model" }
 bytes = { workspace = true }
 chrono = { workspace = true }

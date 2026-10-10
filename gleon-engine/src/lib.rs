@@ -6,16 +6,81 @@
 pub mod config;
 pub mod decode;
 pub mod masking;
+mod par;
+#[cfg(feature = "phash")]
 pub mod phash;
 pub mod pixel;
 pub mod ssim;
 
 use image::RgbaImage;
-pub use phash::{calculate_hamming_distance, compute_phash};
-pub use pixel::{PixelRegions, TextAnalysis, TextTile, compare_pixels};
+#[cfg(feature = "phash")]
+pub use phash::compute_phash;
+pub use pixel::{PixelRegions, TextAnalysis, TextTile};
 pub use ssim::{Region, SsimAnalysis, SsimPolicy};
 
 use crate::config::{DiffConfig, Mode};
+
+/// Version of the engine's tolerant decisions: the SSIM policy, the text tiles of the pixel mode.
+///
+/// Bumped whenever verdicts can change for the same inputs. 3: a text tile always counts
+/// [`pixel::TEXT_TILE`] squared pixels, so a thin or edge-clipped text region no longer turns one
+/// differing pixel into a large share.
+pub const POLICY_VERSION: u32 = 3;
+
+/// The straight (not premultiplied) RGBA8 pixels of an image, row by row, borrowed: a decoded
+/// golden (`&RgbaImage`) or the raw capture of an integration, compared without a copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pixels<'a> {
+    raw: &'a [u8],
+    width: u32,
+    height: u32,
+}
+
+impl<'a> Pixels<'a> {
+    /// The `width` x `height` image of `raw`, or `None` unless `raw` holds exactly its
+    /// `width * height * 4` bytes.
+    #[must_use]
+    pub fn new(raw: &'a [u8], width: u32, height: u32) -> Option<Self> {
+        (u64::try_from(raw.len()).ok() == Some(u64::from(width) * u64::from(height) * 4))
+            .then_some(Self { raw, width, height })
+    }
+
+    /// The bytes, `width * height * 4` of them.
+    #[must_use]
+    pub const fn raw(self) -> &'a [u8] {
+        self.raw
+    }
+
+    /// Width and height in pixels.
+    #[must_use]
+    pub const fn dimensions(self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// An owned copy, for the comparisons that paint over pixels (SSIM masks).
+    ///
+    /// # Panics
+    /// Never: the length was checked when the view was made.
+    #[must_use]
+    pub fn to_image(self) -> RgbaImage {
+        #[expect(
+            clippy::expect_used,
+            reason = "the length was checked when the view was made"
+        )]
+        RgbaImage::from_raw(self.width, self.height, self.raw.to_vec())
+            .expect("the view holds width * height * 4 bytes")
+    }
+}
+
+impl<'a> From<&'a RgbaImage> for Pixels<'a> {
+    fn from(image: &'a RgbaImage) -> Self {
+        Self {
+            raw: image.as_raw(),
+            width: image.width(),
+            height: image.height(),
+        }
+    }
+}
 
 /// What a comparison measured, reported for matches and mismatches alike, so callers can see how
 /// much headroom a passing comparison had.
@@ -104,8 +169,8 @@ pub enum ComparisonResult {
 }
 
 fn execute_pixel_comparison(
-    baseline: &RgbaImage,
-    actual: &RgbaImage,
+    baseline: Pixels<'_>,
+    actual: Pixels<'_>,
     threshold: f64,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult {
@@ -151,17 +216,16 @@ fn execute_pixel_comparison(
 /// # Panics
 /// Panics if a region reaches beyond the images.
 #[must_use]
-pub fn compare_images(
-    baseline: &RgbaImage,
-    actual: &RgbaImage,
+pub fn compare_images<'a>(
+    baseline: impl Into<Pixels<'a>>,
+    actual: impl Into<Pixels<'a>>,
     mode: Mode,
     config: &DiffConfig,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult {
-    let w1 = baseline.width();
-    let h1 = baseline.height();
-    let w2 = actual.width();
-    let h2 = actual.height();
+    let (baseline, actual) = (baseline.into(), actual.into());
+    let (w1, h1) = baseline.dimensions();
+    let (w2, h2) = actual.dimensions();
 
     if w1 != w2 || h1 != h2 {
         return ComparisonResult::DimensionMismatch {
@@ -176,30 +240,21 @@ pub fn compare_images(
             ComparisonResult::TooLarge { size: (w1, h1) }
         }
         Mode::Ssim => {
-            let masked = |image: &RgbaImage| {
-                let mut image = image.clone();
-                masking::paint_black(&mut image, regions.masks);
-                image
+            let policy = SsimPolicy {
+                min_similarity: config.min_similarity,
+                color_tolerance: config.color_tolerance,
             };
-            let (baseline, actual) = if regions.masks.is_empty() {
-                (
-                    std::borrow::Cow::Borrowed(baseline),
-                    std::borrow::Cow::Borrowed(actual),
-                )
+            let analysis = if regions.masks.is_empty() {
+                ssim::analyze(baseline, actual, &policy)
             } else {
-                (
-                    std::borrow::Cow::Owned(masked(baseline)),
-                    std::borrow::Cow::Owned(masked(actual)),
-                )
+                // Copies only here: the masks are painted black in both images.
+                let masked = |pixels: Pixels<'_>| {
+                    let mut image = pixels.to_image();
+                    masking::paint_black(&mut image, regions.masks);
+                    image
+                };
+                ssim::analyze(&masked(baseline), &masked(actual), &policy)
             };
-            let analysis = ssim::analyze(
-                &baseline,
-                &actual,
-                &SsimPolicy {
-                    min_similarity: config.min_similarity,
-                    color_tolerance: config.color_tolerance,
-                },
-            );
             let measurement = Measurement::from(&analysis);
             analysis
                 .diff_image
@@ -477,7 +532,13 @@ mod tests {
                     diff_count: 1,
                     text: None
                 },
-                diff_image: compare_pixels(&img1, &img2).1,
+                diff_image: ImageBuffer::from_fn(2, 2, |x, y| {
+                    if (x, y) == (0, 0) {
+                        Rgba([255, 0, 255, 255])
+                    } else {
+                        Rgba([127, 0, 0, 255])
+                    }
+                }),
             }
         );
     }

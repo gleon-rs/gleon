@@ -246,7 +246,7 @@ impl DiffRun<'_> {
                 // `gleon diff` sees no text: its screenshots are compared strictly.
                 text_tolerance: None,
                 masks,
-                policy_version: gleon_engine::ssim::POLICY_VERSION,
+                policy_version: gleon_engine::POLICY_VERSION,
             },
             outcome: judged.outcome,
             error_kind: judged.error_kind,
@@ -347,10 +347,7 @@ impl DiffRun<'_> {
 /// file stay.
 fn clear_previous_run(runs_latest: &Path, platform_key: &PlatformKey) -> Result<(), DiffOpError> {
     for output in ReportGenerator::OUTPUT_FILES {
-        match std::fs::remove_file(runs_latest.join(output)) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(CoreError::Io(e).into()),
-            _ => {}
-        }
+        gleon_model::fs::remove_if_exists(&runs_latest.join(output)).map_err(CoreError::Io)?;
     }
     remove_reports_of(runs_latest, CLI_TOOL, platform_key)?;
     Ok(())

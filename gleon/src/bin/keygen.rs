@@ -59,7 +59,7 @@ enum Commands {
         license_id: Option<String>,
 
         /// 32-byte Ed25519 signing key in hex, base64, or file path prefixed with '@'.
-        /// Note: Prefer using `GLEON_SIGNING_KEY`, '@<path>', or '-' (stdin) to avoid leaking secrets in process lists.
+        /// Note: Prefer using `GLEON_SIGNING_KEY`, '@PATH', or '-' (stdin) to avoid leaking secrets in process lists.
         #[arg(
             long,
             env = "GLEON_SIGNING_KEY",

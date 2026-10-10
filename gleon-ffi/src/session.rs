@@ -28,7 +28,8 @@ use crate::{error::Failure, text};
 #[derive(Debug, Clone, Default)]
 pub struct SessionOptions {
     /// Whether goldens belong to workspaces: the nearest directory above a golden with
-    /// `.gleon/gleon.yaml`. Without, every golden compares exactly and nothing is recorded.
+    /// `.gleon/gleon.yaml`. Without, every golden compares under the call's tolerance, else
+    /// exactly, and nothing is recorded.
     pub finds_workspaces: bool,
     /// Raw `GLEON_METRICS` value, `None` when unset.
     pub metrics_env: Option<String>,
@@ -69,12 +70,6 @@ pub struct ArtifactNames {
 impl ArtifactNames {
     /// The placeholder replaced by the golden's name.
     pub const PLACEHOLDER: &str = "{name}";
-
-    /// `pattern` for the golden `name`.
-    #[must_use]
-    pub fn file(pattern: &str, name: &str) -> String {
-        pattern.replace(Self::PLACEHOLDER, name)
-    }
 
     /// Checks that each pattern names one file of the failures directory per golden, distinct
     /// from the others even on case-insensitive file systems (macOS, Windows).
@@ -163,13 +158,14 @@ impl Workspace {
         self.root.join(".gleon")
     }
 
+    /// `<root>/.gleon/gleon.yaml`.
+    fn config_path(&self) -> PathBuf {
+        self.gleon_dir().join("gleon.yaml")
+    }
+
     /// `.gleon/gleon.yaml` as shown in messages, with the separators of the platform.
     pub fn config_display(&self) -> String {
-        self.root
-            .join(".gleon")
-            .join("gleon.yaml")
-            .display()
-            .to_string()
+        self.config_path().display().to_string()
     }
 
     /// Creates `.gleon/.gitignore` (the lines of `gleon init`, which ignore `runs/`) unless it
@@ -193,8 +189,8 @@ impl Workspace {
     /// to the golden itself; compiling happens outside the lock. `artifacts_env` is the session's
     /// `GLEON_ARTIFACTS_DIR`, the same for every call.
     fn compiled(&self, artifacts_env: Option<&ArtifactsDir>) -> Result<Arc<Compiled>, String> {
-        let path = self.gleon_dir().join("gleon.yaml");
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read it: {e}"))?;
+        let text = std::fs::read_to_string(self.config_path())
+            .map_err(|e| format!("cannot read it: {e}"))?;
         let cached = self
             .cache()
             .as_ref()
@@ -216,11 +212,10 @@ impl Workspace {
         self.config.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The path of `file` relative to the root, `/`-separated with the case as on disk, or `None`
-    /// when it lies outside. The file and its directories may be missing (a new golden). Windows
-    /// paths compare case-insensitively.
+    /// The path of the canonical `file` ([`canonical_file`]) relative to the root, `/`-separated
+    /// with the case as on disk, or `None` when it lies outside. The file and its directories may
+    /// be missing (a new golden). Windows paths compare case-insensitively.
     pub fn relative_path(&self, file: &Path) -> Option<String> {
-        let file = canonical_file(file).ok()?;
         let mut inside = file.components();
         for root_part in self.root.components() {
             let part = inside.next()?;
@@ -241,7 +236,7 @@ impl Workspace {
 
 fn compile(text: &str, artifacts_env: Option<&ArtifactsDir>) -> Result<Arc<Compiled>, String> {
     let config = GleonConfig::from_yaml_str(text).map_err(|e| e.to_string())?;
-    let rules = RuleSet::new(&config).map_err(|e| format!("invalid glob set: {e}"))?;
+    let rules = RuleSet::new(&config);
     Ok(Arc::new(Compiled {
         metrics: config.metrics,
         artifacts: Arc::new(config.artifacts_dir(artifacts_env, None)),
@@ -417,11 +412,9 @@ impl Goldens {
 }
 
 impl Plan {
-    /// The golden and how to record its case report, when metrics are on.
-    pub fn recorded(&self) -> Option<(&InWorkspace, Record)> {
-        self.in_workspace
-            .as_ref()
-            .and_then(|golden| golden.record.map(|record| (golden, record)))
+    /// How to record the case report, when metrics are on.
+    pub fn record(&self) -> Option<Record> {
+        self.in_workspace.as_ref().and_then(|golden| golden.record)
     }
 }
 
@@ -509,13 +502,10 @@ impl Session {
         .then_some(text::MISSING_WORKSPACE_WARNING)
     }
 
-    /// The workspace of `golden` (which may be missing): the nearest directory above it with
-    /// `.gleon/gleon.yaml`, looked up once per directory.
+    /// The workspace of the canonical `golden` (which may be missing): the nearest directory
+    /// above it with `.gleon/gleon.yaml`, looked up once per directory.
     fn workspace_of(&self, golden: &Path) -> Option<Arc<Workspace>> {
-        if !self.finds_workspaces {
-            return None;
-        }
-        let dir = canonical_file(golden).ok()?.parent()?.to_path_buf();
+        let dir = golden.parent()?.to_path_buf();
         if let Some(known) = self.lock().by_dir.get(&dir) {
             return known.clone();
         }
@@ -556,10 +546,24 @@ impl Session {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
         }
-        let workspace = self.workspace_of(golden);
+        // Resolved once: the workspace lookup and the path inside it both need it. A path that
+        // cannot be resolved fails the call instead of silently comparing outside a workspace.
+        let canonical = if self.finds_workspaces {
+            Some(canonical_file(golden).map_err(|e| {
+                Failure::io(format!(
+                    "gleon: cannot resolve the golden {}: {e}",
+                    golden.display()
+                ))
+            })?)
+        } else {
+            None
+        };
+        let workspace = canonical
+            .as_deref()
+            .and_then(|canonical| Some((self.workspace_of(canonical)?, canonical)));
         let has_workspace = workspace.is_some();
         let (goldens, rule) = match workspace {
-            Some(workspace) => self.rule(workspace, golden)?,
+            Some((workspace, canonical)) => self.rule(workspace, golden, canonical)?,
             None => (Goldens::shared(golden), None),
         };
         let (rule_tolerance, rule_text, in_workspace) = match rule {
@@ -584,16 +588,17 @@ impl Session {
         })
     }
 
-    /// The golden files of `golden` in `workspace` and its rule; the shared golden alone and
-    /// `None` outside the workspace or when no rule applies. Rules match the shared golden, so
-    /// they are the same on every platform; only a golden a rule matches follows the per-platform
-    /// layout of `fallback_platform`.
+    /// The golden files of `golden` (`canonical` resolved) in `workspace` and its rule; the shared
+    /// golden alone and `None` outside the workspace or when no rule applies. Rules match the
+    /// shared golden, so they are the same on every platform; only a golden a rule matches follows
+    /// the per-platform layout of `fallback_platform`.
     fn rule(
         &self,
         workspace: Arc<Workspace>,
         golden: &Path,
+        canonical: &Path,
     ) -> Result<(Goldens, Option<Rule>), Failure> {
-        let Some(shared_path) = workspace.relative_path(golden) else {
+        let Some(shared_path) = workspace.relative_path(canonical) else {
             return Ok((Goldens::shared(golden), None));
         };
         let config_error = |message: String| {
@@ -630,10 +635,7 @@ impl Session {
                 let own_path = platform::platform_golden(&shared_path, PlatformKey::host());
                 // From the canonical path, like the one `gleon approve` writes: the integration's
                 // may lead through a symbolic link.
-                let mut target = workspace.root.clone();
-                for segment in own_path.split('/') {
-                    target.push(segment);
-                }
+                let target = gleon_model::naming::join_relative(&workspace.root, &own_path);
                 let fallback = Fallback {
                     golden: golden.to_path_buf(),
                     path: shared_path,
@@ -786,15 +788,57 @@ metrics:
         );
     }
 
+    /// An unreadable directory is an I/O error, not a golden outside any workspace (which would
+    /// compare exact and warn about a missing `.gleon/gleon.yaml`).
+    #[cfg(unix)]
+    #[test]
+    fn test_an_unresolvable_golden_fails_instead_of_leaving_the_workspace() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_dir, root) = workspace(YAML, "a.png");
+        let locked = root.join("test/goldens");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged process (root in a container) reads it anyway: nothing to test there.
+        let is_readable = fs::canonicalize(locked.join("a.png")).is_ok();
+        let planned = session(None).plan(&locked.join("a.png"), None, vec![], None);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !is_readable {
+            let failure = planned.map(drop).unwrap_err();
+            assert_eq!(failure.kind, ErrorKind::Io);
+            assert!(
+                failure
+                    .message
+                    .starts_with("gleon: cannot resolve the golden"),
+                "{}",
+                failure.message
+            );
+        }
+    }
+
     #[test]
     fn test_a_golden_outside_the_given_workspace_has_no_rule() {
         let (_dir, root) = workspace(YAML, "Clock.png");
         let other = tempfile::tempdir().unwrap();
+        let golden = other.path().join("Clock.png");
         let rule = session(None).rule(
             Arc::new(Workspace::new(root)),
-            &other.path().join("Clock.png"),
+            &golden,
+            &canonical_file(&golden).unwrap(),
         );
         assert!(matches!(rule, Ok((_, None))));
+    }
+
+    /// Only the CLI enforces `required_version`: an integration plans with a config that asks
+    /// for any CLI version (its syntax is still checked by the parse).
+    #[test]
+    fn test_integrations_do_not_enforce_the_required_version() {
+        let yaml = YAML.replace(">=0.1.0", ">=99.0.0");
+        let (_dir, root) = workspace(&yaml, "a.png");
+        let plan = session(None)
+            .plan(&root.join("test/goldens/a.png"), None, vec![], None)
+            .unwrap();
+        assert!(plan.in_workspace.is_some(), "the rule applies");
     }
 
     #[test]
@@ -804,7 +848,7 @@ metrics:
         let plan = session(Some("0"))
             .plan(&golden, None, vec![], None)
             .unwrap();
-        assert!(plan.recorded().is_none());
+        assert!(plan.record().is_none());
         assert!(
             plan.in_workspace.is_some(),
             "images are kept without metrics"
@@ -817,7 +861,7 @@ metrics:
         let plan = session
             .plan(&off_root.join("test/goldens/a.png"), None, vec![], None)
             .unwrap();
-        assert!(plan.recorded().unwrap().1.console, "console defaults to on");
+        assert!(plan.record().unwrap().console, "console defaults to on");
     }
 
     #[test]
@@ -1103,9 +1147,8 @@ metrics:
             session
                 .plan(&golden, None, vec![], None)
                 .unwrap()
-                .recorded()
+                .record()
                 .unwrap()
-                .1
                 .console
         };
         assert!(!console(&session));

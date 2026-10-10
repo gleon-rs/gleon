@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "gleon version tag to use (e.g. v0.2.2 or latest)"
+        description: "gleon version tag to use (e.g. v0.3.0 or latest)"
         type: string
         default: "latest"
       checksum:

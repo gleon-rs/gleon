@@ -18,7 +18,6 @@ workspace = true
 chrono = { workspace = true }
 gleon-engine = { path = "../gleon-engine" }
 gleon-model = { path = "../gleon-model" }
-rayon = { workspace = true }
 safer-ffi = { workspace = true }
 
 [dev-dependencies]

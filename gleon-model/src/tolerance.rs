@@ -53,8 +53,7 @@ pub enum Tolerance {
 }
 
 impl Tolerance {
-    /// The tolerance a `gleon.yaml` screenshot rule describes (`anti_alias` is not used by the
-    /// engine and has no counterpart).
+    /// The tolerance a `gleon.yaml` screenshot rule describes.
     #[must_use]
     pub const fn from_rule(mode: Mode, diff: &DiffConfig) -> Self {
         match mode {
@@ -121,23 +120,26 @@ impl Tolerance {
         }
     }
 
+    /// The largest share of differing pixels a pixel comparison allows: exact is a zero
+    /// threshold (and so is SSIM, which has none).
+    #[must_use]
+    pub const fn max_diff_ratio(&self) -> f64 {
+        match *self {
+            Self::Pixel { max_diff_ratio } => max_diff_ratio,
+            Self::Exact {} | Self::Ssim { .. } => 0.0,
+        }
+    }
+
     /// The engine mode and configuration implementing this tolerance (exact is pixel mode with a
     /// zero threshold).
     #[must_use]
     pub fn engine_config(&self) -> (Mode, DiffConfig) {
         let base = DiffConfig::default();
         match *self {
-            Self::Exact {} => (
+            Self::Exact {} | Self::Pixel { .. } => (
                 Mode::Pixel,
                 DiffConfig {
-                    threshold: 0.0,
-                    ..base
-                },
-            ),
-            Self::Pixel { max_diff_ratio } => (
-                Mode::Pixel,
-                DiffConfig {
-                    threshold: max_diff_ratio,
+                    threshold: self.max_diff_ratio(),
                     ..base
                 },
             ),
@@ -320,7 +322,6 @@ mod tests {
             threshold: 0.05,
             min_similarity: 0.7,
             color_tolerance: 12.0,
-            ..DiffConfig::default()
         };
         let pixel = Tolerance::from_rule(Mode::Pixel, &diff);
         assert_eq!(
@@ -346,7 +347,6 @@ mod tests {
             threshold: -0.0,
             min_similarity: -0.0,
             color_tolerance: -0.0,
-            ..DiffConfig::default()
         };
         assert!(matches!(
             Tolerance::from_rule(Mode::Pixel, &zeros),

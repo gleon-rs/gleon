@@ -44,20 +44,36 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Verdict {
+    /// Invalid input, config, image or I/O failure (see [`ErrorKind`]); never a pass. Zero, so
+    /// a summary the library never wrote reads as an error.
+    Error = 0,
     /// Byte-identical PNGs.
-    Identical = 0,
+    Identical = 1,
     /// Within the tolerance.
-    Match = 1,
+    Match = 2,
     /// Beyond the tolerance; the message says why.
-    Mismatch = 2,
+    Mismatch = 3,
     /// Different image sizes.
-    DimensionMismatch = 3,
-    /// Invalid input, config, image or I/O failure (see [`ErrorKind`]); never a pass.
-    Error = 4,
+    DimensionMismatch = 4,
     /// The golden was written (update mode).
     Updated = 5,
     /// The golden does not exist.
     Missing = 6,
+}
+
+impl Verdict {
+    /// The verdict of a call that ended with `outcome`.
+    const fn of(outcome: CaseOutcome) -> Self {
+        match outcome {
+            CaseOutcome::Identical => Self::Identical,
+            CaseOutcome::Match => Self::Match,
+            CaseOutcome::Mismatch => Self::Mismatch,
+            CaseOutcome::DimensionMismatch => Self::DimensionMismatch,
+            CaseOutcome::Error => Self::Error,
+            CaseOutcome::Updated => Self::Updated,
+            CaseOutcome::Missing => Self::Missing,
+        }
+    }
 }
 
 /// What the integration gets back: the verdict and the texts to show.
@@ -190,12 +206,9 @@ fn update(
     };
     match written {
         // After an update the golden is the candidate.
-        Ok(()) => call(Some(candidate)).finish(
-            CaseOutcome::Updated,
-            Details::default(),
-            Verdict::Updated,
-            String::new,
-        ),
+        Ok(()) => {
+            call(Some(candidate)).finish(CaseOutcome::Updated, Details::default(), String::new)
+        }
         Err(e) => call(current.as_deref()).error(
             Failure::io(format!(
                 "gleon: cannot write the golden {}: {e}",
@@ -227,19 +240,21 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
             Failure::io(text::could_not_compare(&call.compared_uri(), reason)),
             reason.clone(),
         ),
-        // The candidate is kept for `gleon approve`, unless it is no PNG at all.
+        // The candidate is kept for `gleon approve` (only inside a workspace, so raw pixels are
+        // never encoded for nothing), unless it is no PNG at all.
         Ok(None) => call.finish(
             CaseOutcome::Missing,
             Details {
                 images: ArtifactImages {
-                    candidate: call
-                        .candidate_png()
+                    candidate: plan
+                        .in_workspace
+                        .as_ref()
+                        .and_then(|_| call.candidate_png())
                         .filter(|png| case::png_size(png).is_some()),
                     ..ArtifactImages::default()
                 },
                 ..Details::default()
             },
-            Verdict::Missing,
             || call.missing_message(),
         ),
         // Identical encodings are identical pixels: no decoding at all, so the masks are checked
@@ -248,13 +263,8 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
             let clamped = case::png_size(golden).map_or(0, |(width, height)| {
                 clamped_zones(&plan.masks, width, height)
             });
-            call.finish(
-                CaseOutcome::Identical,
-                Details::default(),
-                Verdict::Identical,
-                String::new,
-            )
-            .warn(clamped_masks(request.golden_uri, clamped))
+            call.finish(CaseOutcome::Identical, Details::default(), String::new)
+                .warn(clamped_masks(request.golden_uri, clamped))
         }
         Ok(Some(golden)) => {
             let text = call.text().map(|tolerance| Text {
@@ -328,7 +338,6 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
                     images: call.pass_images(&metrics),
                     ..Details::default()
                 },
-                Verdict::Match,
                 String::new,
             )
             .warn(clamped_masks(uri, clamped)),
@@ -341,12 +350,9 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
                 images: call.images(None),
                 ..Details::default()
             };
-            call.finish(
-                CaseOutcome::DimensionMismatch,
-                details,
-                Verdict::DimensionMismatch,
-                || call.failure(&reason, None),
-            )
+            call.finish(CaseOutcome::DimensionMismatch, details, || {
+                call.failure(&reason, None)
+            })
         }
         Compared::Mismatch {
             metrics,
@@ -367,7 +373,7 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
                 images: call.images(Some(&diff_png)),
                 ..Details::default()
             };
-            call.finish(CaseOutcome::Mismatch, details, Verdict::Mismatch, || {
+            call.finish(CaseOutcome::Mismatch, details, || {
                 call.failure(&reason, Some(&diff_png))
             })
             .warn(clamped_masks(uri, clamped))
@@ -398,14 +404,16 @@ struct Call<'a> {
     /// The shared golden of another platform, when `golden` is it because this platform has no
     /// own golden yet.
     fallback: Option<&'a Fallback>,
-    /// The PNG of raw candidate pixels, encoded once when a failure keeps the candidate.
+    /// The PNG of raw candidate pixels, encoded once when the candidate is kept (a failure, or
+    /// a recorded pass against another platform's golden).
     encoded: OnceCell<Option<Vec<u8>>>,
     started: Instant,
 }
 
 impl Call<'_> {
     /// The candidate as PNG: the given bytes, or the raw pixels encoded on first use (`None` if
-    /// they cannot be). Only failures need it, so a passing raw candidate is never encoded.
+    /// they cannot be). Only kept candidates need it ([`Details::images`]), so a raw candidate
+    /// is encoded only for a failure or a recorded pass against another platform's golden.
     fn candidate_png(&self) -> Option<&[u8]> {
         match self.request.candidate {
             Candidate::Png(png) => Some(png),
@@ -471,7 +479,7 @@ impl Call<'_> {
     /// golden that differs from it, so `gleon approve` can make it this platform's own; none
     /// otherwise (approving a pass without differences copies the compared golden).
     fn pass_images(&self, metrics: &Metrics) -> ArtifactImages<'_> {
-        let keeps = self.fallback.is_some() && self.plan.recorded().is_some() && metrics.differs();
+        let keeps = self.fallback.is_some() && self.plan.record().is_some() && metrics.differs();
         ArtifactImages {
             candidate: keeps.then(|| self.candidate_png()).flatten(),
             ..ArtifactImages::default()
@@ -492,14 +500,13 @@ impl Call<'_> {
     }
 
     /// Keeps the images of `details` in the artifacts directory and records the case report (and
-    /// console line) when the plan asks for them, then finishes with `verdict` and the message
-    /// built by `message`; `message` runs last, so the integration's failure artifacts are written
-    /// after the report.
+    /// console line) when the plan asks for them, then finishes with the verdict of `outcome` and
+    /// the message built by `message`; `message` runs last, so the integration's failure artifacts
+    /// are written after the report.
     fn finish(
         &self,
         outcome: CaseOutcome,
         details: Details<'_>,
-        verdict: Verdict,
         message: impl FnOnce() -> String,
     ) -> Finished {
         // The comparison itself, not the writing of its outputs.
@@ -511,7 +518,7 @@ impl Call<'_> {
         };
         let recorded = self.record(outcome, details, artifacts, total);
         let finished = Finished {
-            verdict,
+            verdict: Verdict::of(outcome),
             error_kind: ErrorKind::None,
             message: message(),
             console: String::new(),
@@ -539,8 +546,14 @@ impl Call<'_> {
         };
         Finished {
             error_kind: kind,
-            ..self.finish(CaseOutcome::Error, details, Verdict::Error, || message)
+            ..self.finish(CaseOutcome::Error, details, || message)
         }
+    }
+
+    /// Whether a call ending with `outcome` records its case report: always for a failure, for a
+    /// pass only with metrics.
+    fn records(&self, outcome: CaseOutcome) -> bool {
+        self.plan.record().is_some() || outcome.is_failure()
     }
 
     /// The golden and candidate of this call plus `diff_png`, as images to keep.
@@ -557,7 +570,7 @@ impl Call<'_> {
     /// warning when it cannot, since the writes themselves may still succeed.
     fn ensure_gitignore(&self, outcome: CaseOutcome) -> Option<String> {
         let golden = self.plan.in_workspace.as_ref()?;
-        if golden.record.is_none() && !outcome.is_failure() {
+        if !self.records(outcome) {
             return None;
         }
         golden.workspace.ensure_gitignore().err().map(|e| {
@@ -605,11 +618,11 @@ impl Call<'_> {
         artifacts: Option<Artifacts>,
         total: Duration,
     ) -> Result<String, String> {
-        let record = self.plan.recorded().map(|(_, record)| record);
+        let record = self.plan.record();
         let Some(golden) = self.plan.in_workspace.as_ref() else {
             return Ok(String::new());
         };
-        if record.is_none() && !outcome.is_failure() {
+        if !self.records(outcome) {
             // A pass without metrics records nothing, but the report of an earlier failure of
             // this golden on this platform must not outlive it.
             let stale = CaseReport::path(
@@ -617,13 +630,14 @@ impl Call<'_> {
                 PlatformKey::host(),
                 &golden.name,
             );
-            return match fs::remove_file(&stale) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(format!(
-                    "gleon: cannot remove the case report {}: {e}",
-                    stale.display()
-                )),
-                _ => Ok(String::new()),
-            };
+            return gleon_model::fs::remove_if_exists(&stale)
+                .map(|()| String::new())
+                .map_err(|e| {
+                    format!(
+                        "gleon: cannot remove the case report {}: {e}",
+                        stale.display()
+                    )
+                });
         }
         let fallback = self.fallback.map(|fallback| fallback.path.clone());
         let console = if record.is_some_and(|record| record.console) {
@@ -660,22 +674,14 @@ impl Call<'_> {
             comparison: case::Comparison {
                 tolerance: self.plan.tolerance,
                 masks: self.plan.masks.clone(),
-                policy_version: gleon_engine::ssim::POLICY_VERSION,
+                policy_version: gleon_engine::POLICY_VERSION,
                 text_tolerance: self.text(),
             },
             outcome,
             error_kind: details.error_kind,
             message: details.message,
             metrics: details.metrics,
-            regions: if details.regions.is_empty() {
-                details
-                    .metrics
-                    .map(RegionMetrics::whole_image)
-                    .into_iter()
-                    .collect()
-            } else {
-                details.regions
-            },
+            regions: details.regions,
             artifacts,
             timings_ms: CaseTimings::new(total, details.native),
             run_id: self.session.run_id.clone(),
@@ -715,11 +721,8 @@ impl Call<'_> {
             (&names.candidate, self.candidate_png()),
         ];
         let written = files.into_iter().try_for_each(|(pattern, bytes)| {
-            let file = dir.join(ArtifactNames::file(pattern, &stem));
-            bytes.map_or_else(
-                || remove_stale(&file),
-                |bytes| gleon_model::fs::write_atomically(&file, bytes, Durability::Atomic),
-            )
+            let file = dir.join(pattern.replace(ArtifactNames::PLACEHOLDER, &stem));
+            gleon_model::fs::write_or_remove(&file, bytes, Durability::Atomic)
         });
         let feedback = written.map_or_else(
             |e| {
@@ -731,14 +734,6 @@ impl Call<'_> {
             |()| text::feedback(request.failures_dir),
         );
         text::failure(&self.compared_uri(), reason, &feedback, plan.has_workspace)
-    }
-}
-
-/// Removes `file`; a file that is not there is fine.
-fn remove_stale(file: &Path) -> io::Result<()> {
-    match fs::remove_file(file) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
     }
 }
 
@@ -873,6 +868,22 @@ mod tests {
             self.run_with(session, mode, candidate, None, vec![])
         }
 
+        /// A request for the golden of this fixture: no tolerance, masks or text of the call.
+        fn request<'a>(&'a self, mode: Mode, candidate: Candidate<'a>) -> Request<'a> {
+            Request {
+                mode,
+                golden_path: &self.golden,
+                golden_uri: "goldens/a.png",
+                failures_dir: &self.failures,
+                test_name: None,
+                candidate,
+                tolerance: None,
+                masks: Vec::new(),
+                text_regions: Vec::new(),
+                text: None,
+            }
+        }
+
         fn run_with(
             &self,
             session: &Session,
@@ -884,16 +895,10 @@ mod tests {
             run(
                 session,
                 &Request {
-                    mode,
-                    golden_path: &self.golden,
-                    golden_uri: "goldens/a.png",
-                    failures_dir: &self.failures,
                     test_name: Some("group test"),
-                    candidate: Candidate::Png(candidate),
                     tolerance,
                     masks,
-                    text_regions: Vec::new(),
-                    text: None,
+                    ..self.request(mode, Candidate::Png(candidate))
                 },
             )
         }
@@ -912,23 +917,18 @@ mod tests {
             text_regions: Vec<Region>,
             text: Option<TextTolerance>,
         ) -> Finished {
+            let raw = Candidate::Rgba {
+                width: candidate.width(),
+                height: candidate.height(),
+                pixels: candidate.as_raw(),
+            };
             run(
                 session,
                 &Request {
-                    mode: Mode::Compare,
-                    golden_path: &self.golden,
-                    golden_uri: "goldens/a.png",
-                    failures_dir: &self.failures,
-                    test_name: None,
-                    candidate: Candidate::Rgba {
-                        width: candidate.width(),
-                        height: candidate.height(),
-                        pixels: candidate.as_raw(),
-                    },
                     tolerance,
-                    masks: Vec::new(),
                     text_regions,
                     text,
+                    ..self.request(Mode::Compare, raw)
                 },
             )
         }
@@ -1201,28 +1201,15 @@ metrics:
     /// the worst tile. In SSIM mode text regions do not apply.
     #[test]
     fn test_text_regions_are_compared_under_the_text_tolerance() {
-        let white = Rgba([255, 255, 255, 255]);
-        let golden = image::RgbaImage::from_pixel(32, 16, white);
-        let text = vec![Region {
-            x: 0,
-            y: 0,
-            width: 16,
-            height: 16,
-        }];
-        // A changed glyph: 32 of the 256 pixels of the text's tile.
-        let mut glyph = golden.clone();
-        for i in 0..32 {
-            glyph.put_pixel(i % 16, i / 16, Rgba([0, 0, 0, 255]));
-        }
-        let mut outside = golden.clone();
-        outside.put_pixel(20, 3, Rgba([0, 0, 0, 255]));
+        let TextImages {
+            glyph,
+            outside,
+            regions: text,
+            ..
+        } = TextImages::new();
         let fixture_with = |yaml: &str| {
             let fixture = Fixture::new(Some(yaml));
-            fs::write(
-                &fixture.golden,
-                gleon_model::compare::encode_png(&golden).unwrap(),
-            )
-            .unwrap();
+            fs::write(&fixture.golden, TextImages::new().png()).unwrap();
             fixture
         };
 
@@ -1649,25 +1636,12 @@ metrics:
     fn test_update_mode_takes_a_png() {
         let fixture = Fixture::new(Some(METRICS));
         let pixels = image::RgbaImage::from_pixel(4, 4, RED);
-        let finished = run(
-            &fixture.session(None),
-            &Request {
-                mode: Mode::Update,
-                golden_path: &fixture.golden,
-                golden_uri: "goldens/a.png",
-                failures_dir: &fixture.failures,
-                test_name: None,
-                candidate: Candidate::Rgba {
-                    width: 4,
-                    height: 4,
-                    pixels: pixels.as_raw(),
-                },
-                tolerance: None,
-                masks: Vec::new(),
-                text_regions: Vec::new(),
-                text: None,
-            },
-        );
+        let raw = Candidate::Rgba {
+            width: 4,
+            height: 4,
+            pixels: pixels.as_raw(),
+        };
+        let finished = run(&fixture.session(None), &fixture.request(Mode::Update, raw));
         assert_eq!(finished.error_kind, ErrorKind::InvalidInput);
     }
 
@@ -2264,6 +2238,23 @@ metrics:
                 .contains("gleon: cannot write failure feedback to"),
             "{}",
             finished.message
+        );
+    }
+
+    /// A pass removes the report of an earlier failure; one that cannot be removed (a directory
+    /// in its place) is a warning, and the pass stays a pass.
+    #[test]
+    fn test_a_stale_report_that_cannot_be_removed_is_a_warning() {
+        let fixture = Fixture::new(Some(RULE_WITHOUT_METRICS));
+        fs::create_dir_all(fixture.case_path().join("inside")).unwrap();
+        let finished = fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, false));
+        assert_eq!(finished.verdict, Verdict::Identical);
+        assert!(
+            finished
+                .warning
+                .starts_with("gleon: cannot remove the case report"),
+            "{}",
+            finished.warning
         );
     }
 
