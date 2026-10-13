@@ -246,13 +246,13 @@ since they would never match). Every platform compares the same golden files:
 |---|---|---|
 | No `fallback_platform` | text ignored (`text_tolerance` 1) | writes the golden |
 | The `fallback_platform` | text compared (`text_tolerance` 0.05: a pixel of font-engine noise per 16x16 square passes, a changed digit fails) | writes the golden |
-| Any other platform | text ignored, layout exact; a failure names the `fallback_platform` | compares first: a pass writes nothing and passes, a golden that would change fails and writes nothing |
+| Any other platform | text ignored, layout exact; a failure names the `fallback_platform` | compares first: a pass leaves the golden as it is, a golden that would change fails and is not written |
 
 A `text_tolerance` set in the rule or the call applies on every platform, so `1` turns text
 comparison off on the `fallback_platform` too. A case of another platform names the compared
 golden in `golden.fallback` too; `gleon approve` skips the cases of integrations on other
-platforms than the `fallback_platform` with a warning, so a CI matrix approves the goldens of
-that platform only.
+platforms than the `fallback_platform` with a warning (matched like integrations match it: OS, and
+architecture when named), so a CI matrix approves the goldens of that platform only.
 
 ```bash
 gleon approve --from metrics-macos-arm64

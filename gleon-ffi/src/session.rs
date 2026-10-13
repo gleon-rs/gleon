@@ -117,24 +117,33 @@ struct Compiled {
     rules: RuleSet,
     /// The artifacts directory, `GLEON_ARTIFACTS_DIR` applied.
     artifacts: Arc<ArtifactsDir>,
-    /// How the goldens are laid out for this platform.
-    layout: Layout,
+    /// Where the regressions of the goldens its rules match are tracked, seen from here.
+    tracking: Tracking,
 }
 
-/// How the goldens of a workspace are laid out for the running platform (its
-/// `fallback_platform`).
-#[derive(Debug)]
-enum Layout {
-    /// No `fallback_platform`: one golden for every platform, recorded on an unknown one.
-    Shared,
-    /// This platform is the `fallback_platform`: it tracks the regressions of the goldens.
-    Primary,
-    /// Another platform: it compares the goldens of `platform` (the key of the
-    /// `fallback_platform`) with text ignored, and writes none that would change.
-    Foreign {
-        /// The `fallback_platform`, as its key.
-        platform: PlatformKey,
-    },
+/// Where the regressions of a golden are tracked (the `fallback_platform` of its workspace), seen
+/// from the running platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tracking {
+    /// No `fallback_platform`, or a golden no rule matches: recorded on an unknown platform.
+    Unknown,
+    /// This platform is the `fallback_platform`: text is compared by default
+    /// ([`gleon_model::tolerance::TextTolerance::OWN_PLATFORM`]).
+    Here,
+    /// On the platform of this key: text is ignored by default here, and update mode writes no
+    /// golden that would change.
+    Elsewhere(PlatformKey),
+}
+
+impl Tracking {
+    /// The `fallback_platform`, when it is another platform.
+    #[must_use]
+    pub const fn elsewhere(&self) -> Option<&PlatformKey> {
+        match self {
+            Self::Elsewhere(platform) => Some(platform),
+            Self::Unknown | Self::Here => None,
+        }
+    }
 }
 
 /// The config compiled from one version of the file (or why it is invalid).
@@ -241,13 +250,11 @@ fn compile(text: &str, artifacts_env: Option<&ArtifactsDir>) -> Result<Arc<Compi
         metrics: config.metrics,
         artifacts: Arc::new(config.artifacts_dir(artifacts_env, None)),
         rules,
-        layout: match &config.fallback_platform {
-            None => Layout::Shared,
-            Some(primary) => match primary.matches_host() {
-                Ok(true) => Layout::Primary,
-                Ok(false) => Layout::Foreign {
-                    platform: primary.key().map_err(|e| e.to_string())?,
-                },
+        tracking: match &config.fallback_platform {
+            None => Tracking::Unknown,
+            Some(tracking) => match tracking.matches_host() {
+                Ok(true) => Tracking::Here,
+                Ok(false) => Tracking::Elsewhere(tracking.key().map_err(|e| e.to_string())?),
                 Err(e) => return Err(format!("fallback_platform: {e}")),
             },
         },
@@ -366,39 +373,13 @@ pub struct Plan {
     /// The explicit tolerance of text: the call's, else the rule's (see
     /// [`TextTolerance::resolve`] for the default).
     pub text: Option<TextTolerance>,
-    /// The golden files of this platform.
-    pub goldens: Goldens,
+    /// Where the regressions of the golden are tracked, seen from here.
+    pub tracking: Tracking,
     /// Whether the golden belongs to a workspace (failure messages point at `.gleon/gleon.yaml`
     /// otherwise).
     pub has_workspace: bool,
     /// The golden inside its workspace, when a rule of the workspace matches it.
     pub in_workspace: Option<InWorkspace>,
-}
-
-/// The golden of a comparison on this platform: the one the integration passes, on every
-/// platform (`fallback_platform` only says which platform tracks its regressions).
-#[derive(Debug)]
-pub struct Goldens {
-    /// The golden: compared, and written in update mode (on another platform than the
-    /// `fallback_platform`, only when it would not change).
-    pub target: PathBuf,
-    /// The `fallback_platform`, when this is another platform: the golden was recorded there,
-    /// so its text is ignored here by default.
-    pub tracked_on: Option<PlatformKey>,
-    /// Whether this platform tracks the regressions of `target`, so text is compared by
-    /// default ([`TextTolerance::OWN_PLATFORM`]); without `fallback_platform` nobody knows.
-    pub is_own: bool,
-}
-
-impl Goldens {
-    /// The golden, recorded on an unknown platform.
-    fn shared(golden: &Path) -> Self {
-        Self {
-            target: golden.to_path_buf(),
-            tracked_on: None,
-            is_own: false,
-        }
-    }
 }
 
 impl Plan {
@@ -416,7 +397,7 @@ pub struct InWorkspace {
     /// Canonical test name of the shared golden, the same on every platform: the name of its case
     /// report and artifacts folder under this platform's directory.
     pub name: String,
-    /// The golden ([`Goldens::target`]) relative to the root, `/`-separated.
+    /// The golden relative to the root, `/`-separated.
     pub golden_path: String,
     /// The artifacts directory, relative to the root.
     pub artifacts: Arc<ArtifactsDir>,
@@ -552,9 +533,9 @@ impl Session {
             .as_deref()
             .and_then(|canonical| Some((self.workspace_of(canonical)?, canonical)));
         let has_workspace = workspace.is_some();
-        let (goldens, rule) = match workspace {
-            Some((workspace, canonical)) => self.rule(workspace, golden, canonical)?,
-            None => (Goldens::shared(golden), None),
+        let (tracking, rule) = match workspace {
+            Some((workspace, canonical)) => self.rule(workspace, canonical)?,
+            None => (Tracking::Unknown, None),
         };
         let (rule_tolerance, rule_text, in_workspace) = match rule {
             Some(Rule {
@@ -572,23 +553,22 @@ impl Session {
             tolerance: tolerance.or(rule_tolerance).unwrap_or(Tolerance::Exact {}),
             masks,
             text: text.or(rule_text),
-            goldens,
+            tracking,
             has_workspace,
             in_workspace,
         })
     }
 
-    /// The golden `golden` (`canonical` resolved) in `workspace` and its rule; `None` outside the
-    /// workspace or when no rule applies. Only a golden a rule matches is tracked on the
-    /// `fallback_platform`.
+    /// Where the golden `canonical` (resolved) in `workspace` is tracked, and its rule; `None`
+    /// outside the workspace or when no rule applies. Only a golden a rule matches is tracked on
+    /// the `fallback_platform`.
     fn rule(
         &self,
         workspace: Arc<Workspace>,
-        golden: &Path,
         canonical: &Path,
-    ) -> Result<(Goldens, Option<Rule>), Failure> {
-        let Some(shared_path) = workspace.relative_path(canonical) else {
-            return Ok((Goldens::shared(golden), None));
+    ) -> Result<(Tracking, Option<Rule>), Failure> {
+        let Some(golden_path) = workspace.relative_path(canonical) else {
+            return Ok((Tracking::Unknown, None));
         };
         let config_error = |message: String| {
             Failure::config(text::config_error(&workspace.config_display(), &message))
@@ -604,25 +584,13 @@ impl Session {
             ..
         } = compiled
             .rules
-            .resolve(&shared_path)
+            .resolve(&golden_path)
             .map_err(|e| config_error(e.to_string()))?
         else {
             // Excluded or unmatched: compared like without the file, one golden for every
             // platform.
-            return Ok((Goldens::shared(golden), None));
+            return Ok((Tracking::Unknown, None));
         };
-        let goldens = match &compiled.layout {
-            Layout::Shared => Goldens::shared(golden),
-            Layout::Primary => Goldens {
-                is_own: true,
-                ..Goldens::shared(golden)
-            },
-            Layout::Foreign { platform } => Goldens {
-                tracked_on: Some(platform.clone()),
-                ..Goldens::shared(golden)
-            },
-        };
-        let golden_path = shared_path;
         let is_recorded = self.metrics_override.unwrap_or(compiled.metrics.enabled);
         let rule = Rule {
             tolerance,
@@ -638,7 +606,7 @@ impl Session {
                 }),
             },
         };
-        Ok((goldens, Some(rule)))
+        Ok((compiled.tracking.clone(), Some(rule)))
     }
 }
 
@@ -795,10 +763,9 @@ metrics:
         let golden = other.path().join("Clock.png");
         let rule = session(None).rule(
             Arc::new(Workspace::new(root)),
-            &golden,
             &canonical_file(&golden).unwrap(),
         );
-        assert!(matches!(rule, Ok((_, None))));
+        assert!(matches!(rule, Ok((Tracking::Unknown, None))));
     }
 
     /// Only the CLI enforces `required_version`: an integration plans with a config that asks
@@ -981,7 +948,7 @@ metrics:
     }
 
     /// `fallback_platform` names the platform tracking the regressions of the goldens its rules
-    /// match; every platform compares (and writes) the shared golden itself. An excluded or
+    /// match; every platform compares the golden the integration passes. An excluded or
     /// unmatched golden is compared like without the file.
     #[test]
     fn test_goldens_follow_the_fallback_platform() {
@@ -996,28 +963,31 @@ metrics:
         let (_dir, root) = workspace(&config(host.as_str()), "a.png");
         let golden = root.join("test/goldens/a.png");
         let plan = session(None).plan(&golden, None, vec![], None).unwrap();
-        assert_eq!(plan.goldens.target, golden);
-        assert!(plan.goldens.tracked_on.is_none());
-        assert!(plan.goldens.is_own);
+        assert_eq!(plan.tracking, Tracking::Here);
 
         let (_dir, root) = workspace(&config("{ os: ios }"), "a.png");
         for unmanaged in ["test/goldens/skip_a.png", "test/other/a.png"] {
             let golden = root.join(unmanaged);
             let plan = session(None).plan(&golden, None, vec![], None).unwrap();
             assert!(plan.in_workspace.is_none(), "{unmanaged}");
-            assert_eq!(plan.goldens.target, golden, "{unmanaged}");
-            assert!(plan.goldens.tracked_on.is_none() && !plan.goldens.is_own);
+            assert_eq!(plan.tracking, Tracking::Unknown, "{unmanaged}");
         }
-        // Another platform: the shared golden, never a folder of this platform.
         let golden = root.join("test/goldens/a.png");
         let plan = session(None).plan(&golden, None, vec![], None).unwrap();
-        assert_eq!(plan.goldens.target, golden);
         assert_eq!(
-            plan.goldens.tracked_on.as_ref().map(PlatformKey::as_str),
+            plan.tracking.elsewhere().map(PlatformKey::as_str),
             Some("ios")
         );
-        assert!(!plan.goldens.is_own);
         assert_eq!(plan.in_workspace.unwrap().golden_path, "test/goldens/a.png");
+
+        let (_dir, root) = workspace(
+            "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"test/goldens/*.png\" }]",
+            "a.png",
+        );
+        let plan = session(None)
+            .plan(&root.join("test/goldens/a.png"), None, vec![], None)
+            .unwrap();
+        assert_eq!(plan.tracking, Tracking::Unknown, "no fallback_platform");
     }
 
     /// A `fallback_platform` that could never name a platform fails every golden of the

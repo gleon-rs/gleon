@@ -536,7 +536,7 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 ///
 /// `golden_path` is the golden on every platform. When the `.gleon/gleon.yaml` of its workspace
 /// names a `fallback_platform` (the platform that tracks regressions) and this process runs on
-/// another, the golden is compared with its text ignored, and update mode writes nothing: it
+/// another, the golden is compared with its text ignored, and update mode writes no golden: it
 /// compares, passes when the golden would not change, and fails otherwise.
 ///
 /// The strings are `lengths_count` (4) UTF-8 strings packed into `strings`, `lengths` giving

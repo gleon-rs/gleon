@@ -923,7 +923,11 @@ labels:
                 "{platform:?}"
             );
         }
-        assert!(tracking.matches_platform(&opaque("a=b=c")).is_err());
+        assert!(
+            tracking
+                .matches_platform(&opaque("macos-aarch64-extra"))
+                .is_err()
+        );
     }
 
     /// An opaque value is one segment: a renderer or labels need the structured form, so a key

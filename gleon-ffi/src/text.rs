@@ -185,11 +185,11 @@ pub fn push_missing_fallback(message: &mut String, platform: &str) {
     );
 }
 
-/// The note of an update on `host` that writes nothing because `platform` tracks the goldens and
-/// this one would change.
+/// The note of an update on `host` that leaves the golden as it is because `platform` tracks the
+/// goldens and this one would change.
 pub fn update_elsewhere(platform: &str, host: &str) -> String {
     format!(
-        "gleon: nothing was written: this workspace tracks regressions on {platform} \
+        "gleon: the golden was not updated: this workspace tracks regressions on {platform} \
          (`fallback_platform` in .gleon/gleon.yaml), so goldens updated on {host} must not \
          change. Update this golden on {platform}, or change `fallback_platform`."
     )

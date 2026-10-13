@@ -1239,7 +1239,7 @@ mod tests {
 
     /// The fallback platform of integrations is matched the way gleon-ffi matches its host: by
     /// OS, and by architecture when it names one. Renderer and labels do not count, nor does the
-    /// CLI's `GLEON_FALLBACK_PLATFORM`, which integrations never read.
+    /// `GLEON_FALLBACK_PLATFORM` of the CLI, which integrations never read.
     #[test]
     fn test_approve_matches_the_fallback_platform_like_integrations() {
         for fallback in [

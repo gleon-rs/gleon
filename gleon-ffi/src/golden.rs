@@ -36,7 +36,7 @@ use gleon_model::{
 use crate::{
     compare::{self, Timed},
     error::{ErrorKind, Failure},
-    session::{ArtifactNames, Plan, Session},
+    session::{ArtifactNames, Plan, Session, Tracking},
     text,
 };
 
@@ -171,7 +171,7 @@ pub fn run(session: &Session, request: &Request<'_>) -> Finished {
         Err(failure) => return Finished::failed(failure),
     };
     let warning = session.missing_workspace_warning(&plan);
-    let finished = match (request.candidate, &plan.goldens.tracked_on) {
+    let finished = match (request.candidate, plan.tracking.elsewhere()) {
         // Another platform never writes the goldens of the platform that tracks them: it compares
         // them and passes when nothing would change.
         (Candidate::Png(_), Some(platform)) if request.mode == Mode::Update => {
@@ -186,7 +186,8 @@ pub fn run(session: &Session, request: &Request<'_>) -> Finished {
 }
 
 /// The comparison of an update on a platform other than `platform`, which tracks the goldens: a
-/// pass writes nothing and passes, a failure (the golden would change) says where to record it.
+/// pass leaves the golden as it is and passes, a failure (the golden would change) says where to
+/// record it.
 fn update_elsewhere(compared: Finished, platform: &PlatformKey) -> Finished {
     if matches!(compared.verdict, Verdict::Identical | Verdict::Match) {
         return compared;
@@ -205,7 +206,7 @@ fn update(
     candidate: &[u8],
     started: Instant,
 ) -> Finished {
-    let path = &plan.goldens.target;
+    let path = request.golden_path;
     let current = fs::read(path).ok();
     // Rewriting the same bytes would cost a flush to disk and touch the file for build tools.
     let written = if current.as_deref() == Some(candidate) {
@@ -237,7 +238,7 @@ fn update(
 }
 
 fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Instant) -> Finished {
-    let golden = read_golden(&plan.goldens.target);
+    let golden = read_golden(request.golden_path);
     let call = Call {
         session,
         request,
@@ -444,24 +445,24 @@ impl Call<'_> {
     /// the default of this platform ([`TextTolerance::resolve`]).
     fn text(&self) -> Option<TextTolerance> {
         (!self.request.text_regions.is_empty())
-            .then(|| TextTolerance::resolve(self.plan.text, self.plan.goldens.is_own))
+            .then(|| TextTolerance::resolve(self.plan.text, self.plan.tracking == Tracking::Here))
     }
 
     /// The clause of a failure on a platform other than the one that tracks the goldens; empty
     /// for any other.
     fn fallback_clause(&self) -> String {
         self.plan
-            .goldens
-            .tracked_on
-            .as_ref()
+            .tracking
+            .elsewhere()
             .map_or_else(String::new, |platform| text::fallback(platform.as_str()))
     }
 
-    /// The message of a missing golden: Flutter's and, on a platform other than the one that
-    /// tracks the goldens, where to record it.
+    /// The message of a missing golden: Flutter's and, when comparing on a platform other than
+    /// the one that tracks the goldens, where to record it (an update says so in its own note).
     fn missing_message(&self) -> String {
         let mut message = text::missing_golden(self.request.golden_uri);
-        if let Some(platform) = &self.plan.goldens.tracked_on {
+        if let (Some(platform), Mode::Compare) = (self.plan.tracking.elsewhere(), self.request.mode)
+        {
             text::push_missing_fallback(&mut message, platform.as_str());
         }
         message
@@ -607,10 +608,9 @@ impl Call<'_> {
                     )
                 });
         }
-        // The golden of the platform that tracks it, which a missing or written golden is not.
-        let fallback = (self.plan.goldens.tracked_on.is_some()
-            && !matches!(outcome, CaseOutcome::Missing | CaseOutcome::Updated))
-        .then(|| golden.golden_path.clone());
+        // The golden of the platform that tracks it, when this platform compared it.
+        let fallback = (self.plan.tracking.elsewhere().is_some() && outcome.has_compared())
+            .then(|| golden.golden_path.clone());
         let console = if record.is_some_and(|record| record.console) {
             text::console_line(
                 &golden.golden_path,
@@ -1557,6 +1557,18 @@ metrics:
         );
         let case = fixture.case();
         assert_eq!(case.golden.fallback, None, "nothing was compared");
+
+        // Neither does an error.
+        fs::write(
+            &fixture.golden,
+            b"version https://git-lfs.github.com/spec/v1",
+        )
+        .unwrap();
+        let corrupt = compare(&images.glyph);
+        assert_eq!(corrupt.error_kind, ErrorKind::Image, "{}", corrupt.message);
+        let case = fixture.case();
+        assert_eq!(case.outcome, CaseOutcome::Error);
+        assert_eq!(case.golden.fallback, None, "nothing was compared");
     }
 
     /// Update mode on another platform writes no golden: it compares, passes when the golden
@@ -1567,7 +1579,7 @@ metrics:
         let fixture = images.fixture(foreign_platform());
         let session = fixture.session(None);
         let note = format!(
-            "\ngleon: nothing was written: this workspace tracks regressions on {foreign} \
+            "\ngleon: the golden was not updated: this workspace tracks regressions on {foreign} \
              (`fallback_platform` in .gleon/gleon.yaml), so goldens updated on {host} must not \
              change. Update this golden on {foreign}, or change `fallback_platform`.",
             foreign = foreign_platform(),
@@ -1611,13 +1623,10 @@ metrics:
         fs::remove_file(&fixture.golden).unwrap();
         let missing = fixture.run(&session, Mode::Update, &images.png());
         assert_eq!(missing.verdict, Verdict::Missing);
-        assert!(
-            missing
-                .message
-                .starts_with("Could not be compared against non-existent file: ")
-                && missing.message.ends_with(&note),
-            "{}",
-            missing.message
+        assert_eq!(
+            missing.message,
+            format!("Could not be compared against non-existent file: \"goldens/a.png\"{note}"),
+            "the note alone says where to record it"
         );
         assert!(!fixture.golden.exists());
         assert!(!fixture.platform_golden().parent().unwrap().exists());

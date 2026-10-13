@@ -14,8 +14,8 @@
   },
   "source": {
     "tool": "gleon_flutter",
-    "tool_version": "0.1.0",
-    "renderer": "flutter-3.47.6"
+    "tool_version": "0.4.0",
+    "renderer": "flutter-3.47.7"
   },
   "platform": {
     "os": "macos",
@@ -31,7 +31,7 @@
     },
     "text_tolerance": 1.0,
     "masks": [],
-    "policy_version": 2
+    "policy_version": 4
   },
   "outcome": "match",
   "metrics": {
@@ -66,9 +66,9 @@
     }
   ],
   "timings_ms": {
-    "total": 2.456,
-    "native": 0.7
+    "total": 1.78,
+    "native": 0.559
   },
   "run_id": "fallback-fixture-1",
-  "recorded_at": "2026-10-04T15:59:44.669789Z"
+  "recorded_at": "2026-10-13T19:29:19.389850Z"
 }

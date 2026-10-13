@@ -764,6 +764,15 @@ impl CaseOutcome {
         )
     }
 
+    /// Whether a golden was compared: `identical`, `match`, `mismatch` or `dimension_mismatch`.
+    #[must_use]
+    pub const fn has_compared(self) -> bool {
+        matches!(
+            self,
+            Self::Identical | Self::Match | Self::Mismatch | Self::DimensionMismatch
+        )
+    }
+
     /// The name of this outcome in a case report (`dimension_mismatch`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -1045,7 +1054,7 @@ impl CaseReport {
         if self.outcome == O::Missing && self.golden.sha256.is_some() {
             return Err(InconsistentCase::MissingGoldenHash);
         }
-        if self.golden.fallback.is_some() && matches!(self.outcome, O::Missing | O::Updated) {
+        if self.golden.fallback.is_some() && !self.outcome.has_compared() {
             return Err(InconsistentCase::Fallback);
         }
         if self.outcome == O::Identical
@@ -2777,6 +2786,13 @@ mod tests {
             ),
             (
                 serde_json::json!({"golden": {"path": "a.png", "fallback": "a.png"}}),
+                InconsistentCase::Fallback,
+            ),
+            (
+                serde_json::json!({
+                    "outcome": "error", "error_kind": "io",
+                    "golden": {"path": "a.png", "fallback": "a.png"}
+                }),
                 InconsistentCase::Fallback,
             ),
             (
