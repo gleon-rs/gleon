@@ -534,10 +534,10 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 /// Compares `candidate` against the golden file (`call.mode` 0), or writes it there (`mode` 1,
 /// update mode, PNG only), and writes the verdict with the texts to show to `summary`.
 ///
-/// `golden_path` is the shared golden. When the `.gleon/gleon.yaml` of its workspace names the
-/// `fallback_platform` the shared goldens were recorded on and this process runs on another,
-/// its own golden `<dir>/<os>-<arch>/<file>` is written and compared instead, and the shared one
-/// only while the own one does not exist.
+/// `golden_path` is the golden on every platform. When the `.gleon/gleon.yaml` of its workspace
+/// names a `fallback_platform` (the platform that tracks regressions) and this process runs on
+/// another, the golden is compared with its text ignored, and update mode writes nothing: it
+/// compares, passes when the golden would not change, and fails otherwise.
 ///
 /// The strings are `lengths_count` (4) UTF-8 strings packed into `strings`, `lengths` giving
 /// their byte lengths, in this order: `golden_path` (the file), `golden_uri` (the key shown in

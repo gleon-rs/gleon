@@ -21,7 +21,7 @@
       "default": []
     },
     "fallback_platform": {
-      "description": "Optional fallback platform identifier used when current platform baselines are missing.\n\nFor integrations that commit goldens as image files (the Flutter package) it is the\nplatform of the shared goldens (`<dir>/<file>`); only its OS and architecture count, under\nthe names a process reports (`macos-aarch64`, not `macos-arm64`: others are an error for\nintegrations). On it text is compared by default; any other platform keeps its own goldens\nin `<dir>/<os>-<arch>/<file>` and, until it has one, compares the shared golden with text\nignored by default (see `text_tolerance`). Without it every platform compares the shared\ngoldens that way. `platform` and the `GLEON_*PLATFORM` variables are read by the CLI only.",
+      "description": "Optional fallback platform identifier used when current platform baselines are missing.\n\nFor integrations that commit goldens as image files (the Flutter package) it is the\nplatform that tracks regressions; only its OS and architecture count, under the names a\nprocess reports (`macos-aarch64`, not `macos-arm64`: others are an error for\nintegrations). On it text is compared by default and goldens are updated as usual; any\nother platform compares the same goldens with text ignored by default (see\n`text_tolerance`), and its updates write no golden: one that would change fails. Without\nit every platform compares and updates the goldens, text ignored by default. `platform`\nand the `GLEON_*PLATFORM` variables are read by the CLI only.",
       "anyOf": [
         {
           "$ref": "#/$defs/PlatformConfig"
@@ -36,7 +36,7 @@
       "$ref": "#/$defs/MetricsConfig"
     },
     "platform": {
-      "description": "The platform the CLI runs as (e.g. `macos-aarch64`, or `{renderer: impeller}` over the\ndetected OS and architecture); its flags and `GLEON_PLATFORM` override it.\n\nRead by the CLI only: an integration (the Flutter package) runs as its process's OS and\narchitecture, the name of the directory of that platform's own goldens.",
+      "description": "The platform the CLI runs as (e.g. `macos-aarch64`, or `{renderer: impeller}` over the\ndetected OS and architecture); its flags and `GLEON_PLATFORM` override it.\n\nRead by the CLI only: an integration (the Flutter package) runs as its process's OS and\narchitecture.",
       "anyOf": [
         {
           "$ref": "#/$defs/PlatformConfig"

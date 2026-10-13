@@ -364,7 +364,7 @@
           ]
         },
         "fallback": {
-          "description": "The golden compared in place of `path`, which does not exist yet: the shared golden of the\nworkspace (its `fallback_platform`; integrations with per-platform goldens). `sha256`, `width`\nand `height` describe it; `path` is still where `gleon approve` writes, also from a pass,\nwhich keeps its candidate for that.",
+          "description": "The golden of the `fallback_platform` of the workspace (the platform that tracks\nregressions), when an integration compared it on another platform: the same file as `path`\nfor integrations that commit goldens as image files. `gleon approve` skips such cases: their\ngoldens are updated on the fallback platform only.",
           "type": [
             "string",
             "null"

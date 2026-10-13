@@ -225,18 +225,19 @@ pub struct GleonConfig {
     /// detected OS and architecture); its flags and `GLEON_PLATFORM` override it.
     ///
     /// Read by the CLI only: an integration (the Flutter package) runs as its process's OS and
-    /// architecture, the name of the directory of that platform's own goldens.
+    /// architecture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformConfig>,
     /// Optional fallback platform identifier used when current platform baselines are missing.
     ///
     /// For integrations that commit goldens as image files (the Flutter package) it is the
-    /// platform of the shared goldens (`<dir>/<file>`); only its OS and architecture count, under
-    /// the names a process reports (`macos-aarch64`, not `macos-arm64`: others are an error for
-    /// integrations). On it text is compared by default; any other platform keeps its own goldens
-    /// in `<dir>/<os>-<arch>/<file>` and, until it has one, compares the shared golden with text
-    /// ignored by default (see `text_tolerance`). Without it every platform compares the shared
-    /// goldens that way. `platform` and the `GLEON_*PLATFORM` variables are read by the CLI only.
+    /// platform that tracks regressions; only its OS and architecture count, under the names a
+    /// process reports (`macos-aarch64`, not `macos-arm64`: others are an error for
+    /// integrations). On it text is compared by default and goldens are updated as usual; any
+    /// other platform compares the same goldens with text ignored by default (see
+    /// `text_tolerance`), and its updates write no golden: one that would change fails. Without
+    /// it every platform compares and updates the goldens, text ignored by default. `platform`
+    /// and the `GLEON_*PLATFORM` variables are read by the CLI only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_platform: Option<PlatformConfig>,
     /// List of screenshot match rules.

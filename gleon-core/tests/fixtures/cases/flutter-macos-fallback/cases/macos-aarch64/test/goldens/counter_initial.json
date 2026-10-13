@@ -2,14 +2,13 @@
   "schema_version": 4,
   "name": "test/goldens/counter_initial",
   "golden": {
-    "path": "test/goldens/macos-aarch64/counter_initial.png",
+    "path": "test/goldens/counter_initial.png",
     "sha256": "67fb28e3f28ae98186e3e13adb7c1f3c67489de8ce49508ffe31b69d46fcd8c0",
     "width": 360,
     "height": 640,
     "fallback": "test/goldens/counter_initial.png"
   },
   "candidate": {
-    "sha256": "89612416a0521f78360d829f6b58b8c3d57424931c7780f1455b97ac4aa327bc",
     "width": 360,
     "height": 640
   },
@@ -66,9 +65,6 @@
       }
     }
   ],
-  "artifacts": {
-    "candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/goldens/counter_initial/candidate.png"
-  },
   "timings_ms": {
     "total": 2.456,
     "native": 0.7

@@ -496,10 +496,10 @@ pub struct GoldenImage {
     /// Height in pixels; absent if the PNG header could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    /// The golden compared in place of `path`, which does not exist yet: the shared golden of the
-    /// workspace (its `fallback_platform`; integrations with per-platform goldens). `sha256`, `width`
-    /// and `height` describe it; `path` is still where `gleon approve` writes, also from a pass,
-    /// which keeps its candidate for that.
+    /// The golden of the `fallback_platform` of the workspace (the platform that tracks
+    /// regressions), when an integration compared it on another platform: the same file as `path`
+    /// for integrations that commit goldens as image files. `gleon approve` skips such cases: their
+    /// goldens are updated on the fallback platform only.
     #[serde(
         default,
         deserialize_with = "optional_workspace_path",
@@ -1097,16 +1097,7 @@ impl CaseReport {
                 return Err(InconsistentCase::PixelOptions);
             }
         }
-        // A pass against another platform's golden keeps its candidate, for `gleon approve` to
-        // record this platform's own golden.
-        let keeps_fallback_candidate = self.golden.fallback.is_some()
-            && matches!(self.outcome, O::Match | O::Identical)
-            && self
-                .artifacts
-                .as_ref()
-                .is_some_and(|a| a.golden.is_none() && a.diff.is_none());
         if self.artifacts.is_some()
-            && !keeps_fallback_candidate
             && !matches!(
                 self.outcome,
                 O::Mismatch | O::DimensionMismatch | O::Missing
@@ -1276,10 +1267,7 @@ pub enum InconsistentCase {
     )]
     ArtifactPath(&'static str),
     /// Images of an outcome that keeps none.
-    #[error(
-        "`artifacts` belong to `mismatch`, `dimension_mismatch` and `missing`, and the candidate \
-         of a pass against `golden.fallback`"
-    )]
+    #[error("`artifacts` belong to `mismatch`, `dimension_mismatch` and `missing`")]
     Artifacts,
 }
 
@@ -1604,9 +1592,9 @@ pub mod text {
         )
     }
 
-    /// The note on a case compared with the shared golden ([`super::GoldenImage::fallback`]).
+    /// The note on a case of another platform ([`super::GoldenImage::fallback`]).
     ///
-    /// Its platform has no own golden yet; written without an intermediate `String`, e.g.
+    /// Written without an intermediate `String`, e.g.
     /// `compared with test/goldens/a.png of the fallback platform`.
     #[derive(Debug, Clone, Copy)]
     pub struct ComparedWithFallback<'a>(pub &'a str);
@@ -2696,17 +2684,18 @@ mod tests {
         let mut outside = valid.clone();
         outside["golden"]["fallback"] = "../a.png".into();
         assert!(matches!(parse(&outside), Err(CaseParseError::Json(_))));
-        // A pass against the fallback golden keeps its candidate for `gleon approve`.
-        let mut seeding = valid.clone();
-        seeding["outcome"] = "match".into();
-        seeding["metrics"] = serde_json::json!({
+        // A pass on another platform than the fallback platform names its golden.
+        let mut elsewhere = valid.clone();
+        elsewhere["outcome"] = "match".into();
+        elsewhere["metrics"] = serde_json::json!({
             "kind": "pixel", "total_pixels": 4, "diff_pixels": 0, "diff_ratio": 0.0, "headroom": 0.0
         });
-        seeding["golden"] = serde_json::json!({
-            "path": "test/goldens/linux-x86_64/A.png", "fallback": "test/goldens/A.png",
+        elsewhere["artifacts"] = serde_json::Value::Null;
+        elsewhere["golden"] = serde_json::json!({
+            "path": "test/goldens/A.png", "fallback": "test/goldens/A.png",
             "sha256": "1".repeat(64)
         });
-        let report = parse(&seeding).unwrap();
+        let report = parse(&elsewhere).unwrap();
         assert_eq!(report.golden.compared(), "test/goldens/A.png");
 
         // Other writers may spell an absent image as `null`, which the schema allows.
@@ -2787,7 +2776,7 @@ mod tests {
                 InconsistentCase::MissingGoldenHash,
             ),
             (
-                serde_json::json!({"golden": {"path": "linux-x86_64/a.png", "fallback": "a.png"}}),
+                serde_json::json!({"golden": {"path": "a.png", "fallback": "a.png"}}),
                 InconsistentCase::Fallback,
             ),
             (
@@ -2800,8 +2789,8 @@ mod tests {
             (
                 serde_json::json!({
                     "outcome": "match", "metrics": metrics,
-                    "golden": {"path": "linux-x86_64/a.png", "fallback": "a.png", "sha256": "1".repeat(64)},
-                    "artifacts": {"golden": ".gleon/runs/latest/artifacts/a/golden.png", "candidate": ".gleon/runs/latest/artifacts/a/candidate.png"}
+                    "golden": {"path": "a.png", "fallback": "a.png", "sha256": "1".repeat(64)},
+                    "artifacts": {"candidate": ".gleon/runs/latest/artifacts/a/candidate.png"}
                 }),
                 InconsistentCase::Artifacts,
             ),

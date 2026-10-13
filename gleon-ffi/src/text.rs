@@ -163,12 +163,11 @@ pub fn unused_text_tolerance(golden_uri: &str) -> String {
     )
 }
 
-/// The clause of a failure against the shared golden of `platform`, compared because this
-/// platform has no own golden `own_uri` yet.
-pub fn fallback(platform: &str, own_uri: &str) -> String {
+/// The clause of a failure on a platform other than `platform`, which tracks the goldens.
+pub fn fallback(platform: &str) -> String {
     format!(
-        " Compared with the {platform} golden: this platform has no own golden \"{own_uri}\" yet \
-         (record or approve it to compare text too)."
+        " Compared with the {platform} golden, text ignored: this workspace tracks regressions \
+         on {platform}."
     )
 }
 
@@ -177,14 +176,23 @@ pub fn missing_golden(golden_uri: &str) -> String {
     format!("Could not be compared against non-existent file: \"{golden_uri}\"")
 }
 
-/// Appends to `message` the clause of a missing golden on a platform with its own goldens: the
-/// shared golden of `platform` is missing too, and a new golden starts there.
-pub fn push_missing_fallback(message: &mut String, platform: &str, shared_uri: &str) {
+/// Appends to `message` the clause of a missing golden on a platform other than `platform`, which
+/// tracks the goldens.
+pub fn push_missing_fallback(message: &mut String, platform: &str) {
     let _infallible = write!(
         message,
-        " (nor the {platform} golden \"{shared_uri}\": record a new golden on {platform} first, \
-         every other platform compares it until it has its own)"
+        " (this workspace tracks regressions on {platform}: record new goldens there)"
     );
+}
+
+/// The note of an update on `host` that writes nothing because `platform` tracks the goldens and
+/// this one would change.
+pub fn update_elsewhere(platform: &str, host: &str) -> String {
+    format!(
+        "gleon: nothing was written: this workspace tracks regressions on {platform} \
+         (`fallback_platform` in .gleon/gleon.yaml), so goldens updated on {host} must not \
+         change. Update this golden on {platform}, or change `fallback_platform`."
+    )
 }
 
 /// An invalid `.gleon/gleon.yaml`, or a golden whose name its rules cannot take.

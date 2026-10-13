@@ -184,10 +184,10 @@ exclude:
 
 # Optional: Fallback platform for Sparse Multi-Platform Baselines
 # When secondary platforms render identically to the fallback, no duplicate manifests are stored.
-# For integrations with golden files (Flutter) it is the platform of the shared goldens
-# `<dir>/<file>` (OS and architecture, with the names a process reports: `macos-aarch64`, not
-# `macos-arm64`): there text is compared by default, every other platform keeps its own goldens
-# in `<dir>/<os>-<arch>/<file>` (e.g. `linux-x86_64`).
+# For integrations with golden files (Flutter) it is the platform that tracks regressions (OS and
+# architecture, with the names a process reports: `macos-aarch64`, not `macos-arm64`): there text
+# is compared by default and goldens are updated; every other platform compares the same goldens
+# with text ignored and updates none that would change.
 fallback_platform:
   os: macos
   arch: aarch64
@@ -235,40 +235,33 @@ steps:
 
 On Windows `gleon test -- flutter test` finds `flutter.bat` like a shell does.
 
-#### Per-platform goldens of integrations
+#### Goldens of integrations on several platforms
 
-Integrations commit goldens as PNG files, one per test, recorded on one platform: name it with
-`fallback_platform`, with the names a process reports (`std::env::consts`: `macos-aarch64`,
-`linux-x86_64`, `windows-x86_64`; `macos-arm64` or `darwin` are config errors, since they would
-never match). On that platform the shared goldens `<dir>/<file>` are its own, so text is compared
-by default (`text_tolerance` 0.05: a pixel of font-engine noise per 16x16 square passes, a
-changed digit fails). Every other platform has its own goldens in `<dir>/<os>-<arch>/<file>`
-(`linux-x86_64`, `linux-aarch64`, `windows-x86_64`, `macos-x86_64`): `--update-goldens` writes
-them there, and until one exists the shared golden is compared with text under the default 1
-(text ignored, layout exact). A `text_tolerance` set in the rule or the call applies on every
-platform, so `1` turns text comparison off on the goldens' platform too.
+Integrations commit goldens as PNG files, one per test, and `fallback_platform` names the
+platform that tracks their regressions, with the names a process reports (`std::env::consts`:
+`macos-aarch64`, `linux-x86_64`, `windows-x86_64`; `macos-arm64` or `darwin` are config errors,
+since they would never match). Every platform compares the same golden files:
 
-A case compared with the shared golden names the own golden in `golden.path` and the compared
-one in `golden.fallback`; with metrics on, a pass that differs from it keeps its candidate.
-Approving the runs of a CI matrix therefore records one golden per platform, from failures and
-passes alike (a pass without differences is copied from the shared golden), without conflicts; a
-plain `gleon approve` does so for every such case, and a path filter may name the shared golden
-the test printed. Only goldens a rule matches follow this layout: an excluded or unmatched golden
-stays one file for every platform.
+| Where | Compare | Update (`--update-goldens`) |
+|---|---|---|
+| No `fallback_platform` | text ignored (`text_tolerance` 1) | writes the golden |
+| The `fallback_platform` | text compared (`text_tolerance` 0.05: a pixel of font-engine noise per 16x16 square passes, a changed digit fails) | writes the golden |
+| Any other platform | text ignored, layout exact; a failure names the `fallback_platform` | compares first: a pass writes nothing and passes, a golden that would change fails and writes nothing |
+
+A `text_tolerance` set in the rule or the call applies on every platform, so `1` turns text
+comparison off on the `fallback_platform` too. A case of another platform names the compared
+golden in `golden.fallback` too; `gleon approve` skips the cases of integrations on other
+platforms than the `fallback_platform` with a warning, so a CI matrix approves the goldens of
+that platform only.
 
 ```bash
-gleon approve --from metrics-linux-x64 --from metrics-windows-x64
-gleon approve --from metrics-linux-x64 test/goldens/a.png
-gleon approve linux-x86_64/test/goldens/a
+gleon approve --from metrics-macos-arm64
+gleon approve --from metrics-macos-arm64 test/goldens/a.png
 ```
 
 The platform is the test process's: an x86_64 Flutter under Rosetta on Apple silicon runs as
-`macos-x86_64` and keeps its own goldens there. The `platform` of `.gleon/gleon.yaml`,
-`GLEON_PLATFORM` and the platform flags set the CLI's platform only.
-
-Without `fallback_platform` every platform compares the shared goldens with text under
-`text_tolerance` (default 1). The case `name` and rule matching use the shared golden on every
-platform.
+`macos-x86_64`. The `platform` of `.gleon/gleon.yaml`, `GLEON_PLATFORM` and the platform flags
+set the CLI's platform only. The case `name` and rule matching are the same on every platform.
 
 ---
 
