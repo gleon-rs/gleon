@@ -113,9 +113,11 @@ pub fn read(png: &[u8]) -> Option<PlatformKey> {
     locate(png).map(|stamp| stamp.platform)
 }
 
-/// `png` recorded on `platform`: one origin chunk right after the header (any earlier origin
-/// chunk dropped, whatever it names), everything else unchanged. `None` for no PNG, or one whose
-/// chunks do not fill it from its header on.
+/// `png` recorded on `platform`.
+///
+/// One origin chunk goes right after the header (any earlier origin chunk dropped, whatever it
+/// names), everything else stays. `None` for no PNG, or one whose chunks do not fill it from its
+/// header on.
 #[must_use]
 pub fn stamp(png: &[u8], platform: &PlatformKey) -> Option<Vec<u8>> {
     let mut chunks = chunks(png)?;
