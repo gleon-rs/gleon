@@ -1458,7 +1458,11 @@ mod tests {
         );
         assert_eq!(updated.verdict, golden::Verdict::Updated as u8);
         let written = std::fs::read(&golden_path).unwrap();
-        assert_eq!(*gleon_model::origin::strip(&written), *COUNTER_3);
+        assert!(
+            gleon_model::origin::locate(&written)
+                .unwrap()
+                .is_stripped(&written, COUNTER_3)
+        );
         assert_eq!(
             gleon_model::origin::read(&written).as_ref(),
             Some(PlatformKey::host()),

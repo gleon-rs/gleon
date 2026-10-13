@@ -5,7 +5,7 @@
 //! file next to the tests. Tools that strip ancillary chunks (PNG optimizers) drop the origin with
 //! them; a golden without one is read as recorded on the `fallback_platform` of the workspace.
 
-use std::{borrow::Cow, ops::Range};
+use std::ops::Range;
 
 use crate::platform::PlatformKey;
 
@@ -116,40 +116,37 @@ pub fn read(png: &[u8]) -> Option<PlatformKey> {
 /// `png` recorded on `platform`.
 ///
 /// One origin chunk goes right after the header (any earlier origin chunk dropped, whatever it
-/// names), everything else stays. `None` for no PNG, or one whose chunks do not fill it from its
-/// header on.
+/// names), everything else stays, bytes after the end of the image included. `None` for no PNG,
+/// or one whose chunks do not lead from its header to its end.
 #[must_use]
 pub fn stamp(png: &[u8], platform: &PlatformKey) -> Option<Vec<u8>> {
     let mut chunks = chunks(png)?;
     let header = chunks.next().filter(|first| first.kind == *b"IHDR")?;
-    let mut data = KEYWORD.as_bytes().to_vec();
-    data.push(0);
-    data.extend_from_slice(platform.as_str().as_bytes());
+    let text: [&[u8]; 3] = [KEYWORD.as_bytes(), b"\0", platform.as_str().as_bytes()];
+    let length = text.iter().map(|part| part.len()).sum::<usize>();
     let mut crc = crc32fast::Hasher::new();
     crc.update(b"tEXt");
-    crc.update(&data);
-    let mut out = Vec::with_capacity(png.len() + data.len() + 12);
+    for part in text {
+        crc.update(part);
+    }
+    let mut out = Vec::with_capacity(png.len() + length + 12);
     out.extend_from_slice(&png[..header.range.end]);
-    out.extend_from_slice(&u32::try_from(data.len()).ok()?.to_be_bytes());
+    out.extend_from_slice(&u32::try_from(length).ok()?.to_be_bytes());
     out.extend_from_slice(b"tEXt");
-    out.extend_from_slice(&data);
+    for part in text {
+        out.extend_from_slice(part);
+    }
     out.extend_from_slice(&crc.finalize().to_be_bytes());
-    for chunk in chunks.by_ref() {
+    for chunk in chunks {
         if chunk.origin_text().is_none() {
-            out.extend_from_slice(&png[chunk.range]);
+            out.extend_from_slice(&png[chunk.range.clone()]);
+        }
+        if chunk.kind == *b"IEND" {
+            out.extend_from_slice(&png[chunk.range.end..]);
+            return Some(out);
         }
     }
-    (chunks.at == png.len()).then_some(out)
-}
-
-/// `png` without its origin chunk: the image as its encoder wrote it. Borrowed when it has none
-/// that names a platform (or is no PNG).
-#[must_use]
-pub fn strip(png: &[u8]) -> Cow<'_, [u8]> {
-    match locate(png) {
-        Some(Stamp { range, .. }) => Cow::Owned([&png[..range.start], &png[range.end..]].concat()),
-        None => Cow::Borrowed(png),
-    }
+    None
 }
 
 #[cfg(test)]
@@ -184,12 +181,11 @@ mod tests {
     fn test_a_stamp_is_read_back_and_invisible_to_decoders() {
         let png = png();
         assert_eq!(read(&png), None);
-        assert!(matches!(strip(&png), Cow::Borrowed(_)));
+        assert_eq!(locate(&png), None);
 
         let linux = stamp(&png, &key("linux-x86_64")).unwrap();
         assert_eq!(read(&linux), Some(key("linux-x86_64")));
         assert_eq!(pixels(&linux), pixels(&png));
-        assert_eq!(strip(&linux), png);
         // Right after the header: IHDR is 8 + 25 bytes into the file.
         assert_eq!(&linux[37..41], b"tEXt");
         let located = locate(&linux).unwrap();
@@ -204,7 +200,7 @@ mod tests {
         let macos = stamp(&linux, &key("macos-aarch64")).unwrap();
         assert_eq!(read(&macos), Some(key("macos-aarch64")));
         assert_eq!(macos, stamp(&png, &key("macos-aarch64")).unwrap());
-        assert_eq!(strip(&macos), png);
+        assert!(locate(&macos).unwrap().is_stripped(&macos, &png));
     }
 
     #[test]
@@ -220,8 +216,19 @@ mod tests {
         assert_eq!(read(&other), None, "another text chunk is no origin");
         let stamped = stamp(&other, &key("windows-x86_64")).unwrap();
         assert_eq!(read(&stamped), Some(key("windows-x86_64")));
-        assert_eq!(strip(&stamped), other);
+        assert!(locate(&stamped).unwrap().is_stripped(&stamped, &other));
         assert_eq!(pixels(&stamped), pixels(&png));
+    }
+
+    /// Bytes after the end of the image (padding of other writers) stay after it.
+    #[test]
+    fn test_a_stamp_keeps_bytes_after_the_end() {
+        let mut padded = png();
+        padded.extend_from_slice(b"\0\0\n");
+        let stamped = stamp(&padded, &key("linux-x86_64")).unwrap();
+        assert_eq!(read(&stamped), Some(key("linux-x86_64")));
+        assert!(stamped.ends_with(b"IEND\xaeB`\x82\0\0\n"));
+        assert!(locate(&stamped).unwrap().is_stripped(&stamped, &padded));
     }
 
     #[test]
@@ -230,7 +237,6 @@ mod tests {
         for broken in [&b"not a png"[..], &png[..png.len() - 1], &png[..20]] {
             assert_eq!(stamp(broken, &key("linux-x86_64")), None);
             assert_eq!(read(broken), None);
-            assert!(matches!(strip(broken), Cow::Borrowed(_)));
         }
         // An origin whose text is no platform key (`Linux-x86_64`): signature, IHDR, then the
         // chunk's length and type, the keyword and its separator. It names no platform, so it
@@ -238,8 +244,7 @@ mod tests {
         // replaces it.
         let mut bad = stamp(&png, &key("linux-x86_64")).unwrap();
         bad[33 + 8 + KEYWORD.len() + 1] = b'L';
-        assert_eq!(read(&bad), None);
-        assert!(matches!(strip(&bad), Cow::Borrowed(_)));
+        assert_eq!(locate(&bad), None);
         assert_eq!(
             stamp(&bad, &key("macos-aarch64")).unwrap(),
             stamp(&png, &key("macos-aarch64")).unwrap()

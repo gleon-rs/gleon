@@ -16,7 +16,10 @@
 
 use std::path::PathBuf;
 
-use gleon_model::{case::CaseReport, config::GleonConfig};
+use gleon_model::{
+    case::{CASE_SCHEMA_VERSION, CaseReport},
+    config::GleonConfig,
+};
 
 fn check(file: &str, schema: &schemars::Schema) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -77,4 +80,22 @@ fn test_platform_fields_are_key_segments_in_the_schema() {
         .as_str()
         .unwrap();
     assert!(description.contains("os=<os>+arch=<arch>"), "{description}");
+}
+
+/// The schema accepts the version gleon writes, and only that one: the file name and the bounds
+/// follow [`CASE_SCHEMA_VERSION`].
+#[test]
+fn test_the_case_schema_names_the_current_version() {
+    let schema = serde_json::to_value(schemars::schema_for!(CaseReport)).unwrap();
+    let version = &schema["properties"]["schema_version"];
+    let current = serde_json::Value::from(CASE_SCHEMA_VERSION);
+    assert_eq!(
+        (&version["minimum"], &version["maximum"]),
+        (&current, &current),
+        "{version}"
+    );
+    let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("schema")
+        .join(format!("case.v{CASE_SCHEMA_VERSION}.json"));
+    assert!(file.is_file(), "{}", file.display());
 }

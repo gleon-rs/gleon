@@ -480,12 +480,14 @@ impl<'a> Call<'a> {
         }
     }
 
-    /// Whether the PNG `image` is the image of `golden` (this call's golden), its stamp aside:
-    /// compared in place.
+    /// Whether the PNG `image` is the image of `golden` (this call's golden), with or without
+    /// its stamp: compared in place.
     fn is_image(&self, golden: &[u8], image: &[u8]) -> bool {
-        self.stamp
-            .as_ref()
-            .map_or(golden == image, |stamp| stamp.is_stripped(golden, image))
+        golden == image
+            || self
+                .stamp
+                .as_ref()
+                .is_some_and(|stamp| stamp.is_stripped(golden, image))
     }
 }
 
@@ -564,7 +566,8 @@ impl Call<'_> {
     /// platforms over their glyphs.
     fn kept(&self, golden: &[u8], candidate: &[u8]) -> Kept {
         let canonicalizes = self.plan.tracking == Tracking::Here
-            && matches!(&self.origin, Origin::Stamped(platform) if platform != PlatformKey::host());
+            && matches!(self.origin, Origin::Stamped(_))
+            && self.origin.elsewhere().is_some();
         if canonicalizes {
             return Kept::Replaced;
         }
@@ -1695,6 +1698,33 @@ screenshots:
         assert_eq!(
             fixture.run(&session, Mode::Compare, &png).verdict,
             Verdict::Identical
+        );
+    }
+
+    /// The bytes of a stamped golden are identical to it, stamp included: compared and updated
+    /// like the image without the stamp, never decoded nor written again.
+    #[test]
+    fn test_the_bytes_of_a_stamped_golden_are_identical() {
+        let images = TextImages::new();
+        let fixture = images.fixture_without_fallback();
+        let session = fixture.session(None);
+        fixture.stamp_golden(PlatformKey::host().as_str());
+        let stamped = fs::read(&fixture.golden).unwrap();
+
+        let compared = fixture.run(&session, Mode::Compare, &stamped);
+        assert_eq!(compared.verdict, Verdict::Identical, "{}", compared.message);
+        assert_eq!(
+            fixture.run(&session, Mode::Compare, &images.png()).verdict,
+            Verdict::Identical,
+            "without the stamp too"
+        );
+        let modified = fs::metadata(&fixture.golden).unwrap().modified().unwrap();
+        let updated = fixture.run(&session, Mode::Update, &stamped);
+        assert_eq!(updated.verdict, Verdict::Updated, "{}", updated.message);
+        assert_eq!(
+            fs::metadata(&fixture.golden).unwrap().modified().unwrap(),
+            modified,
+            "the same image is not written again"
         );
     }
 

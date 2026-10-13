@@ -912,7 +912,7 @@ pub fn millis(duration: Duration) -> f64 {
 pub struct CaseReport {
     /// Version of this format (`CASE_SCHEMA_VERSION`).
     #[serde(deserialize_with = "schema_version")]
-    #[schemars(range(min = 4, max = 4))]
+    #[schemars(range(min = CASE_SCHEMA_VERSION, max = CASE_SCHEMA_VERSION))]
     pub schema_version: u32,
     /// Canonical test name: the golden path relative to the workspace root without extension, as
     /// lowercase `[a-z0-9_.-]` segments separated by `/`. It is the file name of the report under
