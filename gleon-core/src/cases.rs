@@ -766,7 +766,7 @@ pub(crate) mod fixtures {
                 blob: None,
                 width: Some(10),
                 height: Some(10),
-                fallback: None,
+                platform: None,
             },
             candidate: CandidateImage {
                 sha256: Some(candidate),
@@ -1006,10 +1006,10 @@ mod tests {
         write(&runs_latest, report("live", CaseOutcome::Match), None, 10);
         write(&runs_latest, report("gone", CaseOutcome::Match), None, 10);
         write(&runs_latest, report("new", CaseOutcome::Missing), None, 10);
-        // Compared on another platform than the fallback platform: the same golden.
+        // A golden recorded on another platform: kept like any other while it exists.
         let mut fallback = report("fallback", CaseOutcome::Match);
         fallback.golden.path = "live.png".to_owned();
-        fallback.golden.fallback = Some("live.png".to_owned());
+        fallback.golden.platform = Some(PlatformKey::parse("os=elsewhere").unwrap());
         write(&runs_latest, fallback, None, 10);
         write(
             &runs_latest,

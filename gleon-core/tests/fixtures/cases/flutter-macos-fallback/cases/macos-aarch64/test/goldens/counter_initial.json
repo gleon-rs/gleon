@@ -1,12 +1,11 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "name": "test/goldens/counter_initial",
   "golden": {
     "path": "test/goldens/counter_initial.png",
     "sha256": "67fb28e3f28ae98186e3e13adb7c1f3c67489de8ce49508ffe31b69d46fcd8c0",
     "width": 360,
-    "height": 640,
-    "fallback": "test/goldens/counter_initial.png"
+    "height": 640
   },
   "candidate": {
     "width": 360,
@@ -66,9 +65,9 @@
     }
   ],
   "timings_ms": {
-    "total": 1.78,
-    "native": 0.559
+    "total": 1.043,
+    "native": 0.574
   },
   "run_id": "fallback-fixture-1",
-  "recorded_at": "2026-10-13T19:29:19.389850Z"
+  "recorded_at": "2026-10-13T21:25:10.301906Z"
 }

@@ -16,7 +16,9 @@ use std::{
 use gleon_engine::config::Zone;
 use gleon_model::{
     case::{RUN_ID_ENV, RunId},
-    config::{ArtifactsDir, GITIGNORE_LINES, GleonConfig, MetricsConfig},
+    config::{
+        ArtifactsDir, GITIGNORE_LINES, GleonConfig, MetricsConfig, REQUIRE_CANONICAL_ENV, env_flag,
+    },
     platform::PlatformKey,
     rules::{RuleMatch, RuleSet},
     tolerance::{TextTolerance, Tolerance},
@@ -37,6 +39,8 @@ pub struct SessionOptions {
     pub artifacts_env: Option<String>,
     /// Raw `GLEON_RUN_ID` value, `None` when unset.
     pub run_id_env: Option<String>,
+    /// Raw `GLEON_REQUIRE_CANONICAL` value, `None` when unset.
+    pub require_canonical_env: Option<String>,
     /// Who calls.
     pub integration: Integration,
 }
@@ -121,29 +125,17 @@ struct Compiled {
     tracking: Tracking,
 }
 
-/// Where the regressions of a golden are tracked (the `fallback_platform` of its workspace), seen
-/// from the running platform.
+/// The canonical platform of a golden (the `fallback_platform` of its workspace), seen from the
+/// running platform: where goldens without a stamp were recorded, and the platform that records
+/// again what other platforms recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tracking {
-    /// No `fallback_platform`, or a golden no rule matches: recorded on an unknown platform.
+    /// No `fallback_platform`, or a golden no rule matches.
     Unknown,
-    /// This platform is the `fallback_platform`: text is compared by default
-    /// ([`gleon_model::tolerance::TextTolerance::OWN_PLATFORM`]).
+    /// This platform is the `fallback_platform`.
     Here,
-    /// On the platform of this key: text is ignored by default here, and update mode writes no
-    /// golden that would change.
+    /// The platform of this key is the `fallback_platform`.
     Elsewhere(PlatformKey),
-}
-
-impl Tracking {
-    /// The `fallback_platform`, when it is another platform.
-    #[must_use]
-    pub const fn elsewhere(&self) -> Option<&PlatformKey> {
-        match self {
-            Self::Elsewhere(platform) => Some(platform),
-            Self::Unknown | Self::Here => None,
-        }
-    }
 }
 
 /// The config compiled from one version of the file (or why it is invalid).
@@ -358,6 +350,8 @@ pub struct Session {
     artifacts_override: Option<ArtifactsDir>,
     /// `GLEON_RUN_ID`, when set.
     pub run_id: Option<RunId>,
+    /// `GLEON_REQUIRE_CANONICAL`: the `fallback_platform` compares every golden as its own.
+    require_canonical: bool,
     /// Who calls.
     pub integration: Integration,
     warned: AtomicBool,
@@ -375,6 +369,9 @@ pub struct Plan {
     pub text: Option<TextTolerance>,
     /// Where the regressions of the golden are tracked, seen from here.
     pub tracking: Tracking,
+    /// Whether this platform, the `fallback_platform`, compares every golden as its own
+    /// (`GLEON_REQUIRE_CANONICAL`), wherever it was recorded.
+    pub requires_canonical: bool,
     /// Whether the golden belongs to a workspace (failure messages point at `.gleon/gleon.yaml`
     /// otherwise).
     pub has_workspace: bool,
@@ -431,11 +428,17 @@ impl Session {
             .map_err(|e| config_error(e.to_string()));
         let run_id = RunId::from_env(options.run_id_env.as_deref())
             .map_err(|e| config_error(format!("{RUN_ID_ENV}: {e}")));
+        let require_canonical = env_flag(
+            REQUIRE_CANONICAL_ENV,
+            options.require_canonical_env.as_deref(),
+        )
+        .map_err(|e| config_error(e.to_string()));
         let failure = metrics_override
             .as_ref()
             .err()
             .or_else(|| artifacts_override.as_ref().err())
             .or_else(|| run_id.as_ref().err())
+            .or_else(|| require_canonical.as_ref().err())
             .cloned();
         Self {
             failure,
@@ -444,6 +447,7 @@ impl Session {
             metrics_override: metrics_override.unwrap_or_default(),
             artifacts_override: artifacts_override.unwrap_or_default(),
             run_id: run_id.unwrap_or_default(),
+            require_canonical: require_canonical.ok().flatten().unwrap_or_default(),
             integration: options.integration,
             warned: AtomicBool::new(false),
         }
@@ -553,6 +557,7 @@ impl Session {
             tolerance: tolerance.or(rule_tolerance).unwrap_or(Tolerance::Exact {}),
             masks,
             text: text.or(rule_text),
+            requires_canonical: self.require_canonical && tracking == Tracking::Here,
             tracking,
             has_workspace,
             in_workspace,
@@ -975,8 +980,8 @@ metrics:
         let golden = root.join("test/goldens/a.png");
         let plan = session(None).plan(&golden, None, vec![], None).unwrap();
         assert_eq!(
-            plan.tracking.elsewhere().map(PlatformKey::as_str),
-            Some("ios")
+            plan.tracking,
+            Tracking::Elsewhere(PlatformKey::parse("ios").unwrap())
         );
         assert_eq!(plan.in_workspace.unwrap().golden_path, "test/goldens/a.png");
 

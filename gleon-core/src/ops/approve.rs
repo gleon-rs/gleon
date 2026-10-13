@@ -313,8 +313,8 @@ impl std::fmt::Display for ApprovedCase {
 pub struct ApproveResult {
     /// The cases approved, sorted by platform key, then name.
     pub approved: Vec<ApprovedCase>,
-    /// What reading the runs skipped (see [`Cases::warnings`]), then the cases of integrations
-    /// skipped on platforms other than the fallback platform.
+    /// What reading the runs skipped (see [`Cases::warnings`]), then the cases of integrations on
+    /// other platforms whose golden the fallback platform reported too.
     pub warnings: Vec<String>,
 }
 
@@ -410,29 +410,34 @@ fn target(
     golden_file(base_dir, report).map(Target::File)
 }
 
-/// Whether an integration's `report` ran on another platform than `tracking` (the
-/// `fallback_platform` of `.gleon/gleon.yaml`), which tracks the goldens: its golden is updated
-/// there only. The platform is matched the way integrations match it
-/// ([`PlatformConfig::matches_platform`]); without a `fallback_platform` every platform
-/// updates the goldens, like integrations do.
-fn is_tracked_elsewhere(report: &CaseReport, tracking: Option<&PlatformConfig>) -> bool {
+/// Whether an integration's `report` ran on `tracking` (the `fallback_platform` of
+/// `.gleon/gleon.yaml`), matched the way integrations match it
+/// ([`PlatformConfig::matches_platform`]): its candidate wins over other platforms'.
+fn is_canonical(report: &CaseReport, tracking: Option<&PlatformConfig>) -> bool {
     report.source.tool != CLI_TOOL
         && tracking.is_some_and(|tracking| {
-            !tracking
+            tracking
                 .matches_platform(&report.platform)
                 .unwrap_or_default()
         })
 }
 
 /// The candidates of the failed cases of the `loaded` runs that match `filters`, one per
-/// baseline, and the cases skipped because an integration's golden is tracked on another
-/// platform than theirs (`tracking`).
+/// baseline, and the cases skipped because the fallback platform (`tracking`) reported their
+/// golden too: passed, it is canonical; failed, its own candidate replaces it.
 fn candidates_of<'a>(
     base_dir: &Path,
     filters: &[PathBuf],
     loaded: &'a [(&'a Path, Cases)],
     tracking: Option<&PlatformConfig>,
 ) -> Result<(Vec<Candidate<'a>>, Vec<ApprovedCase>), ApproveError> {
+    // The goldens of integrations the fallback platform reported, whatever their outcome.
+    let canonical = loaded
+        .iter()
+        .flat_map(|(_, cases)| cases.reports())
+        .filter(|report| is_canonical(report, tracking))
+        .map(|report| report.golden.path.as_str())
+        .collect::<std::collections::HashSet<_>>();
     let mut candidates = Vec::<Candidate<'a>>::new();
     let mut skipped = Vec::new();
     // The index in `candidates` of the candidate of each target.
@@ -449,13 +454,6 @@ fn candidates_of<'a>(
             if !can_approve {
                 continue;
             }
-            if is_tracked_elsewhere(report, tracking) {
-                skipped.push(ApprovedCase {
-                    platform: platform_key.clone(),
-                    name: report.name.clone(),
-                });
-                continue;
-            }
             // A valid report keeps its candidate under `.gleon/runs/`, inside the run directory.
             let (Some(file), Some(sha256)) = (
                 report
@@ -466,33 +464,39 @@ fn candidates_of<'a>(
             ) else {
                 continue;
             };
-            let target = target(base_dir, report, platform_key)?;
-            match by_target.entry(target.clone()) {
-                Entry::Occupied(first) => {
-                    let first = &candidates[*first.get()];
-                    if first.sha256 != sha256 {
-                        return Err(ApproveError::ConflictingCandidates {
-                            name: report.name.clone(),
-                            first: first.file.clone(),
-                            first_platform: first.platform_key.clone(),
-                            second: file,
-                            second_platform: platform_key.clone(),
-                        });
-                    }
-                    // The same candidate from another run (e.g. two jobs of one platform).
-                    continue;
-                }
-                Entry::Vacant(slot) => {
-                    let _ = slot.insert(candidates.len());
-                }
-            }
-            candidates.push(Candidate {
+            let candidate = Candidate {
                 report,
                 platform_key: platform_key.clone(),
                 sha256,
                 file,
-                target,
-            });
+                target: target(base_dir, report, platform_key)?,
+            };
+            if report.source.tool != CLI_TOOL
+                && !is_canonical(report, tracking)
+                && canonical.contains(report.golden.path.as_str())
+            {
+                skipped.push(candidate.approved());
+                continue;
+            }
+            match by_target.entry(candidate.target.clone()) {
+                Entry::Occupied(first) => {
+                    let first = &candidates[*first.get()];
+                    if first.sha256 != candidate.sha256 {
+                        return Err(ApproveError::ConflictingCandidates {
+                            name: report.name.clone(),
+                            first: first.file.clone(),
+                            first_platform: first.platform_key.clone(),
+                            second: candidate.file,
+                            second_platform: candidate.platform_key,
+                        });
+                    }
+                    // The same candidate from another run (e.g. two jobs of one platform).
+                }
+                Entry::Vacant(slot) => {
+                    let _ = slot.insert(candidates.len());
+                    candidates.push(candidate);
+                }
+            }
         }
     }
     // Once per case (two runs of one platform report it twice), in the order of approvals.
@@ -505,8 +509,8 @@ fn candidates_of<'a>(
 fn skipped_cases(skipped: &[ApprovedCase]) -> Option<String> {
     (!skipped.is_empty()).then(|| {
         format!(
-            "Skipped {} case(s) of integrations on a platform other than `fallback_platform`, \
-             which tracks their goldens: {}. Update these goldens on that platform.",
+            "Skipped {} case(s) of other platforms whose golden the `fallback_platform` reported \
+             too: {}.",
             skipped.len(),
             ListedCases(skipped)
         )
@@ -598,9 +602,10 @@ fn nothing_to_approve(
 ///
 /// Failed cases are `mismatch`, `dimension_mismatch` and `missing`. Cases of `gleon diff` become
 /// manifests and blobs on the platform of the case, cases of integrations without manifests
-/// overwrite their golden PNG file, from the fallback platform (`fallback_platform`) only: the
-/// cases of another platform are skipped with a warning, since the goldens are tracked there.
-/// Every candidate is checked before the first write.
+/// overwrite their golden PNG file, stamped with the platform of the case
+/// ([`gleon_model::origin`]); when the fallback platform (`fallback_platform`) reported a golden
+/// (passed: it is canonical; failed: its candidate replaces it), the cases of other platforms for
+/// it are skipped with a warning. Every candidate is checked before the first write.
 ///
 /// `runs` are directories standing in for `.gleon/runs/latest` (the downloaded runs of CI jobs,
 /// with `cases/` and `artifacts/`), each read as it is; without them the latest run of the
@@ -678,8 +683,11 @@ pub fn approve_workspace(
         };
         let (candidate, platform_key, phash, width, height) = match approval {
             Approval::File { candidate, golden } => {
-                // Read again: it must still be the checked candidate.
-                write(golden, &read_candidate(candidate)?)?;
+                // Read again: it must still be the checked candidate. Stamped with the platform
+                // it was recorded on, whose text compares it.
+                let png = read_candidate(candidate)?;
+                let stamped = gleon_model::origin::stamp(&png, &candidate.platform_key);
+                write(golden, stamped.as_deref().unwrap_or(&png))?;
                 approved.push(candidate.approved());
                 continue;
             }
@@ -779,6 +787,14 @@ mod tests {
             .write_to(&mut io::Cursor::new(&mut bytes), image::ImageFormat::Png)
             .unwrap();
         bytes
+    }
+
+    fn windows() -> PlatformConfig {
+        PlatformConfig::Structured(PlatformFields {
+            os: Some("windows".to_owned()),
+            arch: Some("x86_64".to_owned()),
+            ..PlatformFields::default()
+        })
     }
 
     fn linux() -> PlatformConfig {
@@ -1130,11 +1146,11 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(temp.path().join("goldens/test/goldens/a.png")).unwrap(),
-            png(3)
+            stamped(&png(3), LINUX)
         );
         assert_eq!(
             std::fs::read(temp.path().join("goldens/test/goldens/b.png")).unwrap(),
-            png(4)
+            stamped(&png(4), LINUX)
         );
         assert!(!temp.path().join(".gleon/manifests").exists());
     }
@@ -1173,16 +1189,23 @@ mod tests {
         assert_eq!(approved(&res), ["linux-x86_64/g"]);
     }
 
-    /// Integrations track their goldens on the fallback platform (`fallback_platform`): the cases
-    /// of another platform are skipped with a warning (once per case, sorted, whatever the
-    /// runs), whether they compared its golden (`golden.fallback`) or found none. Without a
-    /// `fallback_platform` every platform's cases are approved, as integrations update there.
+    /// The golden file approve writes from the candidate `png` of a case of `platform`: stamped
+    /// with that platform.
+    fn stamped(png: &[u8], platform: &str) -> Vec<u8> {
+        gleon_model::origin::stamp(png, &PlatformKey::parse(platform).unwrap()).unwrap()
+    }
+
+    /// Integrations record goldens on any platform: each approved golden is stamped with the
+    /// platform of its case. When the fallback platform (`fallback_platform`) offers a candidate
+    /// for a golden, it wins over the others, whatever the order of the runs; they are skipped
+    /// with a warning (once per case, sorted).
     #[test]
-    fn test_approve_skips_integration_cases_of_other_platforms() {
+    fn test_approve_prefers_the_candidates_of_the_fallback_platform() {
         let (temp, mut ctx) = workspace();
         ctx.config = tracked_on("macos-aarch64");
         let macos_run = temp.path().join("download/metrics-macos-arm64");
         let linux_run = temp.path().join("download/metrics-linux-x64");
+        let windows_run = temp.path().join("download/metrics-windows-x64");
         failed_case_on(
             &macos_run,
             "test/goldens/a",
@@ -1191,15 +1214,17 @@ mod tests {
             &png(1),
             macos(),
         );
-        let mut compared = failed_case(
-            &linux_run,
-            "test/goldens/a",
-            "gleon_flutter",
-            CaseOutcome::Mismatch,
-            &png(2),
-        );
-        compared.golden.fallback = Some(compared.golden.path.clone());
-        write_case(&linux_run, &compared);
+        for (run, shade) in [(&linux_run, 2), (&windows_run, 4)] {
+            let platform = if shade == 2 { linux() } else { windows() };
+            failed_case_on(
+                run,
+                "test/goldens/a",
+                "gleon_flutter",
+                CaseOutcome::Mismatch,
+                &png(shade),
+                platform,
+            );
+        }
         failed_case(
             &linux_run,
             "test/goldens/b",
@@ -1207,7 +1232,7 @@ mod tests {
             CaseOutcome::Missing,
             &png(3),
         );
-        // Another job of the same platform, read first.
+        // Another job of the same platform: the same candidate is one approval.
         let linux_job = temp.path().join("download/metrics-linux-x64-2");
         failed_case(
             &linux_job,
@@ -1216,36 +1241,93 @@ mod tests {
             CaseOutcome::Missing,
             &png(3),
         );
-        let skipped = "Skipped 2 case(s) of integrations on a platform other than \
-                       `fallback_platform`, which tracks their goldens: \
-                       linux-x86_64/test/goldens/a, linux-x86_64/test/goldens/b. Update these \
-                       goldens on that platform.";
+        let skipped = "Skipped 2 case(s) of other platforms whose golden the \
+                       `fallback_platform` reported too: linux-x86_64/test/goldens/a, \
+                       windows-x86_64/test/goldens/a.";
 
-        let res =
-            approve_workspace(&ctx, &[], &[linux_job, macos_run, linux_run.clone()], None).unwrap();
-        assert_eq!(approved(&res), ["macos-aarch64/test/goldens/a"]);
+        let res = approve_workspace(
+            &ctx,
+            &[],
+            &[
+                linux_job,
+                linux_run.clone(),
+                windows_run.clone(),
+                macos_run.clone(),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            approved(&res),
+            [
+                "linux-x86_64/test/goldens/b",
+                "macos-aarch64/test/goldens/a"
+            ]
+        );
         assert_eq!(res.warnings, [skipped]);
         let golden = |name: &str| temp.path().join(format!("goldens/test/goldens/{name}.png"));
-        assert_eq!(std::fs::read(golden("a")).unwrap(), png(1));
-        assert!(!golden("b").exists());
+        assert_eq!(
+            std::fs::read(golden("a")).unwrap(),
+            stamped(&png(1), "macos-aarch64")
+        );
+        assert_eq!(std::fs::read(golden("b")).unwrap(), stamped(&png(3), LINUX));
 
-        let err = approve_workspace(&ctx, &[], std::slice::from_ref(&linux_run), None).unwrap_err();
+        // Without a candidate of the fallback platform, or without one, other platforms
+        // disagreeing on a golden are a conflict.
+        for config in [tracked_on("macos-aarch64"), None] {
+            ctx.config = config;
+            let err = approve_workspace(&ctx, &[], &[linux_run.clone(), windows_run.clone()], None)
+                .unwrap_err();
+            assert!(
+                matches!(err, ApproveError::ConflictingCandidates { .. }),
+                "{err}"
+            );
+        }
+    }
+
+    /// A golden the fallback platform passed is its own: another platform's failure of it is
+    /// skipped (approving it would replace the canonical golden with that platform's render), while
+    /// goldens the fallback platform did not report are approved from any platform.
+    #[test]
+    fn test_approve_keeps_goldens_the_fallback_platform_passed() {
+        let (temp, mut ctx) = workspace();
+        ctx.config = tracked_on("macos-aarch64");
+        let macos_run = temp.path().join("download/metrics-macos-arm64");
+        let linux_run = temp.path().join("download/metrics-linux-x64");
+        let mut pass = report_on("test/goldens/a", CaseOutcome::Match, macos());
+        pass.run_id = Some(RunId::new("run-1").unwrap());
+        pass.source.tool = "gleon_flutter".to_owned();
+        pass.golden.path = "goldens/test/goldens/a.png".to_owned();
+        write_case(&macos_run, &pass);
+        failed_case(
+            &linux_run,
+            "test/goldens/a",
+            "gleon_flutter",
+            CaseOutcome::Mismatch,
+            &png(2),
+        );
+        let skipped = "Skipped 1 case(s) of other platforms whose golden the \
+                       `fallback_platform` reported too: linux-x86_64/test/goldens/a.";
+
+        let err = approve_workspace(&ctx, &[], &[macos_run.clone(), linux_run.clone()], None)
+            .unwrap_err();
         assert!(
             matches!(&err, ApproveError::NothingToApprove { .. })
                 && err.to_string().ends_with(&format!("--from\n{skipped}")),
             "{err}"
         );
+        assert!(!temp.path().join("goldens/test/goldens/a.png").exists());
 
-        // Without a `fallback_platform` (any more) every platform updates the goldens.
-        ctx.config = None;
-        let res = approve_workspace(&ctx, &[], &[linux_run], None).unwrap();
-        assert_eq!(
-            approved(&res),
-            ["linux-x86_64/test/goldens/a", "linux-x86_64/test/goldens/b"]
+        failed_case(
+            &linux_run,
+            "test/goldens/b",
+            "gleon_flutter",
+            CaseOutcome::Missing,
+            &png(3),
         );
-        assert!(res.warnings.is_empty(), "{:?}", res.warnings);
-        assert_eq!(std::fs::read(golden("a")).unwrap(), png(2));
-        assert_eq!(std::fs::read(golden("b")).unwrap(), png(3));
+        let res = approve_workspace(&ctx, &[], &[macos_run, linux_run], None).unwrap();
+        assert_eq!(approved(&res), ["linux-x86_64/test/goldens/b"]);
+        assert_eq!(res.warnings, [skipped]);
     }
 
     /// The fallback platform of integrations is matched the way gleon-ffi matches its host: by
@@ -1272,9 +1354,9 @@ mod tests {
             );
             failed_case(
                 &run,
-                "test/goldens/b",
+                "test/goldens/a",
                 "gleon_flutter",
-                CaseOutcome::Missing,
+                CaseOutcome::Mismatch,
                 &png(2),
             );
 
@@ -1285,7 +1367,11 @@ mod tests {
                 "{fallback}"
             );
             assert_eq!(res.warnings.len(), 1, "{fallback}: {:?}", res.warnings);
-            assert!(!temp.path().join("goldens/test/goldens/b.png").exists());
+            assert_eq!(
+                std::fs::read(temp.path().join("goldens/test/goldens/a.png")).unwrap(),
+                stamped(&png(1), "macos-aarch64"),
+                "{fallback}"
+            );
         }
     }
 
@@ -1296,14 +1382,13 @@ mod tests {
         let run = temp.path().join("download/metrics-windows-x64");
         let mut pass = report("test/goldens/a", CaseOutcome::Match);
         pass.source.tool = "gleon_flutter".to_owned();
-        pass.golden.fallback = Some(pass.golden.path.clone());
         pass.golden.sha256 = Some(Sha256Hex::of(&png(5)));
         pass.validate().unwrap();
         write_case(&run, &pass);
 
         let err = approve_workspace(&ctx, &[], &[run], None).unwrap_err();
         assert!(
-            matches!(&err, ApproveError::NothingToApprove { skipped, .. } if skipped.is_empty()),
+            matches!(&err, ApproveError::NothingToApprove { .. }),
             "{err}"
         );
     }
@@ -1544,7 +1629,7 @@ mod tests {
         assert_eq!(approved(&res), ["linux-x86_64/test/goldens/a"]);
         assert_eq!(
             std::fs::read(temp.path().join("goldens/test/goldens/a.png")).unwrap(),
-            png(1)
+            stamped(&png(1), LINUX)
         );
     }
 

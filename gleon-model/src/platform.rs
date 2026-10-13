@@ -45,9 +45,9 @@ pub enum PlatformError {
 /// Only canonical keys exist: the key of a platform ([`PlatformConfig::key`],
 /// [`PlatformInfo::key`]) or a string that is exactly one ([`Self::parse`]), so two keys are
 /// equal exactly when they name the same directory.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
-pub struct PlatformKey(String);
+pub struct PlatformKey(#[schemars(regex(pattern = r"^[a-z0-9_.+=-]+$"))] String);
 
 impl PlatformKey {
     /// `key` if it is a platform key in its canonical form: what [`validate_key`] returns for it

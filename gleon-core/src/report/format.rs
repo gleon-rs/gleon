@@ -124,8 +124,8 @@ impl std::fmt::Display for CaseSummary<'_> {
             outcome => outcome.as_str(),
         };
         write!(f, ": {}", detail.as_deref().unwrap_or(otherwise))?;
-        if let Some(shared) = &report.golden.fallback {
-            write!(f, " ({})", text::ComparedWithFallback(shared))?;
+        if let Some(origin) = report.recorded_elsewhere() {
+            write!(f, " ({})", text::RecordedOn(origin))?;
         }
         Ok(())
     }
@@ -230,12 +230,11 @@ mod tests {
         );
         assert_eq!(status(CaseOutcome::Identical), "Pass");
 
-        let mut fallback = report("a", CaseOutcome::Mismatch);
-        fallback.golden.fallback = Some("test/goldens/a.png".to_owned());
+        let mut elsewhere = report("a", CaseOutcome::Mismatch);
+        elsewhere.golden.platform = Some(PlatformKey::parse("os=elsewhere").unwrap());
         assert_eq!(
-            CaseSummary(&fallback).to_string(),
-            "Mismatch: 5.00% (5 of 100px) differ (compared with test/goldens/a.png of the \
-             fallback platform)"
+            CaseSummary(&elsewhere).to_string(),
+            "Mismatch: 5.00% (5 of 100px) differ (golden recorded on os=elsewhere)"
         );
     }
 }

@@ -1713,6 +1713,7 @@ name = "gleon-model"
 version = "0.3.0"
 dependencies = [
  "chrono",
+ "crc32fast",
  "gleon-engine",
  "glob",
  "globset",

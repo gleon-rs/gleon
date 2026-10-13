@@ -7,7 +7,7 @@
 //!
 //! Case reports are written by the integrations (the Flutter package through `gleon-ffi`) and are
 //! meant as the one result format the gleon CLI reads too; the schema is committed as
-//! `schema/case.v4.json`. Enums are internally tagged (`"kind"`) and every name is `snake_case`, so
+//! `schema/case.v5.json`. Enums are internally tagged (`"kind"`) and every name is `snake_case`, so
 //! non-Rust writers never mirror Rust type names. Names and paths are checked when a report is
 //! read ([`CaseReport::parse`]), so a report never leads a reader outside its workspace.
 //!
@@ -38,7 +38,7 @@ use crate::{
 };
 
 /// Version of the case report format.
-pub const CASE_SCHEMA_VERSION: u32 = 4;
+pub const CASE_SCHEMA_VERSION: u32 = 5;
 
 /// Directory of the case reports, relative to `.gleon/`.
 pub const CASES_DIR: &str = "runs/latest/cases";
@@ -496,23 +496,16 @@ pub struct GoldenImage {
     /// Height in pixels; absent if the PNG header could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    /// The golden of the `fallback_platform` of the workspace (the platform that tracks
-    /// regressions), when an integration compared it on another platform: the same file as `path`
-    /// for integrations that commit goldens as image files. `gleon approve` skips such cases: their
-    /// goldens are updated on the fallback platform only.
-    #[serde(
-        default,
-        deserialize_with = "optional_workspace_path",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(regex(
-        pattern = r"^(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*$"
-    ))]
-    pub fallback: Option<String>,
+    /// The platform the golden was recorded on, as the gleon chunk of its PNG names it
+    /// ([`crate::origin`]); absent for a golden without one (recorded by another tool or before
+    /// gleon 0.4.0, then taken as recorded on the `fallback_platform` of the workspace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<PlatformKey>,
 }
 
 impl GoldenImage {
-    /// The golden at `path` with the PNG bytes `png` (`None` when it does not exist).
+    /// The golden at `path` with the PNG bytes `png` (`None` when it does not exist), recorded on
+    /// the platform its gleon chunk names.
     #[must_use]
     pub fn of(path: String, png: Option<&[u8]>, blob: Option<ImageHash>) -> Self {
         let size = png.and_then(png_size);
@@ -522,7 +515,7 @@ impl GoldenImage {
             blob,
             width: size.map(|(width, _)| width),
             height: size.map(|(_, height)| height),
-            fallback: None,
+            platform: png.and_then(crate::origin::read),
         }
     }
 }
@@ -758,15 +751,6 @@ impl CaseOutcome {
         )
     }
 
-    /// Whether a golden was compared: `identical`, `match`, `mismatch` or `dimension_mismatch`.
-    #[must_use]
-    pub const fn has_compared(self) -> bool {
-        matches!(
-            self,
-            Self::Identical | Self::Match | Self::Mismatch | Self::DimensionMismatch
-        )
-    }
-
     /// The name of this outcome in a case report (`dimension_mismatch`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -998,6 +982,17 @@ impl CaseReport {
         self.platform.key()
     }
 
+    /// The platform the golden was recorded on ([`GoldenImage::platform`]) when it is not the
+    /// platform of this report.
+    #[must_use]
+    pub fn recorded_elsewhere(&self) -> Option<&PlatformKey> {
+        let own = self.platform_key().ok();
+        self.golden
+            .platform
+            .as_ref()
+            .filter(|origin| own.as_ref() != Some(*origin))
+    }
+
     /// Parses a report, telling a report of another schema version apart from a broken one (a
     /// reader skips the former with a hint to update the integration that wrote it).
     ///
@@ -1045,14 +1040,15 @@ impl CaseReport {
         if self.error_kind.is_some() != (self.outcome == O::Error) {
             return Err(InconsistentCase::ErrorKind);
         }
-        if self.outcome == O::Missing && self.golden.sha256.is_some() {
+        if self.outcome == O::Missing
+            && (self.golden.sha256.is_some() || self.golden.platform.is_some())
+        {
             return Err(InconsistentCase::MissingGoldenHash);
         }
-        if self.golden.fallback.is_some() && !self.outcome.has_compared() {
-            return Err(InconsistentCase::Fallback);
-        }
+        // A stamped golden hashes with its stamp, which identical images leave aside.
         if self.outcome == O::Identical
-            && (self.candidate.sha256.is_none() || self.golden.sha256 != self.candidate.sha256)
+            && (self.candidate.sha256.is_none()
+                || (self.golden.platform.is_none() && self.golden.sha256 != self.candidate.sha256))
         {
             return Err(InconsistentCase::IdenticalHashes);
         }
@@ -1227,14 +1223,11 @@ pub enum InconsistentCase {
     /// `error_kind` without `outcome: error`, or an error without it.
     #[error("`error_kind` is set exactly for `outcome: error`")]
     ErrorKind,
-    /// A missing golden with a hash.
-    #[error("a missing golden has no `golden.sha256`")]
+    /// A missing golden with a hash or a platform.
+    #[error("a missing golden has no `golden.sha256` nor `golden.platform`")]
     MissingGoldenHash,
-    /// A fallback golden of an outcome that compared none.
-    #[error("`golden.fallback` belongs to outcomes that compared a golden")]
-    Fallback,
-    /// Identical images with different hashes.
-    #[error("`identical` images have the same `sha256`")]
+    /// Identical images with different hashes (but of a stamped golden).
+    #[error("`identical` images have the same `sha256`, unless the golden names its `platform`")]
     IdenticalHashes,
     /// A kept candidate image without its hash (`gleon approve` checks the file against it).
     #[error("a candidate kept in `artifacts` has its `candidate.sha256`")]
@@ -1304,15 +1297,6 @@ fn keyed_platform<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Platform
 
 fn workspace_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     checked_workspace_path(String::deserialize(deserializer)?)
-}
-
-/// An optional [`workspace_path`]: `null` (which the schema allows) is `None`, like a missing key.
-fn optional_workspace_path<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error> {
-    Option::<String>::deserialize(deserializer)?
-        .map(checked_workspace_path)
-        .transpose()
 }
 
 fn checked_workspace_path<E: serde::de::Error>(path: String) -> Result<String, E> {
@@ -1595,16 +1579,15 @@ pub mod text {
         )
     }
 
-    /// The note on a case of another platform ([`super::GoldenImage::fallback`]).
-    ///
-    /// Written without an intermediate `String`, e.g.
-    /// `compared with test/goldens/a.png of the fallback platform`.
+    /// The note on a case whose golden was recorded on another platform
+    /// ([`super::GoldenImage::platform`]), e.g. `golden recorded on linux-x86_64`; written
+    /// without an intermediate `String`.
     #[derive(Debug, Clone, Copy)]
-    pub struct ComparedWithFallback<'a>(pub &'a str);
+    pub struct RecordedOn<'a>(pub &'a super::PlatformKey);
 
-    impl std::fmt::Display for ComparedWithFallback<'_> {
+    impl std::fmt::Display for RecordedOn<'_> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "compared with {} of the fallback platform", self.0)
+            write!(f, "golden recorded on {}", self.0)
         }
     }
 
@@ -2248,11 +2231,18 @@ mod tests {
                 blob: Some(blob),
                 width: Some(4),
                 height: Some(3),
-                fallback: None,
+                platform: None,
             }
         );
         let missing = GoldenImage::of("a.png".to_owned(), None, None);
         assert_eq!((missing.sha256, missing.width), (None, None));
+        // The platform a golden was recorded on comes from its PNG.
+        let png = crate::compare::encode_png(&image::RgbaImage::new(2, 1)).unwrap();
+        let linux = PlatformKey::parse("linux-x86_64").unwrap();
+        let stamped = crate::origin::stamp(&png, &linux).unwrap();
+        let golden = GoldenImage::of("a.png".to_owned(), Some(&stamped), None);
+        assert_eq!(golden.platform, Some(linux));
+        assert_eq!(golden.sha256, Some(Sha256Hex::of(&stamped)));
         let candidate = CandidateImage::of(b"garbage");
         assert_eq!(candidate.sha256, Some(Sha256Hex::of(b"garbage")));
         assert_eq!((candidate.width, candidate.height), (None, None));
@@ -2543,7 +2533,7 @@ mod tests {
         let mismatch = |platform: serde_json::Value, dir: &str, key: &str| {
             let path = |file: &str| format!("{dir}/{key}/test/goldens/a/{file}");
             serde_json::json!({
-                "schema_version": 4,
+                "schema_version": 5,
                 "name": "test/goldens/a",
                 "golden": {"path": "test/goldens/a.png", "sha256": "1".repeat(64)},
                 "candidate": {"sha256": "0".repeat(64)},
@@ -2654,7 +2644,7 @@ mod tests {
     #[test]
     fn test_parsing_rejects_other_versions_and_paths_leaving_the_workspace() {
         let valid = serde_json::json!({
-            "schema_version": 4,
+            "schema_version": 5,
             "name": "test/goldens/a",
             "golden": {"path": "test/goldens/A.png"},
             "candidate": {"sha256": "0".repeat(64)},
@@ -2684,25 +2674,28 @@ mod tests {
             parse(&keyed).unwrap().platform_key().unwrap(),
             "os=ios-sim+arch=arm"
         );
-        let mut outside = valid.clone();
-        outside["golden"]["fallback"] = "../a.png".into();
-        assert!(matches!(parse(&outside), Err(CaseParseError::Json(_))));
-        // A pass on another platform than the fallback platform names its golden.
-        let mut elsewhere = valid.clone();
-        elsewhere["outcome"] = "match".into();
-        elsewhere["metrics"] = serde_json::json!({
-            "kind": "pixel", "total_pixels": 4, "diff_pixels": 0, "diff_ratio": 0.0, "headroom": 0.0
-        });
-        elsewhere["artifacts"] = serde_json::Value::Null;
-        elsewhere["golden"] = serde_json::json!({
-            "path": "test/goldens/A.png", "fallback": "test/goldens/A.png",
-            "sha256": "1".repeat(64)
-        });
-        let report = parse(&elsewhere).unwrap();
-        assert_eq!(
-            report.golden.fallback.as_deref(),
-            Some("test/goldens/A.png")
+        let mut fallback = valid.clone();
+        fallback["golden"]["fallback"] = "test/goldens/A.png".into();
+        assert!(
+            matches!(parse(&fallback), Err(CaseParseError::Json(_))),
+            "`golden.fallback` is gone since version 5"
         );
+        // A golden names the platform it was recorded on; a stamped file hashes with its stamp,
+        // so identical images of it have another hash.
+        let mut recorded = valid.clone();
+        recorded["outcome"] = "identical".into();
+        recorded["artifacts"] = serde_json::Value::Null;
+        recorded["golden"] = serde_json::json!({
+            "path": "test/goldens/A.png", "platform": "linux-x86_64", "sha256": "1".repeat(64)
+        });
+        let report = parse(&recorded).unwrap();
+        assert_eq!(
+            report.golden.platform.as_ref().map(PlatformKey::as_str),
+            Some("linux-x86_64")
+        );
+        let mut unknown = recorded.clone();
+        unknown["golden"]["platform"] = "Linux x86".into();
+        assert!(matches!(parse(&unknown), Err(CaseParseError::Json(_))));
 
         // Other writers may spell an absent image as `null`, which the schema allows.
         let mut nulls = valid.clone();
@@ -2762,7 +2755,7 @@ mod tests {
         }
         assert_eq!(
             CaseParseError::UnsupportedVersion(2).to_string(),
-            "case report schema 2 is not supported (this gleon reads 4)"
+            "case report schema 2 is not supported (this gleon reads 5)"
         );
 
         let metrics = serde_json::json!({
@@ -2782,15 +2775,8 @@ mod tests {
                 InconsistentCase::MissingGoldenHash,
             ),
             (
-                serde_json::json!({"golden": {"path": "a.png", "fallback": "a.png"}}),
-                InconsistentCase::Fallback,
-            ),
-            (
-                serde_json::json!({
-                    "outcome": "error", "error_kind": "io",
-                    "golden": {"path": "a.png", "fallback": "a.png"}
-                }),
-                InconsistentCase::Fallback,
+                serde_json::json!({"golden": {"path": "a.png", "platform": "linux-x86_64"}}),
+                InconsistentCase::MissingGoldenHash,
             ),
             (
                 serde_json::json!({
@@ -2802,7 +2788,7 @@ mod tests {
             (
                 serde_json::json!({
                     "outcome": "match", "metrics": metrics,
-                    "golden": {"path": "a.png", "fallback": "a.png", "sha256": "1".repeat(64)},
+                    "golden": {"path": "a.png", "platform": "linux-x86_64", "sha256": "1".repeat(64)},
                     "artifacts": {"candidate": ".gleon/runs/latest/artifacts/a/candidate.png"}
                 }),
                 InconsistentCase::Artifacts,

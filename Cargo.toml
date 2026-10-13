@@ -27,6 +27,7 @@ bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "now", "serde"] }
 clap = { version = "4.6.4", features = ["derive", "env"] }
 dialoguer = "0.12.0"
+crc32fast = "1.5.0"
 dotenvy = "0.15.7"
 ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 base64 = "0.23.1"

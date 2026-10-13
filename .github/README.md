@@ -162,10 +162,10 @@ screenshots:
     # under this tolerance (in 'ssim' mode left out of both of its gates), the rest under the
     # rule's mode: the text passes while every 16x16 square of it has at most this share of
     # differing pixels [0.0 - 1.0]. Unset, the default
-    # depends on the golden: 0.05 against a golden of the platform the test runs on (see
-    # `fallback_platform`), else 1 (text never fails, because operating systems rasterize glyphs
-    # differently, about 40% of a square, more than a changed character does). A value set here
-    # always applies: 1 turns text comparison off everywhere. `gleon diff` sees no text.
+    # depends on the golden: 0.05 on the platform it was recorded on (see `fallback_platform`),
+    # else 1 (text never fails, because operating systems rasterize glyphs differently, about
+    # 40% of a square, more than a changed character does). A value set here always applies: 1
+    # turns text comparison off everywhere. `gleon diff` sees no text.
     text_tolerance: 1.0
     masks:
       # Optional: Ignore dynamic regions (clocks, avatars, blinking cursors)
@@ -184,10 +184,9 @@ exclude:
 
 # Optional: Fallback platform for Sparse Multi-Platform Baselines
 # When secondary platforms render identically to the fallback, no duplicate manifests are stored.
-# For integrations with golden files (Flutter) it is the platform that tracks regressions (OS and
-# architecture, with the names a process reports: `macos-aarch64`, not `macos-arm64`): there text
-# is compared by default and goldens are updated; every other platform compares the same goldens
-# with text ignored and updates none that would change.
+# For integrations with golden files (Flutter) it is the canonical platform (OS and architecture,
+# with the names a process reports: `macos-aarch64`, not `macos-arm64`): goldens without a gleon
+# stamp count as recorded there, and it records again what other platforms recorded.
 fallback_platform:
   os: macos
   arch: aarch64
@@ -209,11 +208,11 @@ Remote blob storage (AWS S3, Cloudflare R2, Google Cloud Storage) is configured 
 
 ### Case reports (`metrics`)
 
-Case reports are the one result format of gleon (schema: [`gleon-model/schema/case.v4.json`](../gleon-model/schema/case.v4.json)): `gleon diff` writes one per screenshot, integrations one per golden with metrics enabled. A report holds the golden and candidate SHA-256 and size, the effective tolerance and masks, the outcome (`identical`, `match`, `mismatch`, `dimension_mismatch`, `error` with its kind, `updated`, `missing`), the metrics including their headroom to the thresholds (for example `min_ssim - min_similarity` and `color_tolerance - peak_excess` in SSIM mode) and the paths of the images a failure keeps in the artifacts directory. Passing goldens report their margin too, so thresholds can be tuned from measurements instead of guesses.
+Case reports are the one result format of gleon (schema: [`gleon-model/schema/case.v5.json`](../gleon-model/schema/case.v5.json)): `gleon diff` writes one per screenshot, integrations one per golden with metrics enabled. A report holds the golden and candidate SHA-256 and size, the effective tolerance and masks, the outcome (`identical`, `match`, `mismatch`, `dimension_mismatch`, `error` with its kind, `updated`, `missing`), the metrics including their headroom to the thresholds (for example `min_ssim - min_similarity` and `color_tolerance - peak_excess` in SSIM mode) and the paths of the images a failure keeps in the artifacts directory. Passing goldens report their margin too, so thresholds can be tuned from measurements instead of guesses.
 
 Reports and images are kept per platform: `.gleon/runs/latest/cases/<platform>/<test name>.json` and `<artifacts dir>/<platform>/<test name>/{golden,candidate,diff}.png`, where `<platform>` is the platform key (`macos-aarch64`, `linux-x86_64`, `os=ios-sim+arch=arm` when the OS or architecture contains `-`, then `+<renderer>` and `+<key>=<value>` per label) and `<test name>` the same on every platform. A report lists only images of its own platform and name, and readers skip a report anywhere else (the flat `cases/<test name>.json` of an older gleon, a copy) with a warning; `gleon clean` removes them. Several platforms in one workspace therefore never overwrite each other: a macOS host and a Linux container on a bind-mounted checkout, or several `gleon diff --platform` runs; `gleon diff` clears only its own platform's previous reports and images. To read them as one joint run, give the processes of every platform the same `GLEON_RUN_ID` (`gleon test` keeps a preset one); the HTML and Markdown reports then name the platform next to each test (`test/goldens/a (linux-x86_64)`), while `junit.xml` always names the platform as the `classname` and the test as the `name`, so CI tools track a test case the same way in every run. `gleon diff` exits with the result of its own cases, but renders `report.md`, `junit.xml` and `report.html` from the cases of `gleon diff` in its run on every platform: the joint run when the platforms share `GLEON_RUN_ID`, its own cases otherwise. Downloaded runs of several CI jobs can also be copied into one `latest/` without clashes.
 
-`gleon report`, `gleon dashboard` and `gleon approve` read the reports of one run: the run of `GLEON_RUN_ID` on every platform (set it in CI, e.g. `${{ github.run_id }}-${{ github.run_attempt }}`); without it, the run of each platform on its own: on the platform where `gleon test` ran, the run it recorded in `.gleon/runs/latest/run.json` unless a newer report of that platform belongs to another run; else, and on every other platform, the run of the platform's newest report (`gleon diff` names its own run when `GLEON_RUN_ID` is not set). Platforms that ran apart (two CI jobs copied into one `latest/`, or a container's tests run apart) are thus both read, with a warning that they come from different runs. Reports without a run id (tests run without `gleon test`) are read together, without those whose golden no longer exists, and with a warning that they may mix runs; without metrics integrations record only failures, so such a run counts no passes: run the tests through `gleon test` for complete totals. Only the process environment sets `GLEON_RUN_ID`, never `.gleon/.env`. Invalid reports are skipped with a warning. `--from <dir>` reads a downloaded copy of `.gleon/runs/latest` (relative to the working directory, with its `cases/`) as it is, ignoring `GLEON_RUN_ID`; `gleon approve` takes several (`--from linux/latest --from macos/latest`), and its filters also take `<platform>/<test name>` (as under `cases/`) to approve one platform's case, or a bare platform key (`gleon approve linux-x86_64`) to approve every case of that platform; filters match whole names, by test name and by `<platform>/<test name>` (so `linux-x86_64/foo` also matches a test named `linux-x86_64/foo` on any platform). The approved cases are listed as `<platform>/<test name>`, sorted. `golden.path` is the golden file of an integration, and for `gleon diff` the screenshot whose baseline lives in the manifests. Approving turns cases of `gleon diff` into manifests and blobs of the platform the case ran on, and overwrites the golden PNG of an integration (only `.png` files inside the workspace, outside hidden directories and not through symlinks); every candidate is checked before anything is written, and two different candidates for one golden are refused, naming both candidate files and how to pick one (a `<platform>/<test name>` filter when they come from two platforms, else one run at a time). The manifests of the `fallback_platform` are written first, so another platform's candidate equal to its new baseline keeps no override. `.gleon/history.json` keeps the failures of each run and counts the passes; an entry names the platforms of its run (a joint run all of them, replacing the entry of its first platform when it is recorded again), and the dashboard's platform filter shows a run under each of them.
+`gleon report`, `gleon dashboard` and `gleon approve` read the reports of one run: the run of `GLEON_RUN_ID` on every platform (set it in CI, e.g. `${{ github.run_id }}-${{ github.run_attempt }}`); without it, the run of each platform on its own: on the platform where `gleon test` ran, the run it recorded in `.gleon/runs/latest/run.json` unless a newer report of that platform belongs to another run; else, and on every other platform, the run of the platform's newest report (`gleon diff` names its own run when `GLEON_RUN_ID` is not set). Platforms that ran apart (two CI jobs copied into one `latest/`, or a container's tests run apart) are thus both read, with a warning that they come from different runs. Reports without a run id (tests run without `gleon test`) are read together, without those whose golden no longer exists, and with a warning that they may mix runs; without metrics integrations record only failures, so such a run counts no passes: run the tests through `gleon test` for complete totals. Only the process environment sets `GLEON_RUN_ID`, never `.gleon/.env`. Invalid reports are skipped with a warning. `--from <dir>` reads a downloaded copy of `.gleon/runs/latest` (relative to the working directory, with its `cases/`) as it is, ignoring `GLEON_RUN_ID`; `gleon approve` takes several (`--from linux/latest --from macos/latest`), and its filters also take `<platform>/<test name>` (as under `cases/`) to approve one platform's case, or a bare platform key (`gleon approve linux-x86_64`) to approve every case of that platform; filters match whole names, by test name and by `<platform>/<test name>` (so `linux-x86_64/foo` also matches a test named `linux-x86_64/foo` on any platform). The approved cases are listed as `<platform>/<test name>`, sorted. `golden.path` is the golden file of an integration, and for `gleon diff` the screenshot whose baseline lives in the manifests. Approving turns cases of `gleon diff` into manifests and blobs of the platform the case ran on, and overwrites the golden PNG of an integration (only `.png` files inside the workspace, outside hidden directories and not through symlinks); every candidate is checked before anything is written, and two different candidates for one golden are refused, naming both candidate files and how to pick one (a `<platform>/<test name>` filter when they come from two platforms, else one run at a time), unless the `fallback_platform` reported that golden of an integration: then the other platforms' cases for it are skipped (see "Goldens of integrations on several platforms"). The manifests of the `fallback_platform` are written first, so another platform's candidate equal to its new baseline keeps no override. `.gleon/history.json` keeps the failures of each run and counts the passes; an entry names the platforms of its run (a joint run all of them, replacing the entry of its first platform when it is recorded again), and the dashboard's platform filter shows a run under each of them.
 
 #### Integrations in CI (e.g. Flutter)
 
@@ -237,26 +236,40 @@ On Windows `gleon test -- flutter test` finds `flutter.bat` like a shell does.
 
 #### Goldens of integrations on several platforms
 
-Integrations commit goldens as PNG files, one per test, and `fallback_platform` names the
-platform that tracks their regressions, with the names a process reports (`std::env::consts`:
+Integrations commit goldens as PNG files, one per test, recorded on any platform: each golden
+names the platform it was recorded on in a `tEXt` chunk of its PNG (`gleon:platform`, e.g.
+`macos-aarch64`; decoders ignore it). Its text is compared there (`text_tolerance` 0.05: a pixel of
+font-engine noise per 16x16 square passes, a changed digit fails) and ignored elsewhere (1, layout
+exact). A golden without the stamp (recorded by another tool, or before gleon 0.4.0) counts as
+recorded on `fallback_platform`, with the names a process reports (`std::env::consts`:
 `macos-aarch64`, `linux-x86_64`, `windows-x86_64`; `macos-arm64` or `darwin` are config errors,
-since they would never match). Every platform compares the same golden files:
+since they would never match), else nowhere known (text ignored everywhere).
 
-| Where | Compare | Update (`--update-goldens`) |
-|---|---|---|
-| No `fallback_platform` | text ignored (`text_tolerance` 1) | writes the golden |
-| The `fallback_platform` | text compared (`text_tolerance` 0.05: a pixel of font-engine noise per 16x16 square passes, a changed digit fails) | writes the golden |
-| Any other platform | text ignored, layout exact; a failure names the `fallback_platform` | compares first: a pass leaves the golden as it is, a golden that would change fails and is not written |
+| Update mode (`--update-goldens`) | |
+|---|---|
+| A missing golden, or one recorded here or nowhere known | written, stamped with this platform |
+| The same image | left as it is |
+| A golden recorded on another platform | left as it is while the candidate passes against it (only its text differs), so goldens never flip between platforms over their glyphs; written over when it would change |
+| On the `fallback_platform`, a golden recorded elsewhere | recorded again, even when only its text differs |
 
-A `text_tolerance` set in the rule or the call applies on every platform, so `1` turns text
-comparison off on the `fallback_platform` too. A case of another platform names the compared
-golden in `golden.fallback` too; `gleon approve` skips the cases of integrations on other
-platforms than the `fallback_platform` with a warning (matched like integrations match it: OS, and
-architecture when named), so a CI matrix approves the goldens of that platform only.
+The `fallback_platform` warns about each golden recorded elsewhere it compares (its text is not
+compared there); with `GLEON_REQUIRE_CANONICAL=1` it compares them as its own instead, so their
+glyphs fail until they are recorded there. A `text_tolerance` set in the rule or the call
+applies on every platform, so `1` turns text comparison off everywhere. `golden.platform` of a
+case report names the stamp.
+
+`gleon approve` writes the candidates of integrations stamped with the platform of their case.
+When the `fallback_platform` reported a golden in the approved runs, its result holds: passed, the
+golden stays; failed, its candidate is written; the other platforms' cases for that golden are
+skipped with a warning (a `fallback_platform` that names only an OS makes every architecture of it
+canonical, so their differing candidates conflict). PNG optimizers that strip text chunks drop the
+stamp. A `text_tolerance` set below 1 compares text on every platform, so update mode on another
+platform than the golden's rewrites it whenever the glyphs differ: the golden then moves between
+the platforms that update it.
 
 ```bash
 gleon approve --from metrics-macos-arm64
-gleon approve --from metrics-macos-arm64 test/goldens/a.png
+gleon approve --from metrics-macos-arm64 --from metrics-linux-x64
 ```
 
 The platform is the test process's: an x86_64 Flutter under Rosetta on Apple silicon runs as

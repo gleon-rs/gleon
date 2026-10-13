@@ -163,37 +163,38 @@ pub fn unused_text_tolerance(golden_uri: &str) -> String {
     )
 }
 
-/// The clause of a failure on a platform other than `platform`, which tracks the goldens.
-pub fn fallback(platform: &str) -> String {
+/// The clause of a failure against a golden recorded on `origin`, another platform; `assumed`
+/// when the golden has no stamp and the `fallback_platform` of its workspace is its origin.
+pub fn recorded_on(origin: &str, assumed: bool) -> String {
+    let assumed = if assumed {
+        " (the `fallback_platform`)"
+    } else {
+        ""
+    };
+    format!(" The golden was recorded on {origin}{assumed}.")
+}
+
+/// The clause of a failure on the `fallback_platform` under `GLEON_REQUIRE_CANONICAL` against a
+/// golden recorded on `origin`, another platform, compared as a golden of this platform.
+pub fn required_canonical(origin: &str) -> String {
     format!(
-        " Compared with the {platform} golden, text ignored: this workspace tracks regressions \
-         on {platform}."
+        " The golden was recorded on {origin}, and GLEON_REQUIRE_CANONICAL compares it as a golden \
+         of this platform (the `fallback_platform`): update it here."
+    )
+}
+
+/// The warning on the `fallback_platform` for a golden recorded on `origin`, another platform.
+pub fn non_canonical(golden_uri: &str, origin: &str) -> String {
+    format!(
+        "gleon: golden \"{golden_uri}\" was recorded on {origin}, not on this platform (the \
+         `fallback_platform`), so its text is not compared here: update it here to record it \
+         again."
     )
 }
 
 /// Flutter's message for a missing golden.
 pub fn missing_golden(golden_uri: &str) -> String {
     format!("Could not be compared against non-existent file: \"{golden_uri}\"")
-}
-
-/// Appends to `message` the clause of a missing golden on a platform other than `platform`, which
-/// tracks the goldens.
-pub fn push_missing_fallback(message: &mut String, platform: &str) {
-    let _infallible = write!(
-        message,
-        " (this workspace tracks regressions on {platform}: record new goldens there)"
-    );
-}
-
-/// The note of an update on `host` that leaves the golden as it is because `platform` tracks the
-/// goldens and this one would change.
-pub fn update_elsewhere(platform: &str, host: &str) -> String {
-    format!(
-        "gleon: the golden was not updated: this workspace tracks regressions on {platform} \
-         (`fallback_platform` in .gleon/gleon.yaml), so goldens updated on {host} must not \
-         change beyond their text. Update this golden on {platform}, or change \
-         `fallback_platform`."
-    )
 }
 
 /// An invalid `.gleon/gleon.yaml`, or a golden whose name its rules cannot take.

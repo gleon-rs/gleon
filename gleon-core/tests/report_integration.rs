@@ -147,8 +147,14 @@ fn test_reports_and_approval_of_a_real_flutter_failure() {
     );
     assert_eq!(
         fs::read(root.join("test/goldens/counter_three_taps.png")).unwrap(),
-        fs::read(candidate).unwrap()
+        stamped(&fs::read(candidate).unwrap(), "macos-aarch64"),
+        "the candidate, recorded on macOS"
     );
+}
+
+/// `png` stamped as recorded on `platform`, as `gleon approve` writes integration goldens.
+fn stamped(png: &[u8], platform: &str) -> Vec<u8> {
+    gleon_model::origin::stamp(png, &PlatformKey::parse(platform).unwrap()).unwrap()
 }
 
 /// Copies the directory tree `from` into `to`, restoring `.png.bin` files (candidates kept out
@@ -188,7 +194,10 @@ fn test_a_run_on_another_platform_than_the_fallback() {
     };
     assert_eq!(case.outcome, CaseOutcome::Match);
     assert_eq!(case.golden.path, "test/goldens/counter_initial.png");
-    assert_eq!(case.golden.fallback.as_ref(), Some(&case.golden.path));
+    assert_eq!(
+        case.golden.platform, None,
+        "the example's goldens have no stamp"
+    );
     ReportGenerator::generate_all(&run, &cases).unwrap();
     let xml = fs::read_to_string(run.join("junit.xml")).unwrap();
     assert!(
@@ -431,7 +440,10 @@ fn test_approve_writes_the_goldens_of_the_fallback_platform_only() {
     );
     assert_eq!(
         fs::read(root.join(format!("{name}.png"))).unwrap(),
-        fs::read(run.join(format!("artifacts/macos-aarch64/{name}/candidate.png"))).unwrap()
+        stamped(
+            &fs::read(run.join(format!("artifacts/macos-aarch64/{name}/candidate.png"))).unwrap(),
+            "macos-aarch64"
+        )
     );
     assert!(!root.join("test/goldens/linux-x86_64").exists());
 }
