@@ -216,15 +216,16 @@ impl PlatformConfig {
     /// # Errors
     /// Returns [`PlatformError`] like [`Self::matches_host`], or if `platform` cannot be read.
     pub fn matches_platform(&self, platform: &Self) -> Result<bool, PlatformError> {
-        let fields = match platform {
-            Self::Opaque(key) => {
-                PlatformFields::parse_key_value(key).map_err(PlatformError::ParseError)?
-            }
-            Self::Structured(fields) => fields.clone(),
+        let matches = |fields: &PlatformFields| {
+            fields.os.as_deref().map_or(Ok(false), |os| {
+                self.matches(os, fields.arch.as_deref().unwrap_or_default())
+            })
         };
-        match fields.os {
-            Some(os) => self.matches(&os, fields.arch.as_deref().unwrap_or_default()),
-            None => Ok(false),
+        match platform {
+            Self::Opaque(key) => {
+                matches(&PlatformFields::parse_key_value(key).map_err(PlatformError::ParseError)?)
+            }
+            Self::Structured(fields) => matches(fields),
         }
     }
 

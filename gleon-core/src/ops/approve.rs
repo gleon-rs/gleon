@@ -293,8 +293,8 @@ impl std::fmt::Display for ConflictHint<'_> {
 }
 
 /// An approved case: the test `name` on the platform keyed `platform`, shown as
-/// `<platform>/<name>` (its place under `cases/`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `<platform>/<name>` (its place under `cases/`); ordered by platform, then name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ApprovedCase {
     /// The key of the platform the case ran on.
     pub platform: PlatformKey,
@@ -319,8 +319,7 @@ pub struct ApproveResult {
 }
 
 /// Whether `report`, which ran on the platform keyed `key`, names `filter` (whole names): its test
-/// name, `<platform>/<test name>` (as under `cases/`), golden path or compared golden starts with
-/// it.
+/// name, `<platform>/<test name>` (as under `cases/`) or golden path starts with it.
 ///
 /// A bare platform key matches every case of that platform. Test names and `<platform>/<test
 /// name>` are both tried, so `linux-x86_64/foo` matches the test `linux-x86_64/foo` of every
@@ -336,7 +335,6 @@ fn matches_filter(report: &CaseReport, key: &PlatformKey, filter: &Path) -> bool
             .strip_prefix(key.as_str())
             .is_ok_and(|rest| name.starts_with(rest))
         || matches_golden(&report.golden.path)
-        || matches_golden(report.golden.compared())
 }
 
 /// Whether `file` resolves inside `base_dir`: its nearest existing directory, symlinks followed,
@@ -415,16 +413,15 @@ fn target(
 /// Whether an integration's `report` ran on another platform than `tracking` (the
 /// `fallback_platform` of `.gleon/gleon.yaml`), which tracks the goldens: its golden is updated
 /// there only. The platform is matched the way integrations match it
-/// ([`PlatformConfig::matches_platform`]); a report that compared another platform's golden
-/// (`golden.fallback`) says so itself.
+/// ([`PlatformConfig::matches_platform`]); without a `fallback_platform` every platform
+/// updates the goldens, like integrations do.
 fn is_tracked_elsewhere(report: &CaseReport, tracking: Option<&PlatformConfig>) -> bool {
     report.source.tool != CLI_TOOL
-        && (report.golden.fallback.is_some()
-            || tracking.is_some_and(|tracking| {
-                !tracking
-                    .matches_platform(&report.platform)
-                    .unwrap_or_default()
-            }))
+        && tracking.is_some_and(|tracking| {
+            !tracking
+                .matches_platform(&report.platform)
+                .unwrap_or_default()
+        })
 }
 
 /// The candidates of the failed cases of the `loaded` runs that match `filters`, one per
@@ -498,6 +495,9 @@ fn candidates_of<'a>(
             });
         }
     }
+    // Once per case (two runs of one platform report it twice), in the order of approvals.
+    skipped.sort_unstable();
+    skipped.dedup();
     Ok((candidates, skipped))
 }
 
@@ -728,11 +728,7 @@ pub fn approve_workspace(
         approved.push(candidate.approved());
     }
 
-    approved.sort_by(|a, b| {
-        a.platform
-            .cmp(&b.platform)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    approved.sort_unstable();
     Ok(ApproveResult {
         approved,
         warnings: loaded
@@ -1178,8 +1174,9 @@ mod tests {
     }
 
     /// Integrations track their goldens on the fallback platform (`fallback_platform`): the cases
-    /// of another platform are skipped with a warning, whether they compared its golden
-    /// (`golden.fallback`) or found none.
+    /// of another platform are skipped with a warning (once per case, sorted, whatever the
+    /// runs), whether they compared its golden (`golden.fallback`) or found none. Without a
+    /// `fallback_platform` every platform's cases are approved, as integrations update there.
     #[test]
     fn test_approve_skips_integration_cases_of_other_platforms() {
         let (temp, mut ctx) = workspace();
@@ -1210,12 +1207,22 @@ mod tests {
             CaseOutcome::Missing,
             &png(3),
         );
+        // Another job of the same platform, read first.
+        let linux_job = temp.path().join("download/metrics-linux-x64-2");
+        failed_case(
+            &linux_job,
+            "test/goldens/b",
+            "gleon_flutter",
+            CaseOutcome::Missing,
+            &png(3),
+        );
         let skipped = "Skipped 2 case(s) of integrations on a platform other than \
                        `fallback_platform`, which tracks their goldens: \
                        linux-x86_64/test/goldens/a, linux-x86_64/test/goldens/b. Update these \
                        goldens on that platform.";
 
-        let res = approve_workspace(&ctx, &[], &[macos_run, linux_run.clone()], None).unwrap();
+        let res =
+            approve_workspace(&ctx, &[], &[linux_job, macos_run, linux_run.clone()], None).unwrap();
         assert_eq!(approved(&res), ["macos-aarch64/test/goldens/a"]);
         assert_eq!(res.warnings, [skipped]);
         let golden = |name: &str| temp.path().join(format!("goldens/test/goldens/{name}.png"));
@@ -1229,12 +1236,16 @@ mod tests {
             "{err}"
         );
 
-        // A case that compared another platform's golden is skipped without the config too.
+        // Without a `fallback_platform` (any more) every platform updates the goldens.
         ctx.config = None;
         let res = approve_workspace(&ctx, &[], &[linux_run], None).unwrap();
-        assert_eq!(approved(&res), ["linux-x86_64/test/goldens/b"]);
+        assert_eq!(
+            approved(&res),
+            ["linux-x86_64/test/goldens/a", "linux-x86_64/test/goldens/b"]
+        );
+        assert!(res.warnings.is_empty(), "{:?}", res.warnings);
+        assert_eq!(std::fs::read(golden("a")).unwrap(), png(2));
         assert_eq!(std::fs::read(golden("b")).unwrap(), png(3));
-        assert_eq!(std::fs::read(golden("a")).unwrap(), png(1));
     }
 
     /// The fallback platform of integrations is matched the way gleon-ffi matches its host: by

@@ -525,12 +525,6 @@ impl GoldenImage {
             fallback: None,
         }
     }
-
-    /// The golden the case was compared with: [`Self::fallback`], else [`Self::path`].
-    #[must_use]
-    pub fn compared(&self) -> &str {
-        self.fallback.as_deref().unwrap_or(&self.path)
-    }
 }
 
 /// The image produced by this run.
@@ -2705,7 +2699,10 @@ mod tests {
             "sha256": "1".repeat(64)
         });
         let report = parse(&elsewhere).unwrap();
-        assert_eq!(report.golden.compared(), "test/goldens/A.png");
+        assert_eq!(
+            report.golden.fallback.as_deref(),
+            Some("test/goldens/A.png")
+        );
 
         // Other writers may spell an absent image as `null`, which the schema allows.
         let mut nulls = valid.clone();

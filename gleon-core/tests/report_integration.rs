@@ -106,59 +106,6 @@ fn test_reports_of_a_real_flutter_run() {
     assert!(entry.failures.is_empty(), "passing tests are only counted");
 }
 
-/// The case report the gleon Flutter package wrote for a deleted golden of its example (macOS,
-/// metrics off), verbatim.
-const FLUTTER_MISSING_CASE: &str = r#"{
-  "schema_version": 4,
-  "name": "test/goldens/counter_three_taps",
-  "golden": {
-    "path": "test/goldens/counter_three_taps.png"
-  },
-  "candidate": {
-    "sha256": "f80a2bb819104e3624d4e9a154cf10fdbd62b59fc96886c296836400572692a4",
-    "width": 360,
-    "height": 640
-  },
-  "source": {
-    "tool": "gleon_flutter",
-    "tool_version": "0.1.0",
-    "renderer": "flutter-3.47.5"
-  },
-  "platform": {
-    "os": "macos",
-    "arch": "aarch64"
-  },
-  "test": {
-    "name": "matches the golden after three taps"
-  },
-  "comparison": {
-    "tolerance": {
-      "kind": "ssim",
-      "min_similarity": 0.73,
-      "color_tolerance": 46.0
-    },
-    "masks": [
-      {
-        "x": 280,
-        "y": 560,
-        "width": 80,
-        "height": 80
-      }
-    ],
-    "policy_version": 2
-  },
-  "outcome": "missing",
-  "regions": [],
-  "artifacts": {
-    "candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/goldens/counter_three_taps/candidate.png"
-  },
-  "timings_ms": {
-    "total": 0.3
-  },
-  "run_id": "flutter-missing-macos",
-  "recorded_at": "2026-10-02T06:48:23.128489Z"
-}"#;
-
 /// A real failing run of the Flutter example (a deleted golden, metrics off: the integration
 /// records failures anyway), downloaded like a CI artifact: the HTML report shows the new
 /// screenshot and `gleon approve` writes it as the golden.
@@ -167,19 +114,10 @@ fn test_reports_and_approval_of_a_real_flutter_failure() {
     let temp = tempfile::tempdir().unwrap();
     let run = temp.path().join("download/latest");
     fs::create_dir_all(&run).unwrap();
-    // The report as the integration wrote it, its candidate stored as `.png.bin` so the fixtures
-    // hold no stray screenshot.
-    let report = run.join("cases/macos-aarch64/test/goldens/counter_three_taps.json");
-    fs::create_dir_all(report.parent().unwrap()).unwrap();
-    fs::write(report, FLUTTER_MISSING_CASE).unwrap();
+    // The report as the integration wrote it (macOS, metrics off), verbatim.
+    copy_run(&fixtures().join("cases/flutter-macos-missing"), &run);
     let candidate =
         run.join("artifacts/macos-aarch64/test/goldens/counter_three_taps/candidate.png");
-    fs::create_dir_all(candidate.parent().unwrap()).unwrap();
-    fs::copy(
-        fixtures().join("flutter_missing_candidate.png.bin"),
-        &candidate,
-    )
-    .unwrap();
     let root = temp.path().join("app");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
     init_workspace(&ctx).unwrap();
@@ -250,7 +188,7 @@ fn test_a_run_on_another_platform_than_the_fallback() {
     };
     assert_eq!(case.outcome, CaseOutcome::Match);
     assert_eq!(case.golden.path, "test/goldens/counter_initial.png");
-    assert_eq!(case.golden.compared(), case.golden.path);
+    assert_eq!(case.golden.fallback.as_ref(), Some(&case.golden.path));
     ReportGenerator::generate_all(&run, &cases).unwrap();
     let xml = fs::read_to_string(run.join("junit.xml")).unwrap();
     assert!(
@@ -461,64 +399,39 @@ fn test_two_platforms_of_different_runs_in_one_latest() {
     assert!(one.warnings().is_empty());
 }
 
-/// Two platforms of one integration run in one `latest/` (the real missing golden on macOS, and
-/// the same case on Linux) in a workspace that tracks its goldens on macOS: approving writes
-/// macOS's candidate and skips Linux's with a warning.
+/// Two platforms of an integration in one `latest/` (the real missing golden on macOS, and the
+/// same report moved to Linux) in a workspace that tracks its goldens on macOS
+/// (`macos_fallback.yaml`, read from disk): approving writes macOS's candidate and skips Linux's
+/// with a warning.
 #[test]
 fn test_approve_writes_the_goldens_of_the_fallback_platform_only() {
     let temp = tempfile::tempdir().unwrap();
     let run = temp.path().join("latest");
+    fs::create_dir_all(&run).unwrap();
+    copy_run(&fixtures().join("cases/flutter-macos-missing"), &run);
+    copy_run(&fixtures().join("cases/flutter-linux-missing"), &run);
     let name = "test/goldens/counter_three_taps";
-    let candidate = |key: &str| run.join(format!("artifacts/{key}/{name}/candidate.png"));
-    for (key, platform) in [
-        (
-            "macos-aarch64",
-            serde_json::json!({"os": "macos", "arch": "aarch64"}),
-        ),
-        (
-            "linux-x86_64",
-            serde_json::json!({"os": "linux", "arch": "x86_64"}),
-        ),
-    ] {
-        let mut report: serde_json::Value = serde_json::from_str(FLUTTER_MISSING_CASE).unwrap();
-        report["platform"] = platform;
-        report["artifacts"]["candidate"] =
-            format!(".gleon/runs/latest/artifacts/{key}/{name}/candidate.png").into();
-        let file = run.join(format!("cases/{key}/{name}.json"));
-        fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(&file, report.to_string()).unwrap();
-        fs::create_dir_all(candidate(key).parent().unwrap()).unwrap();
-        fs::copy(
-            fixtures().join("flutter_missing_candidate.png.bin"),
-            candidate(key),
-        )
-        .unwrap();
-    }
-
     let root = temp.path().join("app");
-    let mut ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
+    common::copy_config(&root, "macos_fallback");
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
     init_workspace(&ctx).unwrap();
-    ctx.config = Some(
-        gleon_core::config::GleonConfig::from_yaml_str(
-            "required_version: \">=0.1.0\"\nfallback_platform: macos-aarch64\n\
-             screenshots:\n  - include: \"**/*.png\"\n",
-        )
-        .unwrap(),
-    );
+
     let approved = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
     assert_eq!(
         approved_names(&approved),
         ["macos-aarch64/test/goldens/counter_three_taps"]
     );
-    assert_eq!(approved.warnings.len(), 1);
     assert!(
-        approved.warnings[0].contains("linux-x86_64/test/goldens/counter_three_taps"),
+        approved
+            .warnings
+            .last()
+            .is_some_and(|skipped| skipped.contains("linux-x86_64/test/goldens/counter_three_taps")),
         "{:?}",
         approved.warnings
     );
     assert_eq!(
         fs::read(root.join(format!("{name}.png"))).unwrap(),
-        fs::read(candidate("macos-aarch64")).unwrap()
+        fs::read(run.join(format!("artifacts/macos-aarch64/{name}/candidate.png"))).unwrap()
     );
     assert!(!root.join("test/goldens/linux-x86_64").exists());
 }

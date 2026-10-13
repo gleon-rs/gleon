@@ -191,7 +191,8 @@ pub fn update_elsewhere(platform: &str, host: &str) -> String {
     format!(
         "gleon: the golden was not updated: this workspace tracks regressions on {platform} \
          (`fallback_platform` in .gleon/gleon.yaml), so goldens updated on {host} must not \
-         change. Update this golden on {platform}, or change `fallback_platform`."
+         change beyond their text. Update this golden on {platform}, or change \
+         `fallback_platform`."
     )
 }
 

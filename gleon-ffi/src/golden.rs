@@ -448,21 +448,27 @@ impl Call<'_> {
             .then(|| TextTolerance::resolve(self.plan.text, self.plan.tracking == Tracking::Here))
     }
 
-    /// The clause of a failure on a platform other than the one that tracks the goldens; empty
-    /// for any other.
-    fn fallback_clause(&self) -> String {
+    /// The platform that tracks the goldens, when this comparison runs on another one; `None`
+    /// in update mode too, whose note ([`text::update_elsewhere`]) names it instead.
+    fn compared_elsewhere(&self) -> Option<&PlatformKey> {
         self.plan
             .tracking
             .elsewhere()
+            .filter(|_| self.request.mode == Mode::Compare)
+    }
+
+    /// The clause of a failure on a platform other than the one that tracks the goldens; empty
+    /// for any other, and in update mode.
+    fn fallback_clause(&self) -> String {
+        self.compared_elsewhere()
             .map_or_else(String::new, |platform| text::fallback(platform.as_str()))
     }
 
     /// The message of a missing golden: Flutter's and, when comparing on a platform other than
-    /// the one that tracks the goldens, where to record it (an update says so in its own note).
+    /// the one that tracks the goldens, where to record it.
     fn missing_message(&self) -> String {
         let mut message = text::missing_golden(self.request.golden_uri);
-        if let (Some(platform), Mode::Compare) = (self.plan.tracking.elsewhere(), self.request.mode)
-        {
+        if let Some(platform) = self.compared_elsewhere() {
             text::push_missing_fallback(&mut message, platform.as_str());
         }
         message
@@ -1581,7 +1587,8 @@ metrics:
         let note = format!(
             "\ngleon: the golden was not updated: this workspace tracks regressions on {foreign} \
              (`fallback_platform` in .gleon/gleon.yaml), so goldens updated on {host} must not \
-             change. Update this golden on {foreign}, or change `fallback_platform`.",
+             change beyond their text. Update this golden on {foreign}, or change \
+             `fallback_platform`.",
             foreign = foreign_platform(),
             host = PlatformKey::host()
         );
@@ -1609,8 +1616,17 @@ metrics:
         let outside = fixture.update_with_text(&session, &images.outside, images.regions.clone());
         assert_eq!(outside.verdict, Verdict::Mismatch);
         assert!(
-            outside.message.contains("Compared with the ") && outside.message.ends_with(&note),
+            outside
+                .message
+                .contains("(gleon pixel ≤ 0.00%, text ignored).\n")
+                && outside.message.ends_with(&note),
             "{}",
+            outside.message
+        );
+        assert_eq!(
+            outside.message.matches("tracks regressions on").count(),
+            1,
+            "the note alone names the platform: {}",
             outside.message
         );
         untouched();

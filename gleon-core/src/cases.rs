@@ -290,11 +290,7 @@ impl Cases {
                         || {
                             report.outcome == CaseOutcome::Missing
                                 || root.is_none_or(|root| {
-                                    // The compared golden: a platform's own one may not exist
-                                    // yet.
-                                    root.join(report.golden.compared())
-                                        .try_exists()
-                                        .unwrap_or(true)
+                                    root.join(&report.golden.path).try_exists().unwrap_or(true)
                                 })
                         },
                         |run_id| report.run_id.as_ref() == Some(run_id),
@@ -1010,9 +1006,9 @@ mod tests {
         write(&runs_latest, report("live", CaseOutcome::Match), None, 10);
         write(&runs_latest, report("gone", CaseOutcome::Match), None, 10);
         write(&runs_latest, report("new", CaseOutcome::Missing), None, 10);
-        // Compared with the shared golden: this platform's own one does not exist yet.
+        // Compared on another platform than the fallback platform: the same golden.
         let mut fallback = report("fallback", CaseOutcome::Match);
-        fallback.golden.path = "linux-x86_64/live.png".to_owned();
+        fallback.golden.path = "live.png".to_owned();
         fallback.golden.fallback = Some("live.png".to_owned());
         write(&runs_latest, fallback, None, 10);
         write(
