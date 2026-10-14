@@ -225,18 +225,20 @@ pub struct GleonConfig {
     /// detected OS and architecture); its flags and `GLEON_PLATFORM` override it.
     ///
     /// Read by the CLI only: an integration (the Flutter package) runs as its process's OS and
-    /// architecture, the name of the directory of that platform's own goldens.
+    /// architecture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformConfig>,
     /// Optional fallback platform identifier used when current platform baselines are missing.
     ///
     /// For integrations that commit goldens as image files (the Flutter package) it is the
-    /// platform of the shared goldens (`<dir>/<file>`); only its OS and architecture count, under
-    /// the names a process reports (`macos-aarch64`, not `macos-arm64`: others are an error for
-    /// integrations). On it text is compared by default; any other platform keeps its own goldens
-    /// in `<dir>/<os>-<arch>/<file>` and, until it has one, compares the shared golden with text
-    /// ignored by default (see `text_tolerance`). Without it every platform compares the shared
-    /// goldens that way. `platform` and the `GLEON_*PLATFORM` variables are read by the CLI only.
+    /// canonical platform; only its OS and architecture count, under the names a process
+    /// reports (`macos-aarch64`, not `macos-arm64`: others are an error for integrations). Every
+    /// golden names the platform it was recorded on in its PNG (see `gleon_model::origin`), and
+    /// its text is compared there by default (see `text_tolerance`); a golden without that stamp
+    /// counts as recorded on the `fallback_platform`. Update mode on the `fallback_platform`
+    /// records again what other platforms recorded, a golden recorded elsewhere draws a warning
+    /// there, and `GLEON_REQUIRE_CANONICAL` makes it compare such goldens as its own. `platform`
+    /// and the `GLEON_*PLATFORM` variables are read by the CLI only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_platform: Option<PlatformConfig>,
     /// List of screenshot match rules.
@@ -382,6 +384,32 @@ pub struct MetricsConfig {
 /// Name of the environment variable that overrides [`MetricsConfig::enabled`].
 pub const METRICS_ENV: &str = "GLEON_METRICS";
 
+/// Name of the environment variable that makes integrations on the `fallback_platform` compare
+/// the goldens recorded on other platforms as their own (see [`GleonConfig::fallback_platform`]).
+pub const REQUIRE_CANONICAL_ENV: &str = "GLEON_REQUIRE_CANONICAL";
+
+/// The boolean environment variable `name` (`env_value` is its raw value, `None` when unset):
+/// `None` when unset or empty, else whether it is on.
+///
+/// # Errors
+/// Returns [`ConfigError::InvalidEnvFlag`] for any value other than `1`, `true`, `0` or `false`
+/// (ASCII case-insensitive, surrounding whitespace ignored).
+pub fn env_flag(name: &'static str, env_value: Option<&str>) -> Result<Option<bool>, ConfigError> {
+    let Some(raw) = env_value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if raw == "1" || raw.eq_ignore_ascii_case("true") {
+        Ok(Some(true))
+    } else if raw == "0" || raw.eq_ignore_ascii_case("false") {
+        Ok(Some(false))
+    } else {
+        Err(ConfigError::InvalidEnvFlag {
+            name,
+            value: raw.to_owned(),
+        })
+    }
+}
+
 /// Lines of `.gleon/.gitignore`: local caches, run output and secrets never belong in Git.
 pub const GITIGNORE_LINES: &[&str] = &[
     "blobs/",
@@ -422,26 +450,13 @@ impl MetricsConfig {
         })
     }
 
-    /// The value of [`METRICS_ENV`] (`env_value` is its raw value, `None` when unset): `None` when
-    /// unset or empty, else whether it turns metrics on.
+    /// The value of [`METRICS_ENV`] ([`env_flag`]): `None` when unset or empty, else whether it
+    /// turns metrics on.
     ///
     /// # Errors
-    /// Returns [`ConfigError::InvalidEnvFlag`] for any value other than `1`, `true`, `0` or
-    /// `false` (ASCII case-insensitive, surrounding whitespace ignored).
+    /// Returns [`ConfigError::InvalidEnvFlag`] as [`env_flag`] does.
     pub fn env_override(env_value: Option<&str>) -> Result<Option<bool>, ConfigError> {
-        let Some(raw) = env_value.map(str::trim).filter(|v| !v.is_empty()) else {
-            return Ok(None);
-        };
-        if raw == "1" || raw.eq_ignore_ascii_case("true") {
-            Ok(Some(true))
-        } else if raw == "0" || raw.eq_ignore_ascii_case("false") {
-            Ok(Some(false))
-        } else {
-            Err(ConfigError::InvalidEnvFlag {
-                name: METRICS_ENV,
-                value: raw.to_owned(),
-            })
-        }
+        env_flag(METRICS_ENV, env_value)
     }
 }
 
@@ -545,8 +560,8 @@ pub struct ScreenshotRule {
     pub masks: Vec<MaskRule>,
     /// How much text may differ, in `pixel` and `ssim` mode: the largest share of differing pixels in any
     /// tile of the text an integration reports, `[0, 1]`. Unset, it depends on the golden
-    /// ([`crate::tolerance::TextTolerance::resolve`]): 0.05 against a golden of the platform the
-    /// test runs on (see `fallback_platform`), else 1, so text never fails. A value set here
+    /// ([`crate::tolerance::TextTolerance::resolve`]): 0.05 on the platform the golden was
+    /// recorded on (see `fallback_platform`), else 1, so text never fails. A value set here
     /// applies to every golden of the rule: 1 turns text comparison off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_tolerance: Option<crate::tolerance::TextTolerance>,

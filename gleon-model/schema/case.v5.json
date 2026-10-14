@@ -96,8 +96,8 @@
       "description": "Version of this format (`CASE_SCHEMA_VERSION`).",
       "type": "integer",
       "format": "uint32",
-      "maximum": 4,
-      "minimum": 4
+      "maximum": 5,
+      "minimum": 5
     },
     "source": {
       "description": "What produced the candidate.",
@@ -363,14 +363,6 @@
             }
           ]
         },
-        "fallback": {
-          "description": "The golden compared in place of `path`, which does not exist yet: the shared golden of the\nworkspace (its `fallback_platform`; integrations with per-platform goldens). `sha256`, `width`\nand `height` describe it; `path` is still where `gleon approve` writes, also from a pass,\nwhich keeps its candidate for that.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
-        },
         "height": {
           "description": "Height in pixels; absent if the PNG header could not be read.",
           "type": [
@@ -384,6 +376,17 @@
           "description": "Path relative to the workspace root, `/`-separated, case as on disk.",
           "type": "string",
           "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
+        },
+        "platform": {
+          "description": "The platform the golden was recorded on, as the gleon chunk of its PNG names it\n([`crate::origin`]); absent for a golden without one (recorded by another tool or before\ngleon 0.4.0, then taken as recorded on the `fallback_platform` of the workspace).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "sha256": {
           "description": "SHA-256 of the PNG bytes; absent when the golden does not exist (`missing`).",
@@ -632,6 +635,11 @@
         }
       },
       "additionalProperties": false
+    },
+    "PlatformKey": {
+      "description": "The key of a platform ([`PlatformInfo::key`]): the name of its directories.\n\nIt names the directories of the platform's manifests, case reports and failure images:\nlowercase `[a-z0-9_.-]` segments joined by `+` and `=`, valid as a file name on every OS.\n\nOnly canonical keys exist: the key of a platform ([`PlatformConfig::key`],\n[`PlatformInfo::key`]) or a string that is exactly one ([`Self::parse`]), so two keys are\nequal exactly when they name the same directory.",
+      "type": "string",
+      "pattern": "^[a-z0-9_.+=-]+$"
     },
     "Region": {
       "description": "An axis-aligned pixel rectangle.",

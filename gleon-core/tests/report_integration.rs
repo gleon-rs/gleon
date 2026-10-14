@@ -21,8 +21,8 @@ use gleon_core::{
     context::{ContextOptions, ResolvedContext},
     dashboard::RunHistoryEntry,
     ops::{
-        ApproveResult, approve_workspace, diff::DiffOptions, init_workspace, run_diff,
-        stage_workspace,
+        ApproveError, ApproveResult, approve_workspace, diff::DiffOptions, init_workspace,
+        run_diff, stage_workspace,
     },
     platform::PlatformKey,
     report::{MarkdownReportOptions, ReportGenerator},
@@ -106,59 +106,6 @@ fn test_reports_of_a_real_flutter_run() {
     assert!(entry.failures.is_empty(), "passing tests are only counted");
 }
 
-/// The case report the gleon Flutter package wrote for a deleted golden of its example (macOS,
-/// metrics off), verbatim.
-const FLUTTER_MISSING_CASE: &str = r#"{
-  "schema_version": 4,
-  "name": "test/goldens/counter_three_taps",
-  "golden": {
-    "path": "test/goldens/counter_three_taps.png"
-  },
-  "candidate": {
-    "sha256": "f80a2bb819104e3624d4e9a154cf10fdbd62b59fc96886c296836400572692a4",
-    "width": 360,
-    "height": 640
-  },
-  "source": {
-    "tool": "gleon_flutter",
-    "tool_version": "0.1.0",
-    "renderer": "flutter-3.47.5"
-  },
-  "platform": {
-    "os": "macos",
-    "arch": "aarch64"
-  },
-  "test": {
-    "name": "matches the golden after three taps"
-  },
-  "comparison": {
-    "tolerance": {
-      "kind": "ssim",
-      "min_similarity": 0.73,
-      "color_tolerance": 46.0
-    },
-    "masks": [
-      {
-        "x": 280,
-        "y": 560,
-        "width": 80,
-        "height": 80
-      }
-    ],
-    "policy_version": 2
-  },
-  "outcome": "missing",
-  "regions": [],
-  "artifacts": {
-    "candidate": ".gleon/runs/latest/artifacts/macos-aarch64/test/goldens/counter_three_taps/candidate.png"
-  },
-  "timings_ms": {
-    "total": 0.3
-  },
-  "run_id": "flutter-missing-macos",
-  "recorded_at": "2026-10-02T06:48:23.128489Z"
-}"#;
-
 /// A real failing run of the Flutter example (a deleted golden, metrics off: the integration
 /// records failures anyway), downloaded like a CI artifact: the HTML report shows the new
 /// screenshot and `gleon approve` writes it as the golden.
@@ -167,19 +114,10 @@ fn test_reports_and_approval_of_a_real_flutter_failure() {
     let temp = tempfile::tempdir().unwrap();
     let run = temp.path().join("download/latest");
     fs::create_dir_all(&run).unwrap();
-    // The report as the integration wrote it, its candidate stored as `.png.bin` so the fixtures
-    // hold no stray screenshot.
-    let report = run.join("cases/macos-aarch64/test/goldens/counter_three_taps.json");
-    fs::create_dir_all(report.parent().unwrap()).unwrap();
-    fs::write(report, FLUTTER_MISSING_CASE).unwrap();
+    // The report as the integration wrote it (macOS, metrics off), verbatim.
+    copy_run(&fixtures().join("cases/flutter-macos-missing"), &run);
     let candidate =
         run.join("artifacts/macos-aarch64/test/goldens/counter_three_taps/candidate.png");
-    fs::create_dir_all(candidate.parent().unwrap()).unwrap();
-    fs::copy(
-        fixtures().join("flutter_missing_candidate.png.bin"),
-        &candidate,
-    )
-    .unwrap();
     let root = temp.path().join("app");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
     init_workspace(&ctx).unwrap();
@@ -209,8 +147,14 @@ fn test_reports_and_approval_of_a_real_flutter_failure() {
     );
     assert_eq!(
         fs::read(root.join("test/goldens/counter_three_taps.png")).unwrap(),
-        fs::read(candidate).unwrap()
+        stamped(&fs::read(candidate).unwrap(), "macos-aarch64"),
+        "the candidate, recorded on macOS"
     );
+}
+
+/// `png` stamped as recorded on `platform`, as `gleon approve` writes integration goldens.
+fn stamped(png: &[u8], platform: &str) -> Vec<u8> {
+    gleon_model::origin::stamp(png, &PlatformKey::parse(platform).unwrap()).unwrap()
 }
 
 /// Copies the directory tree `from` into `to`, restoring `.png.bin` files (candidates kept out
@@ -230,12 +174,11 @@ fn copy_run(from: &Path, to: &Path) {
     }
 }
 
-/// A real run of the Flutter example on macOS whose workspace names another
-/// `fallback_platform` (`linux-x86_64`): the golden compared with the shared one, text ignored,
-/// passed and kept its candidate. The reports say which golden was compared, and
-/// approving by the shared golden's path (what the test printed) records this platform's own.
+/// A run of the Flutter example on macOS whose workspace names another `fallback_platform`
+/// (`linux-x86_64`): the golden compared with text ignored passed, and kept nothing. The reports
+/// name the golden, and a pass has nothing to approve.
 #[test]
-fn test_a_real_run_against_the_fallback_seeds_per_platform_goldens() {
+fn test_a_run_on_another_platform_than_the_fallback() {
     let temp = tempfile::tempdir().unwrap();
     let run = temp.path().join("download/metrics-macos-arm64");
     fs::create_dir_all(&run).unwrap();
@@ -250,11 +193,11 @@ fn test_a_real_run_against_the_fallback_seeds_per_platform_goldens() {
         panic!("one case: {:?}", cases.reports());
     };
     assert_eq!(case.outcome, CaseOutcome::Match);
+    assert_eq!(case.golden.path, "test/goldens/counter_initial.png");
     assert_eq!(
-        case.golden.path,
-        "test/goldens/macos-aarch64/counter_initial.png"
+        case.golden.platform, None,
+        "the example's goldens have no stamp"
     );
-    assert_eq!(case.golden.compared(), "test/goldens/counter_initial.png");
     ReportGenerator::generate_all(&run, &cases).unwrap();
     let xml = fs::read_to_string(run.join("junit.xml")).unwrap();
     assert!(
@@ -265,32 +208,13 @@ fn test_a_real_run_against_the_fallback_seeds_per_platform_goldens() {
         xml.contains(
             r#"<testcase name="test&#x2f;goldens&#x2f;counter_initial" classname="macos-aarch64" file="test&#x2f;goldens&#x2f;counter_initial.png">"#
         ),
-        "the compared golden, not the own one that does not exist yet: {xml}"
-    );
-    assert!(
-        !xml.contains("goldens&#x2f;macos-aarch64"),
-        "the own golden does not exist yet: {xml}"
+        "{xml}"
     );
 
-    let approved = approve_workspace(
-        &ctx,
-        &[Path::new("test/goldens/counter_initial.png").to_path_buf()],
-        std::slice::from_ref(&run),
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        approved_names(&approved),
-        ["macos-aarch64/test/goldens/counter_initial"]
-    );
-    assert_eq!(
-        fs::read(root.join("test/goldens/macos-aarch64/counter_initial.png")).unwrap(),
-        fs::read(run.join("artifacts/macos-aarch64/test/goldens/counter_initial/candidate.png"))
-            .unwrap()
-    );
+    let err = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap_err();
     assert!(
-        !root.join("test/goldens/counter_initial.png").exists(),
-        "the shared golden is the fallback platform's"
+        matches!(err, ApproveError::NothingToApprove { .. }),
+        "{err}"
     );
 }
 
@@ -431,9 +355,9 @@ fn test_reports_of_two_platforms_in_one_run() {
     }
 }
 
-/// Two platforms that ran apart into one `latest/` (the real Linux CI run and the real macOS run
-/// against the fallback, each its own run id): both are read, each its own run, with a warning;
-/// the reports name the platforms, `gleon approve` approves from both, and one run id reads one.
+/// Two platforms that ran apart into one `latest/` (the real Linux CI run and the macOS run on
+/// another platform than the fallback, each its own run id): both are read, each its own run,
+/// with a warning; the reports name the platforms, and one run id reads one.
 #[test]
 fn test_two_platforms_of_different_runs_in_one_latest() {
     let temp = tempfile::tempdir().unwrap();
@@ -477,21 +401,6 @@ fn test_two_platforms_of_different_runs_in_one_latest() {
         "{xml}"
     );
 
-    let root = temp.path().join("app");
-    let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
-    init_workspace(&ctx).unwrap();
-    let approved = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
-    assert_eq!(
-        approved_names(&approved),
-        ["macos-aarch64/test/goldens/counter_initial"],
-        "the Linux run passed against its own goldens"
-    );
-    assert_eq!(approved.warnings, [warning]);
-    assert!(
-        root.join("test/goldens/macos-aarch64/counter_initial.png")
-            .is_file()
-    );
-
     let linux = gleon_core::case::RunId::new("36918116203-1").unwrap();
     let one = Cases::load(&run, Some(&linux)).unwrap();
     assert_eq!(one.reports().len(), 2);
@@ -499,50 +408,44 @@ fn test_two_platforms_of_different_runs_in_one_latest() {
     assert!(one.warnings().is_empty());
 }
 
-/// Two platforms of one integration run in one `latest/` (the real macOS run against the
-/// fallback, and the same case recorded on Linux), each comparing the shared golden: approving
-/// writes each platform's own golden.
+/// Two platforms of an integration in one `latest/` (the real missing golden on macOS, and the
+/// same report moved to Linux) in a workspace that tracks its goldens on macOS
+/// (`macos_fallback.yaml`, read from disk): approving writes macOS's candidate and skips Linux's
+/// with a warning.
 #[test]
-fn test_approve_writes_the_goldens_of_two_platforms_of_an_integration() {
+fn test_approve_writes_the_goldens_of_the_fallback_platform_only() {
     let temp = tempfile::tempdir().unwrap();
     let run = temp.path().join("latest");
     fs::create_dir_all(&run).unwrap();
-    copy_run(&fixtures().join("cases/flutter-macos-fallback"), &run);
-    let name = "test/goldens/counter_initial";
-    let macos_report = run.join(format!("cases/macos-aarch64/{name}.json"));
-    let mut linux: serde_json::Value =
-        serde_json::from_slice(&fs::read(&macos_report).unwrap()).unwrap();
-    linux["platform"] = serde_json::json!({"os": "linux", "arch": "x86_64"});
-    linux["golden"]["path"] = "test/goldens/linux-x86_64/counter_initial.png".into();
-    linux["artifacts"]["candidate"] =
-        format!(".gleon/runs/latest/artifacts/linux-x86_64/{name}/candidate.png").into();
-    let linux_report = run.join(format!("cases/linux-x86_64/{name}.json"));
-    fs::create_dir_all(linux_report.parent().unwrap()).unwrap();
-    fs::write(&linux_report, linux.to_string()).unwrap();
-    let candidate = |key: &str| run.join(format!("artifacts/{key}/{name}/candidate.png"));
-    fs::create_dir_all(candidate("linux-x86_64").parent().unwrap()).unwrap();
-    fs::copy(candidate("macos-aarch64"), candidate("linux-x86_64")).unwrap();
-
+    copy_run(&fixtures().join("cases/flutter-macos-missing"), &run);
+    copy_run(&fixtures().join("cases/flutter-linux-missing"), &run);
+    let name = "test/goldens/counter_three_taps";
     let root = temp.path().join("app");
+    common::copy_config(&root, "macos_fallback");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
     init_workspace(&ctx).unwrap();
+
     let approved = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
     assert_eq!(
         approved_names(&approved),
-        [
-            "linux-x86_64/test/goldens/counter_initial",
-            "macos-aarch64/test/goldens/counter_initial"
-        ]
+        ["macos-aarch64/test/goldens/counter_three_taps"]
     );
-    assert!(approved.warnings.is_empty(), "{:?}", approved.warnings);
-    for key in ["linux-x86_64", "macos-aarch64"] {
-        assert_eq!(
-            fs::read(root.join(format!("test/goldens/{key}/counter_initial.png"))).unwrap(),
-            fs::read(candidate(key)).unwrap(),
-            "{key}"
-        );
-    }
-    assert!(!root.join("test/goldens/counter_initial.png").exists());
+    assert!(
+        approved
+            .warnings
+            .last()
+            .is_some_and(|skipped| skipped.contains("linux-x86_64/test/goldens/counter_three_taps")),
+        "{:?}",
+        approved.warnings
+    );
+    assert_eq!(
+        fs::read(root.join(format!("{name}.png"))).unwrap(),
+        stamped(
+            &fs::read(run.join(format!("artifacts/macos-aarch64/{name}/candidate.png"))).unwrap(),
+            "macos-aarch64"
+        )
+    );
+    assert!(!root.join("test/goldens/linux-x86_64").exists());
 }
 
 /// Every committed case report fixture is a valid report of this schema version.

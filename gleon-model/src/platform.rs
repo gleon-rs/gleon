@@ -45,9 +45,9 @@ pub enum PlatformError {
 /// Only canonical keys exist: the key of a platform ([`PlatformConfig::key`],
 /// [`PlatformInfo::key`]) or a string that is exactly one ([`Self::parse`]), so two keys are
 /// equal exactly when they name the same directory.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
-pub struct PlatformKey(String);
+pub struct PlatformKey(#[schemars(regex(pattern = r"^[a-z0-9_.+=-]+$"))] String);
 
 impl PlatformKey {
     /// `key` if it is a platform key in its canonical form: what [`validate_key`] returns for it
@@ -66,8 +66,8 @@ impl PlatformKey {
     }
 
     /// The key of the running process's platform ([`PlatformConfig::host`]), `<os>-<arch>`
-    /// (`macos-aarch64`, `linux-x86_64`, `windows-x86_64`): the directory of its own goldens next
-    /// to the shared ones, of its manifests, case reports and failure images.
+    /// (`macos-aarch64`, `linux-x86_64`, `windows-x86_64`): the directory of its manifests, case
+    /// reports and failure images.
     ///
     /// # Panics
     /// Never: the OS and architecture names of the standard library are valid segments.
@@ -208,6 +208,25 @@ impl PlatformConfig {
     /// `macos-aarch64`): such a value would silently never match.
     pub fn matches_host(&self) -> Result<bool, PlatformError> {
         self.matches(HOST_OS, HOST_ARCH)
+    }
+
+    /// [`Self::matches_host`] for the process that ran on `platform` (the platform of an
+    /// integration's case report, [`Self::host`] there); `false` when `platform` names no OS.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError`] like [`Self::matches_host`], or if `platform` cannot be read.
+    pub fn matches_platform(&self, platform: &Self) -> Result<bool, PlatformError> {
+        let matches = |fields: &PlatformFields| {
+            fields.os.as_deref().map_or(Ok(false), |os| {
+                self.matches(os, fields.arch.as_deref().unwrap_or_default())
+            })
+        };
+        match platform {
+            Self::Opaque(key) => {
+                matches(&PlatformFields::parse_key_value(key).map_err(PlatformError::ParseError)?)
+            }
+            Self::Structured(fields) => matches(fields),
+        }
     }
 
     fn matches(&self, os: &str, arch: &str) -> Result<bool, PlatformError> {
@@ -488,16 +507,6 @@ fn is_portable_segment(segment: &str) -> bool {
     !segment.ends_with('.') && !WINDOWS_DEVICE_NAMES.contains(&stem)
 }
 
-/// The golden of the platform `platform` ([`PlatformKey::host`]) beside the shared golden
-/// `shared`: `<dir>/<platform>/<file>`. Both paths are `/`-separated.
-#[must_use]
-pub fn platform_golden(shared: &str, platform: &PlatformKey) -> String {
-    match shared.rsplit_once('/') {
-        Some((dir, file)) => format!("{dir}/{platform}/{file}"),
-        None => format!("{platform}/{shared}"),
-    }
-}
-
 /// Validates that a user-provided segment contains only allowed characters.
 /// Returns Ok(lowercased) or descriptive error.
 ///
@@ -551,8 +560,8 @@ pub fn validate_segment(s: &str) -> Result<std::borrow::Cow<'_, str>, PlatformEr
 impl PlatformInfo {
     /// The key of this platform, which names its manifests directory, made of [`is_key_char`]
     /// characters (valid file names on every OS):
-    /// - `<os>-<arch>` (`macos-aarch64`, the name integrations give the directory of a
-    ///   platform's own goldens), or `<os>` without an architecture;
+    /// - `<os>-<arch>` (`macos-aarch64`, the key of an integration's process), or `<os>` without
+    ///   an architecture;
     /// - `os=<os>+arch=<arch>` when the OS or architecture contains `-` (`os=ios-sim+arch=arm`),
     ///   so no two platforms share a key;
     /// - then `+<renderer>` and `+<key>=<value>` per label, sorted by key.
@@ -832,7 +841,7 @@ labels:
         assert_eq!(
             &PlatformConfig::host().key().unwrap(),
             PlatformKey::host(),
-            "the manifests, own goldens, case reports and failure images of a platform share the name"
+            "the manifests, case reports and failure images of a platform share the name"
         );
         assert_eq!(
             PlatformConfig::Opaque("macos-aarch64".to_owned()).key(),
@@ -847,21 +856,12 @@ labels:
     }
 
     #[test]
-    fn test_host_key_and_platform_goldens() {
+    fn test_host_key() {
         assert_eq!(
             PlatformKey::host().as_str(),
             format!("{HOST_OS}-{HOST_ARCH}")
         );
         assert!(!PlatformKey::host().as_str().contains(':'));
-        let key = |key: &str| PlatformKey::parse(key).unwrap();
-        assert_eq!(
-            platform_golden("test/goldens/a.png", &key("linux-x86_64")),
-            "test/goldens/linux-x86_64/a.png"
-        );
-        assert_eq!(
-            platform_golden("a.png", &key("windows-x86_64")),
-            "windows-x86_64/a.png"
-        );
     }
 
     #[test]
@@ -908,6 +908,27 @@ labels:
             Ok(true)
         );
         assert_eq!(PlatformConfig::host().matches_host(), Ok(true));
+
+        // The platform of another process (an integration's case report), read like the host.
+        let tracking = structured(Some("macos"), None);
+        for (platform, matches) in [
+            (PlatformConfig::host(), tracking.matches_host().unwrap()),
+            (structured(Some("macos"), Some("x86_64")), true),
+            (opaque("macos-aarch64"), true),
+            (opaque("linux-aarch64"), false),
+            (structured(None, Some("aarch64")), false),
+        ] {
+            assert_eq!(
+                tracking.matches_platform(&platform),
+                Ok(matches),
+                "{platform:?}"
+            );
+        }
+        assert!(
+            tracking
+                .matches_platform(&opaque("macos-aarch64-extra"))
+                .is_err()
+        );
     }
 
     /// An opaque value is one segment: a renderer or labels need the structured form, so a key

@@ -21,7 +21,7 @@
       "default": []
     },
     "fallback_platform": {
-      "description": "Optional fallback platform identifier used when current platform baselines are missing.\n\nFor integrations that commit goldens as image files (the Flutter package) it is the\nplatform of the shared goldens (`<dir>/<file>`); only its OS and architecture count, under\nthe names a process reports (`macos-aarch64`, not `macos-arm64`: others are an error for\nintegrations). On it text is compared by default; any other platform keeps its own goldens\nin `<dir>/<os>-<arch>/<file>` and, until it has one, compares the shared golden with text\nignored by default (see `text_tolerance`). Without it every platform compares the shared\ngoldens that way. `platform` and the `GLEON_*PLATFORM` variables are read by the CLI only.",
+      "description": "Optional fallback platform identifier used when current platform baselines are missing.\n\nFor integrations that commit goldens as image files (the Flutter package) it is the\ncanonical platform; only its OS and architecture count, under the names a process\nreports (`macos-aarch64`, not `macos-arm64`: others are an error for integrations). Every\ngolden names the platform it was recorded on in its PNG (see `gleon_model::origin`), and\nits text is compared there by default (see `text_tolerance`); a golden without that stamp\ncounts as recorded on the `fallback_platform`. Update mode on the `fallback_platform`\nrecords again what other platforms recorded, a golden recorded elsewhere draws a warning\nthere, and `GLEON_REQUIRE_CANONICAL` makes it compare such goldens as its own. `platform`\nand the `GLEON_*PLATFORM` variables are read by the CLI only.",
       "anyOf": [
         {
           "$ref": "#/$defs/PlatformConfig"
@@ -36,7 +36,7 @@
       "$ref": "#/$defs/MetricsConfig"
     },
     "platform": {
-      "description": "The platform the CLI runs as (e.g. `macos-aarch64`, or `{renderer: impeller}` over the\ndetected OS and architecture); its flags and `GLEON_PLATFORM` override it.\n\nRead by the CLI only: an integration (the Flutter package) runs as its process's OS and\narchitecture, the name of the directory of that platform's own goldens.",
+      "description": "The platform the CLI runs as (e.g. `macos-aarch64`, or `{renderer: impeller}` over the\ndetected OS and architecture); its flags and `GLEON_PLATFORM` override it.\n\nRead by the CLI only: an integration (the Flutter package) runs as its process's OS and\narchitecture.",
       "anyOf": [
         {
           "$ref": "#/$defs/PlatformConfig"
@@ -302,7 +302,7 @@
           "default": "pixel"
         },
         "text_tolerance": {
-          "description": "How much text may differ, in `pixel` and `ssim` mode: the largest share of differing pixels in any\ntile of the text an integration reports, `[0, 1]`. Unset, it depends on the golden\n([`crate::tolerance::TextTolerance::resolve`]): 0.05 against a golden of the platform the\ntest runs on (see `fallback_platform`), else 1, so text never fails. A value set here\napplies to every golden of the rule: 1 turns text comparison off.",
+          "description": "How much text may differ, in `pixel` and `ssim` mode: the largest share of differing pixels in any\ntile of the text an integration reports, `[0, 1]`. Unset, it depends on the golden\n([`crate::tolerance::TextTolerance::resolve`]): 0.05 on the platform the golden was\nrecorded on (see `fallback_platform`), else 1, so text never fails. A value set here\napplies to every golden of the rule: 1 turns text comparison off.",
           "anyOf": [
             {
               "$ref": "#/$defs/TextTolerance"

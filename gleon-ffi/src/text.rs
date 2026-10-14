@@ -163,28 +163,38 @@ pub fn unused_text_tolerance(golden_uri: &str) -> String {
     )
 }
 
-/// The clause of a failure against the shared golden of `platform`, compared because this
-/// platform has no own golden `own_uri` yet.
-pub fn fallback(platform: &str, own_uri: &str) -> String {
+/// The clause of a failure against a golden recorded on `origin`, another platform; `assumed`
+/// when the golden has no stamp and the `fallback_platform` of its workspace is its origin.
+pub fn recorded_on(origin: &str, assumed: bool) -> String {
+    let assumed = if assumed {
+        " (the `fallback_platform`)"
+    } else {
+        ""
+    };
+    format!(" The golden was recorded on {origin}{assumed}.")
+}
+
+/// The clause of a failure on the `fallback_platform` under `GLEON_REQUIRE_CANONICAL` against a
+/// golden recorded on `origin`, another platform, compared as a golden of this platform.
+pub fn required_canonical(origin: &str) -> String {
     format!(
-        " Compared with the {platform} golden: this platform has no own golden \"{own_uri}\" yet \
-         (record or approve it to compare text too)."
+        " The golden was recorded on {origin}, and GLEON_REQUIRE_CANONICAL compares it as a golden \
+         of this platform (the `fallback_platform`): update it here."
+    )
+}
+
+/// The warning on the `fallback_platform` for a golden recorded on `origin`, another platform.
+pub fn non_canonical(golden_uri: &str, origin: &str) -> String {
+    format!(
+        "gleon: golden \"{golden_uri}\" was recorded on {origin}, not on this platform (the \
+         `fallback_platform`), so its text is not compared here: update it here to record it \
+         again."
     )
 }
 
 /// Flutter's message for a missing golden.
 pub fn missing_golden(golden_uri: &str) -> String {
     format!("Could not be compared against non-existent file: \"{golden_uri}\"")
-}
-
-/// Appends to `message` the clause of a missing golden on a platform with its own goldens: the
-/// shared golden of `platform` is missing too, and a new golden starts there.
-pub fn push_missing_fallback(message: &mut String, platform: &str, shared_uri: &str) {
-    let _infallible = write!(
-        message,
-        " (nor the {platform} golden \"{shared_uri}\": record a new golden on {platform} first, \
-         every other platform compares it until it has its own)"
-    );
 }
 
 /// An invalid `.gleon/gleon.yaml`, or a golden whose name its rules cannot take.

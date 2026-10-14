@@ -14,6 +14,7 @@
 //! - [`case`]: the per-golden, per-platform case report
 //!   (`.gleon/runs/latest/cases/<platform>/<name>.json`) and the images of a failure next to it;
 //! - [`hash`]: content hashes of images (`sha256:<hex>`), shared by manifests and case reports;
+//! - [`origin`]: the platform a golden PNG was recorded on, in a chunk of the PNG;
 //! - [`fs`]: atomic file writes.
 //!
 //! JSON Schemas for the config and the case report are committed under `schema/` and kept in sync
@@ -25,6 +26,7 @@ pub mod config;
 pub mod fs;
 pub mod hash;
 pub mod naming;
+pub mod origin;
 pub mod platform;
 pub mod rules;
 mod serde_skip;

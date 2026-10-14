@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 gleon-engine = { path = "../gleon-engine", features = ["schemars"] }
 chrono = { workspace = true }
+crc32fast = { workspace = true }
 glob = { workspace = true }
 image = { workspace = true }
 schemars = { workspace = true, features = ["chrono04"] }

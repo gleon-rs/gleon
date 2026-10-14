@@ -29,14 +29,15 @@ use gleon_model::{
     },
     compare::{Candidate, Compared, Comparison, Text},
     fs::Durability,
-    platform::{self, PlatformConfig, PlatformKey},
+    origin::Stamp,
+    platform::{PlatformConfig, PlatformKey},
     tolerance::{TextTolerance, Tolerance},
 };
 
 use crate::{
     compare::{self, Timed},
     error::{ErrorKind, Failure},
-    session::{ArtifactNames, Fallback, Goldens, Plan, Session},
+    session::{ArtifactNames, Plan, Session, Tracking},
     text,
 };
 
@@ -159,8 +160,8 @@ pub fn run(session: &Session, request: &Request<'_>) -> Finished {
             "gleon: update mode takes the candidate as PNG",
         ));
     }
-    // Planned first, also in update mode: which file this platform writes depends on the config
-    // of the workspace, and an invalid one writes nothing.
+    // Planned first, also in update mode: whether and how the golden is written depends on the
+    // config of the workspace, and an invalid one writes nothing.
     let plan = match session.plan(
         request.golden_path,
         request.tolerance,
@@ -180,6 +181,8 @@ pub fn run(session: &Session, request: &Request<'_>) -> Finished {
     finished.warn(warning)
 }
 
+/// Writes `candidate` as the golden, stamped with this platform when a rule matches the golden
+/// ([`gleon_model::origin`]), unless the golden stays ([`Call::kept`]).
 fn update(
     session: &Session,
     request: &Request<'_>,
@@ -187,29 +190,33 @@ fn update(
     candidate: &[u8],
     started: Instant,
 ) -> Finished {
-    let path = &plan.goldens.target;
+    let path = request.golden_path;
     let current = fs::read(path).ok();
-    // Rewriting the same bytes would cost a flush to disk and touch the file for build tools.
-    let written = if current.as_deref() == Some(candidate) {
-        Ok(())
-    } else {
-        gleon_model::fs::write_atomically(path, candidate, Durability::Durable)
-    };
-    let call = |golden| Call {
-        session,
-        request,
-        plan,
-        golden,
-        fallback: None,
-        encoded: OnceCell::new(),
-        started,
-    };
-    match written {
-        // After an update the golden is the candidate.
-        Ok(()) => {
-            call(Some(candidate)).finish(CaseOutcome::Updated, Details::default(), String::new)
+    if let Some(golden) = current.as_deref() {
+        let call = Call::new(session, request, plan, Some(golden), started);
+        match call.kept(golden, candidate) {
+            // Rewriting the same image would cost a flush to disk and touch the file for build
+            // tools.
+            Kept::Same => {
+                return call.finish(CaseOutcome::Updated, Details::default(), String::new);
+            }
+            Kept::Passes(timed) => return judge(&call, *timed),
+            Kept::Replaced => {}
         }
-        Err(e) => call(current.as_deref()).error(
+    }
+    let stamped = plan
+        .in_workspace
+        .as_ref()
+        .and_then(|_| gleon_model::origin::stamp(candidate, PlatformKey::host()));
+    let written = stamped.as_deref().unwrap_or(candidate);
+    match gleon_model::fs::write_atomically(path, written, Durability::Durable) {
+        // After an update the golden is the (stamped) candidate.
+        Ok(()) => Call::new(session, request, plan, Some(written), started).finish(
+            CaseOutcome::Updated,
+            Details::default(),
+            String::new,
+        ),
+        Err(e) => Call::new(session, request, plan, current.as_deref(), started).error(
             Failure::io(format!(
                 "gleon: cannot write the golden {}: {e}",
                 path.display()
@@ -219,24 +226,32 @@ fn update(
     }
 }
 
+/// What update mode does with an existing golden.
+enum Kept {
+    /// Nothing to write: the same image.
+    Same,
+    /// It stays: recorded on another platform, the candidate passes against it.
+    Passes(Box<Timed>),
+    /// It is written over.
+    Replaced,
+}
+
 fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Instant) -> Finished {
-    let (golden, fallback) = read_golden(&plan.goldens);
-    let call = Call {
+    let golden = read_golden(request.golden_path);
+    let call = Call::new(
         session,
         request,
         plan,
-        golden: golden.as_ref().ok().and_then(Option::as_deref),
-        fallback,
-        encoded: OnceCell::new(),
+        golden.as_ref().ok().and_then(Option::as_deref),
         started,
-    };
+    );
     // The call asked for a text tolerance that cannot apply (a candidate without text regions:
     // bytes or an image): say so instead of comparing the text like everything else silently.
     let unused_text = (request.text.is_some() && call.text().is_none())
         .then(|| text::unused_text_tolerance(request.golden_uri));
     let finished = match golden.as_ref().map(Option::as_deref) {
         Err(reason) => call.error(
-            Failure::io(text::could_not_compare(&call.compared_uri(), reason)),
+            Failure::io(text::could_not_compare(request.golden_uri, reason)),
             reason.clone(),
         ),
         // The candidate is kept for `gleon approve` (only inside a workspace, so raw pixels are
@@ -256,9 +271,10 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
             },
             || call.missing_message(),
         ),
-        // Identical encodings are identical pixels: no decoding at all, so the masks are checked
-        // against the size in the PNG header.
-        Ok(Some(golden)) if matches!(request.candidate, Candidate::Png(png) if png == golden) => {
+        // Identical encodings are identical pixels (a stamp aside): no decoding at all, so the
+        // masks are checked against the size in the PNG header.
+        Ok(Some(golden)) if matches!(request.candidate, Candidate::Png(png) if call.is_image(golden, png)) =>
+        {
             let clamped = case::png_size(golden).map_or(0, |(width, height)| {
                 clamped_zones(&plan.masks, width, height)
             });
@@ -282,24 +298,18 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
             )
         }
     };
-    finished.warn(unused_text)
+    finished
+        .warn(unused_text)
+        .warn(call.non_canonical_warning())
 }
 
-/// The golden this platform compares: its own, else the shared one of another platform (then
-/// returned too). `None` when neither exists.
-fn read_golden(goldens: &Goldens) -> (Result<Option<Vec<u8>>, String>, Option<&Fallback>) {
-    let read = |path: &Path| match fs::read(path) {
+/// The golden at `path`; `None` when it does not exist.
+fn read_golden(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         // A directory is no golden either (reading one fails differently per OS).
         Err(e) if e.kind() == io::ErrorKind::NotFound || path.is_dir() => Ok(None),
         Err(e) => Err(format!("cannot read the golden: {e}")),
-    };
-    match (read(&goldens.target), &goldens.fallback) {
-        (Ok(None), Some(fallback)) => match read(&fallback.golden) {
-            Ok(None) => (Ok(None), None),
-            golden => (golden, Some(fallback)),
-        },
-        (golden, _) => (golden, None),
     }
 }
 
@@ -318,10 +328,7 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
         Ok(comparison) => comparison,
         Err(Failure { kind, message }) => {
             return call.error(
-                Failure::new(
-                    kind,
-                    text::could_not_compare(&call.compared_uri(), &message),
-                ),
+                Failure::new(kind, text::could_not_compare(uri, &message)),
                 message,
             );
         }
@@ -334,7 +341,6 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
                     metrics: Some(metrics),
                     regions,
                     native: Some(native),
-                    images: call.pass_images(&metrics),
                     ..Details::default()
                 },
                 String::new,
@@ -346,7 +352,7 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
             diff_png,
         } => {
             let summary = text::dimension_summary(golden, candidate);
-            let reason = format!("image sizes differ: {summary}.{}", call.fallback_clause());
+            let reason = format!("image sizes differ: {summary}.{}", call.origin_clause());
             let details = Details {
                 message: Some(summary),
                 native: Some(native),
@@ -367,7 +373,7 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
             if let Some(text) = call.text() {
                 tolerance = format!("{tolerance}, {}", text::text_tolerance(&text));
             }
-            let reason = format!("{summary} (gleon {tolerance}).{}", call.fallback_clause());
+            let reason = format!("{summary} (gleon {tolerance}).{}", call.origin_clause());
             let details = Details {
                 message: Some(summary),
                 metrics: Some(metrics),
@@ -393,9 +399,49 @@ struct Details<'a> {
     /// The compared regions of a match or mismatch.
     regions: Vec<RegionMetrics>,
     native: Option<Duration>,
-    /// The images for the artifacts directory; none for errors and passes (but the candidate of
-    /// a pass against another platform's golden), which remove the images of an earlier failure.
+    /// The images for the artifacts directory; none for errors and passes, which remove the
+    /// images of an earlier failure.
     images: ArtifactImages<'a>,
+}
+
+/// Where a golden was recorded, as far as a call knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Origin {
+    /// Unknown: no stamp and no `fallback_platform`, or a golden no rule matches.
+    Unknown,
+    /// The platform the stamp of its PNG names ([`gleon_model::origin`]).
+    Stamped(PlatformKey),
+    /// No stamp: taken as recorded on the `fallback_platform` of the workspace.
+    Assumed(PlatformKey),
+}
+
+impl Origin {
+    /// The origin of the golden of `plan` with the stamp `stamp` (`None` without one).
+    fn of(plan: &Plan, stamp: Option<&Stamp>) -> Self {
+        if plan.in_workspace.is_none() {
+            return Self::Unknown;
+        }
+        if let Some(stamp) = stamp {
+            return Self::Stamped(stamp.platform.clone());
+        }
+        match &plan.tracking {
+            Tracking::Unknown => Self::Unknown,
+            Tracking::Here => Self::Assumed(PlatformKey::host().clone()),
+            Tracking::Elsewhere(platform) => Self::Assumed(platform.clone()),
+        }
+    }
+
+    /// The platform, when it is known and not this one.
+    fn elsewhere(&self) -> Option<&PlatformKey> {
+        match self {
+            Self::Stamped(platform) | Self::Assumed(platform)
+                if platform != PlatformKey::host() =>
+            {
+                Some(platform)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// One planned call with the golden's bytes (`None` for a missing golden).
@@ -404,19 +450,51 @@ struct Call<'a> {
     request: &'a Request<'a>,
     plan: &'a Plan,
     golden: Option<&'a [u8]>,
-    /// The shared golden of another platform, when `golden` is it because this platform has no
-    /// own golden yet.
-    fallback: Option<&'a Fallback>,
-    /// The PNG of raw candidate pixels, encoded once when the candidate is kept (a failure, or
-    /// a recorded pass against another platform's golden).
+    /// The stamp of the golden, located once.
+    stamp: Option<Stamp>,
+    /// Where the golden was recorded.
+    origin: Origin,
+    /// The PNG of raw candidate pixels, encoded once when the candidate is kept (a failure).
     encoded: OnceCell<Option<Vec<u8>>>,
     started: Instant,
+}
+
+impl<'a> Call<'a> {
+    fn new(
+        session: &'a Session,
+        request: &'a Request<'a>,
+        plan: &'a Plan,
+        golden: Option<&'a [u8]>,
+        started: Instant,
+    ) -> Self {
+        let stamp = golden.and_then(gleon_model::origin::locate);
+        Self {
+            session,
+            request,
+            plan,
+            golden,
+            origin: Origin::of(plan, stamp.as_ref()),
+            stamp,
+            encoded: OnceCell::new(),
+            started,
+        }
+    }
+
+    /// Whether the PNG `image` is the image of `golden` (this call's golden), with or without
+    /// its stamp: compared in place.
+    fn is_image(&self, golden: &[u8], image: &[u8]) -> bool {
+        golden == image
+            || self
+                .stamp
+                .as_ref()
+                .is_some_and(|stamp| stamp.is_stripped(golden, image))
+    }
 }
 
 impl Call<'_> {
     /// The candidate as PNG: the given bytes, or the raw pixels encoded on first use (`None` if
     /// they cannot be). Only kept candidates need it ([`Details::images`]), so a raw candidate
-    /// is encoded only for a failure or a recorded pass against another platform's golden.
+    /// is encoded only for a failure.
     fn candidate_png(&self) -> Option<&[u8]> {
         match self.request.candidate {
             Candidate::Png(png) => Some(png),
@@ -441,62 +519,91 @@ impl Call<'_> {
     }
 
     /// The tolerance of text that applies, for text regions (any tolerance): the plan's, else
-    /// the default of the compared golden ([`TextTolerance::resolve`]).
+    /// the default of the golden ([`TextTolerance::resolve`]): text is compared on the platform
+    /// it was recorded on (and on the `fallback_platform` under `GLEON_REQUIRE_CANONICAL`).
     fn text(&self) -> Option<TextTolerance> {
-        let is_own = self.plan.goldens.is_own && self.fallback.is_none();
+        let is_own = self.plan.requires_canonical
+            || (self.origin != Origin::Unknown && self.origin.elsewhere().is_none());
         (!self.request.text_regions.is_empty())
             .then(|| TextTolerance::resolve(self.plan.text, is_own))
     }
 
-    /// The key of this platform's own golden, as the integration's key (`golden_uri`) names the
-    /// shared one, when the workspace keeps one per platform.
-    fn own_uri(&self) -> Option<String> {
-        self.plan
-            .goldens
-            .fallback
-            .as_ref()
-            .map(|_| platform::platform_golden(self.request.golden_uri, PlatformKey::host()))
-    }
-
-    /// The key of the golden this call compares, for messages about it.
-    fn compared_uri(&self) -> Cow<'_, str> {
-        match self.own_uri() {
-            Some(own) if self.fallback.is_none() => Cow::Owned(own),
-            _ => Cow::Borrowed(self.request.golden_uri),
+    /// The clause of a failure against a golden recorded on another platform; empty for any
+    /// other.
+    fn origin_clause(&self) -> String {
+        match (&self.origin, self.origin.elsewhere()) {
+            (_, Some(platform)) if self.plan.requires_canonical => {
+                text::required_canonical(platform.as_str())
+            }
+            (Origin::Assumed(_), Some(platform)) => text::recorded_on(platform.as_str(), true),
+            (_, Some(platform)) => text::recorded_on(platform.as_str(), false),
+            (_, None) => String::new(),
         }
     }
 
-    /// The clause of a failure against another platform's shared golden; empty for any other.
-    fn fallback_clause(&self) -> String {
-        match (self.fallback, self.own_uri()) {
-            (Some(fallback), Some(own)) => text::fallback(fallback.platform.as_str(), &own),
-            _ => String::new(),
+    /// The warning of a golden the `fallback_platform` compares although another platform
+    /// recorded it, unless `GLEON_REQUIRE_CANONICAL` compares it as its own.
+    fn non_canonical_warning(&self) -> Option<String> {
+        match &self.origin {
+            Origin::Stamped(platform)
+                if self.plan.tracking == Tracking::Here
+                    && !self.plan.requires_canonical
+                    && platform != PlatformKey::host() =>
+            {
+                Some(text::non_canonical(
+                    self.request.golden_uri,
+                    platform.as_str(),
+                ))
+            }
+            _ => None,
         }
     }
 
-    /// The images a recorded pass keeps: the candidate of a pass against another platform's
-    /// golden that differs from it, so `gleon approve` can make it this platform's own; none
-    /// otherwise (approving a pass without differences copies the compared golden).
-    fn pass_images(&self, metrics: &Metrics) -> ArtifactImages<'_> {
-        let keeps = self.fallback.is_some() && self.plan.record().is_some() && metrics.differs();
-        ArtifactImages {
-            candidate: keeps.then(|| self.candidate_png()).flatten(),
-            ..ArtifactImages::default()
+    /// What update mode does with the existing `golden` given `candidate`: the
+    /// `fallback_platform` records again what another platform recorded; otherwise the same image
+    /// is never written again, and a golden recorded on another platform stays while the candidate
+    /// passes against it as compared here (text ignored by default), so it never flips between
+    /// platforms over their glyphs.
+    fn kept(&self, golden: &[u8], candidate: &[u8]) -> Kept {
+        let canonicalizes = self.plan.tracking == Tracking::Here
+            && matches!(self.origin, Origin::Stamped(_))
+            && self.origin.elsewhere().is_some();
+        if canonicalizes {
+            return Kept::Replaced;
+        }
+        if self.is_image(golden, candidate) {
+            return Kept::Same;
+        }
+        if self.origin.elsewhere().is_none() {
+            return Kept::Replaced;
+        }
+        let text = self.text().map(|tolerance| Text {
+            regions: &self.request.text_regions,
+            tolerance,
+        });
+        let timed = compare::compare(
+            golden,
+            Candidate::Png(candidate),
+            &self.plan.tolerance,
+            &self.plan.masks,
+            text,
+        );
+        if matches!(
+            &timed.comparison,
+            Ok(Comparison {
+                compared: Compared::Match { .. },
+                ..
+            })
+        ) {
+            Kept::Passes(Box::new(timed))
+        } else {
+            Kept::Replaced
         }
     }
 
-    /// The message of a missing golden: Flutter's, naming the golden this platform compares and,
-    /// on a platform with its own goldens, the shared one of the fallback platform it lacks too.
+    /// Flutter's message for a missing golden.
     fn missing_message(&self) -> String {
-        let mut message = text::missing_golden(&self.compared_uri());
-        if let Some(fallback) = &self.plan.goldens.fallback {
-            text::push_missing_fallback(
-                &mut message,
-                fallback.platform.as_str(),
-                self.request.golden_uri,
-            );
-        }
-        message
+        text::missing_golden(self.request.golden_uri)
     }
 
     /// Keeps the images of `details` in the artifacts directory and records the case report (and
@@ -639,10 +746,9 @@ impl Call<'_> {
                     )
                 });
         }
-        let fallback = self.fallback.map(|fallback| fallback.path.clone());
         let console = if record.is_some_and(|record| record.console) {
             text::console_line(
-                fallback.as_deref().unwrap_or(&golden.golden_path),
+                &golden.golden_path,
                 outcome,
                 &self.plan.tolerance,
                 self.text(),
@@ -657,10 +763,7 @@ impl Call<'_> {
         let report = CaseReport {
             schema_version: CASE_SCHEMA_VERSION,
             name: golden.name.clone(),
-            golden: GoldenImage {
-                fallback,
-                ..GoldenImage::of(golden.golden_path.clone(), self.golden, None)
-            },
+            golden: GoldenImage::of(golden.golden_path.clone(), self.golden, None),
             candidate: self.candidate_image(),
             source: Source {
                 tool: integration.tool.clone(),
@@ -733,7 +836,7 @@ impl Call<'_> {
             },
             |()| text::feedback(request.failures_dir),
         );
-        text::failure(&self.compared_uri(), reason, &feedback, plan.has_workspace)
+        text::failure(request.golden_uri, reason, &feedback, plan.has_workspace)
     }
 }
 
@@ -982,6 +1085,14 @@ screenshots:
     diff: { threshold: 0 }
 metrics:
   enabled: true
+"#;
+
+    /// A workspace whose rules leave the golden out.
+    const EXCLUDING: &str = r#"
+required_version: ">=0.1.0"
+exclude: "test/goldens/a.png"
+screenshots:
+  - include: "test/goldens/*.png"
 "#;
 
     #[test]
@@ -1374,10 +1485,17 @@ metrics:
             }
         }
 
-        /// A fixture whose shared golden is [`Self::golden`] in a workspace with metrics and the
-        /// shared goldens of `fallback_platform`.
+        /// A fixture whose golden is [`Self::golden`], unstamped, in a workspace with metrics
+        /// whose `fallback_platform` is `fallback_platform`.
         fn fixture(&self, fallback_platform: &str) -> Fixture {
             self.fixture_with(fallback_platform, "diff: { threshold: 0 }")
+        }
+
+        /// [`Self::fixture`] without a `fallback_platform`.
+        fn fixture_without_fallback(&self) -> Fixture {
+            let fixture = Fixture::new(Some(METRICS));
+            fs::write(&fixture.golden, self.png()).unwrap();
+            fixture
         }
 
         /// [`Self::fixture`] with the rule's `diff:` line replaced by `rule`.
@@ -1396,17 +1514,66 @@ metrics:
     }
 
     impl Fixture {
-        /// This platform's own golden beside the shared one.
-        fn own_golden(&self) -> PathBuf {
+        /// The golden of this platform in its own folder, as gleon 0.3.0 kept it: never read nor
+        /// written anymore.
+        fn platform_golden(&self) -> PathBuf {
             self.root
                 .join("test/goldens")
                 .join(PlatformKey::host())
                 .join("a.png")
         }
+
+        /// Updates the golden with the PNG of `candidate` and its `text_regions`.
+        fn update_with_text(
+            &self,
+            session: &Session,
+            candidate: &image::RgbaImage,
+            text_regions: Vec<Region>,
+        ) -> Finished {
+            let png = gleon_model::compare::encode_png(candidate).unwrap();
+            run(
+                session,
+                &Request {
+                    text_regions,
+                    ..self.request(Mode::Update, Candidate::Png(&png))
+                },
+            )
+        }
+
+        /// Stamps the golden as recorded on `platform`.
+        fn stamp_golden(&self, platform: &str) {
+            let png = fs::read(&self.golden).unwrap();
+            let platform = PlatformKey::parse(platform).unwrap();
+            fs::write(
+                &self.golden,
+                gleon_model::origin::stamp(&png, &platform).unwrap(),
+            )
+            .unwrap();
+        }
+
+        /// The platform the golden names as its origin.
+        fn golden_origin(&self) -> Option<PlatformKey> {
+            gleon_model::origin::read(&fs::read(&self.golden).unwrap())
+        }
     }
 
-    /// On the platform of the shared goldens (`fallback_platform`) text is compared almost
-    /// exactly: whatever the call or rule says, at most `TextTolerance::OWN_PLATFORM`.
+    /// `image` encoded and stamped as recorded on this platform: what update mode writes.
+    fn stamped_here(image: &image::RgbaImage) -> Vec<u8> {
+        let png = gleon_model::compare::encode_png(image).unwrap();
+        gleon_model::origin::stamp(&png, PlatformKey::host()).unwrap()
+    }
+
+    /// `image` with the glyph change of [`TextImages::glyph`] in its first tile.
+    fn with_glyph(image: &image::RgbaImage) -> image::RgbaImage {
+        let mut image = image.clone();
+        for i in 0..32 {
+            image.put_pixel(i % 16, i / 16, Rgba([0, 0, 0, 255]));
+        }
+        image
+    }
+
+    /// On the `fallback_platform` a golden without a stamp is its own: text is compared almost
+    /// exactly, at most `TextTolerance::OWN_PLATFORM` unless the call or rule says otherwise.
     #[test]
     fn test_on_the_fallback_platform_text_is_compared_almost_exactly() {
         let images = TextImages::new();
@@ -1424,7 +1591,7 @@ metrics:
             Some(TextTolerance::OWN_PLATFORM)
         );
         assert_eq!(
-            (case.golden.path.as_str(), case.golden.fallback),
+            (case.golden.path.as_str(), case.golden.platform),
             ("test/goldens/a.png", None)
         );
 
@@ -1435,7 +1602,7 @@ metrics:
             "{}",
             glyph.message
         );
-        assert!(!glyph.message.contains("Compared with"));
+        assert!(!glyph.message.contains("recorded on"), "{}", glyph.message);
         assert!(glyph.warning.is_empty(), "{}", glyph.warning);
 
         // An explicit tolerance replaces the default: 1 turns text comparison off here too,
@@ -1463,24 +1630,141 @@ metrics:
         );
         assert_eq!(finished.verdict, Verdict::Match, "the rule's 1 too");
 
-        let candidate = png(4, 4, true);
-        let updated = fixture.run(&session, Mode::Update, &candidate);
-        assert_eq!(updated.verdict, Verdict::Updated);
-        assert_eq!(fs::read(&fixture.golden).unwrap(), candidate);
-        assert!(!fixture.own_golden().parent().unwrap().exists());
+        // Update mode writes the golden, whatever changed, stamped with this platform.
+        let updated = fixture.update_with_text(&session, &images.glyph, images.regions.clone());
+        assert_eq!(updated.verdict, Verdict::Updated, "{}", updated.message);
+        assert_eq!(
+            fs::read(&fixture.golden).unwrap(),
+            stamped_here(&images.glyph)
+        );
+        assert_eq!(
+            fixture.case().golden.platform.as_ref(),
+            Some(PlatformKey::host())
+        );
+        assert!(!fixture.platform_golden().parent().unwrap().exists());
     }
 
-    /// Another platform compares the shared golden, with text under the text tolerance, until it
-    /// has its own golden, which it compares like the fallback platform its shared one.
+    /// Text is compared on the platform a golden was recorded on (its stamp), without a
+    /// `fallback_platform` too; a golden without a stamp is recorded nowhere known.
     #[test]
-    fn test_another_platform_falls_back_to_the_shared_golden() {
+    fn test_text_is_compared_where_the_golden_was_recorded() {
+        let images = TextImages::new();
+        let fixture = images.fixture_without_fallback();
+        let session = fixture.session(None);
+        let compare = |candidate| {
+            fixture.compare_raw(&session, candidate, None, images.regions.clone(), None)
+        };
+
+        let unknown = compare(&images.glyph);
+        assert_eq!(unknown.verdict, Verdict::Match, "{}", unknown.message);
+        let case = fixture.case();
+        assert_eq!(case.golden.platform, None);
+        assert_eq!(case.comparison.text_tolerance, Some(TextTolerance::DEFAULT));
+
+        fixture.stamp_golden(PlatformKey::host().as_str());
+        assert_eq!(compare(&images.noise).verdict, Verdict::Match);
+        let own = compare(&images.glyph);
+        assert_eq!(own.verdict, Verdict::Mismatch, "{}", own.message);
+        let case = fixture.case();
+        assert_eq!(case.golden.platform.as_ref(), Some(PlatformKey::host()));
+        assert_eq!(
+            case.comparison.text_tolerance,
+            Some(TextTolerance::OWN_PLATFORM)
+        );
+
+        fixture.stamp_golden(foreign_platform());
+        let foreign = compare(&images.glyph);
+        assert_eq!(foreign.verdict, Verdict::Match, "{}", foreign.message);
+        assert_eq!(
+            fixture.case().golden.platform.map(|key| key.to_string()),
+            Some(foreign_platform().to_owned())
+        );
+        let outside = compare(&images.outside);
+        assert_eq!(outside.verdict, Verdict::Mismatch);
+        assert!(
+            outside.message.contains(&format!(
+                "(gleon pixel ≤ 0.00%, text ignored). The golden was recorded on {}.\n",
+                foreign_platform()
+            )),
+            "{}",
+            outside.message
+        );
+        assert!(
+            outside.warning.is_empty(),
+            "no fallback_platform to warn on"
+        );
+        // The bytes of the image are compared, the stamp aside.
+        let png = gleon_model::compare::encode_png(&images.golden).unwrap();
+        assert_eq!(
+            fixture.run(&session, Mode::Compare, &png).verdict,
+            Verdict::Identical
+        );
+    }
+
+    /// The bytes of a stamped golden are identical to it, stamp included: compared and updated
+    /// like the image without the stamp, never decoded nor written again.
+    #[test]
+    fn test_the_bytes_of_a_stamped_golden_are_identical() {
+        let images = TextImages::new();
+        let fixture = images.fixture_without_fallback();
+        let session = fixture.session(None);
+        fixture.stamp_golden(PlatformKey::host().as_str());
+        let stamped = fs::read(&fixture.golden).unwrap();
+
+        let compared = fixture.run(&session, Mode::Compare, &stamped);
+        assert_eq!(compared.verdict, Verdict::Identical, "{}", compared.message);
+        assert_eq!(
+            fixture.run(&session, Mode::Compare, &images.png()).verdict,
+            Verdict::Identical,
+            "without the stamp too"
+        );
+        let modified = fs::metadata(&fixture.golden).unwrap().modified().unwrap();
+        let updated = fixture.run(&session, Mode::Update, &stamped);
+        assert_eq!(updated.verdict, Verdict::Updated, "{}", updated.message);
+        assert_eq!(
+            fs::metadata(&fixture.golden).unwrap().modified().unwrap(),
+            modified,
+            "the same image is not written again"
+        );
+    }
+
+    /// An origin chunk that names no platform is no stamp: it stays part of the golden, which is
+    /// then another image than the candidate's bytes, and its report stays consistent.
+    #[test]
+    fn test_an_origin_naming_no_platform_is_part_of_the_image() {
+        let images = TextImages::new();
+        let fixture = images.fixture_without_fallback();
+        let session = fixture.session(None);
+        fixture.stamp_golden("linux-x86_64");
+        let mut golden = fs::read(&fixture.golden).unwrap();
+        // The text of the stamp, past the signature, IHDR, its length and type, and the keyword.
+        golden[33 + 8 + gleon_model::origin::KEYWORD.len() + 1] = b'L';
+        fs::write(&fixture.golden, golden).unwrap();
+
+        let finished = fixture.run(&session, Mode::Compare, &images.png());
+        assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
+        let report = CaseReport::parse(&fs::read(fixture.case_path()).unwrap()).unwrap();
+        assert_eq!(report.golden.platform, None);
+    }
+
+    /// Another platform compares a golden without a stamp as one of the `fallback_platform`:
+    /// text ignored, and a failure says so. A golden in this platform's own 0.3.0 folder is
+    /// ignored, and a missing golden gets Flutter's message.
+    #[test]
+    fn test_another_platform_compares_the_golden_of_the_fallback_platform() {
         let images = TextImages::new();
         let fixture = images.fixture(foreign_platform());
         let session = fixture.session(None);
         let compare = |candidate| {
             fixture.compare_raw(&session, candidate, None, images.regions.clone(), None)
         };
-        let own_path = format!("test/goldens/{}/a.png", PlatformKey::host());
+        // Like the candidate outside the text: compared, it would pass.
+        fs::create_dir_all(fixture.platform_golden().parent().unwrap()).unwrap();
+        fs::write(
+            fixture.platform_golden(),
+            gleon_model::compare::encode_png(&images.outside).unwrap(),
+        )
+        .unwrap();
 
         let glyph = compare(&images.glyph);
         assert_eq!(glyph.verdict, Verdict::Match, "{}", glyph.message);
@@ -1490,186 +1774,212 @@ metrics:
             glyph.console
         );
         let case = fixture.case();
-        assert_eq!(case.golden.path, own_path, "where `gleon approve` writes");
-        assert_eq!(case.golden.fallback.as_deref(), Some("test/goldens/a.png"));
-        assert_eq!(
-            case.golden.sha256,
-            Some(case::Sha256Hex::of(&images.png())),
-            "the compared golden"
-        );
-        assert_eq!(
-            case.name, "test/goldens/a",
-            "the same name on every platform"
-        );
+        assert_eq!(case.golden.path, "test/goldens/a.png");
+        assert_eq!(case.golden.platform, None, "the golden has no stamp");
         assert_eq!(case.comparison.text_tolerance, Some(TextTolerance::DEFAULT));
-        // The pass keeps its candidate, so `gleon approve` can make it this platform's golden.
-        let kept = case.artifacts.unwrap();
-        assert_eq!((kept.golden, kept.diff), (None, None));
-        let candidate = fs::read(fixture.root.join(kept.candidate.unwrap())).unwrap();
-        assert_eq!(case.candidate, CandidateImage::of(&candidate));
-        assert_eq!(
-            image::load_from_memory(&candidate).unwrap().to_rgba8(),
-            images.glyph
-        );
-        assert!(
-            fixture.failures().is_empty(),
-            "a pass writes no failure feedback"
-        );
+        assert!(case.artifacts.is_none(), "a pass keeps nothing");
 
         let outside = compare(&images.outside);
         assert_eq!(outside.verdict, Verdict::Mismatch);
         assert!(
+            outside.message.starts_with("Golden \"goldens/a.png\": "),
+            "{}",
+            outside.message
+        );
+        assert!(
             outside.message.contains(&format!(
-                "(gleon pixel ≤ 0.00%, text ignored). Compared with the {} golden: this \
-                 platform has no own golden \"goldens/{}/a.png\" yet (record or approve it to \
-                 compare text too).",
-                foreign_platform(),
-                PlatformKey::host()
+                "(gleon pixel ≤ 0.00%, text ignored). The golden was recorded on {} (the \
+                 `fallback_platform`).",
+                foreign_platform()
             )),
             "{}",
             outside.message
         );
-        assert_eq!(
-            fixture.failures(),
-            ["a_gleonDiff.png", "a_masterImage.png", "a_testImage.png"]
-        );
-        assert_eq!(
-            fs::read(
-                fixture
-                    .root
-                    .join(fixture.case().artifacts.unwrap().golden.unwrap())
-            )
-            .unwrap(),
-            images.png(),
-            "the compared golden is kept"
-        );
 
-        fs::create_dir_all(fixture.own_golden().parent().unwrap()).unwrap();
-        fs::write(fixture.own_golden(), images.png()).unwrap();
-        let glyph = compare(&images.glyph);
-        assert_eq!(glyph.verdict, Verdict::Mismatch, "its own golden");
-        assert!(
-            glyph.message.starts_with(&format!(
-                "Golden \"goldens/{}/a.png\": ",
-                PlatformKey::host()
-            )),
-            "the message names the compared golden: {}",
-            glyph.message
-        );
-        assert!(
-            !glyph.message.contains("Compared with"),
-            "{}",
-            glyph.message
-        );
-        let case = fixture.case();
-        assert_eq!((case.golden.path, case.golden.fallback), (own_path, None));
-        assert_eq!(
-            case.comparison.text_tolerance,
-            Some(TextTolerance::OWN_PLATFORM)
-        );
-        assert_eq!(
-            compare(&images.noise).verdict,
-            Verdict::Match,
-            "noise of this platform's own font engine passes"
-        );
-        assert!(
-            fixture.case().artifacts.is_none(),
-            "a pass against its own golden keeps nothing"
-        );
-
-        // Messages about the compared golden name this platform's own one.
-        fs::write(
-            fixture.own_golden(),
-            b"version https://git-lfs.github.com/spec/v1",
-        )
-        .unwrap();
-        let corrupt = compare(&images.glyph);
-        assert_eq!(corrupt.error_kind, ErrorKind::Image);
-        assert!(
-            corrupt.message.starts_with(&format!(
-                "Golden \"goldens/{}/a.png\": gleon could not compare: golden image",
-                PlatformKey::host()
-            )),
-            "{}",
-            corrupt.message
-        );
-    }
-
-    /// Without metrics a pass records nothing, so a pass against another platform's golden keeps
-    /// no candidate either.
-    #[test]
-    fn test_fallback_passes_keep_their_candidate_only_when_recorded() {
-        let images = TextImages::new();
-        let fixture = images.fixture(foreign_platform());
-        let session = fixture.session(Some("0"));
-        let finished =
-            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
-        assert_eq!(finished.verdict, Verdict::Match, "{}", finished.message);
-        assert!(fixture.artifacts().is_empty());
-        assert!(!fixture.case_path().exists());
-    }
-
-    /// Update mode and missing goldens of another platform go to its own golden; the shared one is
-    /// never written there.
-    #[test]
-    fn test_another_platform_writes_its_own_golden() {
-        let images = TextImages::new();
-        let fixture = images.fixture(foreign_platform());
-        let session = fixture.session(None);
-        let candidate = png(4, 4, true);
-        let own_path = format!("test/goldens/{}/a.png", PlatformKey::host());
-
-        let updated = fixture.run(&session, Mode::Update, &candidate);
-        assert_eq!(updated.verdict, Verdict::Updated, "{}", updated.message);
-        assert_eq!(fs::read(fixture.own_golden()).unwrap(), candidate);
-        assert_eq!(fs::read(&fixture.golden).unwrap(), images.png());
-        let case = fixture.case();
-        assert_eq!(
-            (case.golden.path, case.golden.fallback),
-            (own_path.clone(), None)
-        );
-        assert_eq!(
-            fixture.run(&session, Mode::Compare, &candidate).verdict,
-            Verdict::Identical
-        );
-
-        fs::remove_file(fixture.own_golden()).unwrap();
         fs::remove_file(&fixture.golden).unwrap();
-        let missing = fixture.run(&session, Mode::Compare, &candidate);
+        let missing = compare(&images.glyph);
         assert_eq!(missing.verdict, Verdict::Missing);
         assert_eq!(
             missing.message,
-            format!(
-                "Could not be compared against non-existent file: \"goldens/{}/a.png\" (nor the \
-                 {foreign} golden \"goldens/a.png\": record a new golden on {foreign} first, \
-                 every other platform compares it until it has its own)",
-                PlatformKey::host(),
-                foreign = foreign_platform()
-            )
+            "Could not be compared against non-existent file: \"goldens/a.png\""
         );
-        let case = fixture.case();
-        assert_eq!((case.golden.path, case.golden.fallback), (own_path, None));
-        assert!(case.artifacts.unwrap().candidate.is_some());
     }
 
-    /// A pass against another platform's golden without a single differing pixel keeps no
-    /// candidate (approving it copies the compared golden); the report still names the fallback.
+    /// Update mode records on any platform. A golden recorded elsewhere stays while the
+    /// candidate passes against it (only its text differs: no flip between platforms over their
+    /// glyphs); one that would change is written, stamped with this platform, whose text is then
+    /// compared here.
     #[test]
-    fn test_fallback_passes_without_differences_keep_nothing() {
+    fn test_another_platform_records_goldens_that_change() {
         let images = TextImages::new();
         let fixture = images.fixture(foreign_platform());
         let session = fixture.session(None);
-        let same =
-            fixture.compare_raw(&session, &images.golden, None, images.regions.clone(), None);
-        assert_eq!(same.verdict, Verdict::Match, "{}", same.message);
-        let case = fixture.case();
-        assert_eq!(case.golden.fallback.as_deref(), Some("test/goldens/a.png"));
-        assert!(case.artifacts.is_none());
-        assert!(fixture.artifacts().is_empty());
+        let unchanged = || {
+            assert_eq!(fs::read(&fixture.golden).unwrap(), images.png());
+        };
 
-        let identical = fixture.run(&session, Mode::Compare, &images.png());
-        assert_eq!(identical.verdict, Verdict::Identical);
-        assert!(fixture.case().artifacts.is_none());
+        let same = fixture.run(&session, Mode::Update, &images.png());
+        assert_eq!(same.verdict, Verdict::Updated, "{}", same.message);
+        unchanged();
+        let glyph = fixture.update_with_text(&session, &images.glyph, images.regions.clone());
+        assert_eq!(glyph.verdict, Verdict::Match, "{}", glyph.message);
+        assert!(glyph.message.is_empty());
+        unchanged();
+        assert_eq!(fixture.case().outcome, CaseOutcome::Match);
+
+        let outside = fixture.update_with_text(&session, &images.outside, images.regions.clone());
+        assert_eq!(outside.verdict, Verdict::Updated, "{}", outside.message);
+        assert_eq!(
+            fs::read(&fixture.golden).unwrap(),
+            stamped_here(&images.outside)
+        );
+        let case = fixture.case();
+        assert_eq!(case.outcome, CaseOutcome::Updated);
+        assert_eq!(case.golden.platform.as_ref(), Some(PlatformKey::host()));
+        assert!(fixture.failures().is_empty(), "no failure feedback");
+
+        // Recorded here now: its text is compared here, and updated like any own golden.
+        let strict = fixture.compare_raw(
+            &session,
+            &with_glyph(&images.outside),
+            None,
+            images.regions.clone(),
+            None,
+        );
+        assert_eq!(strict.verdict, Verdict::Mismatch, "{}", strict.message);
+        let own = fixture.update_with_text(&session, &images.glyph, images.regions.clone());
+        assert_eq!(own.verdict, Verdict::Updated, "{}", own.message);
+        assert_eq!(
+            fs::read(&fixture.golden).unwrap(),
+            stamped_here(&images.glyph)
+        );
+
+        fs::remove_file(&fixture.golden).unwrap();
+        let missing = fixture.update_with_text(&session, &images.golden, images.regions.clone());
+        assert_eq!(missing.verdict, Verdict::Updated, "{}", missing.message);
+        assert_eq!(fixture.golden_origin().as_ref(), Some(PlatformKey::host()));
+        assert!(!fixture.platform_golden().parent().unwrap().exists());
+    }
+
+    /// The `fallback_platform` warns about a golden another platform recorded (its text is not
+    /// compared there) and records it again in update mode, even when only its text differs.
+    #[test]
+    fn test_the_fallback_platform_records_again_what_others_recorded() {
+        let images = TextImages::new();
+        let fixture = images.fixture(PlatformKey::host().as_str());
+        let session = fixture.session(None);
+        fixture.stamp_golden(foreign_platform());
+
+        let glyph =
+            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
+        assert_eq!(glyph.verdict, Verdict::Match, "{}", glyph.message);
+        assert_eq!(
+            glyph.warning,
+            format!(
+                "gleon: golden \"goldens/a.png\" was recorded on {}, not on this platform (the \
+                 `fallback_platform`), so its text is not compared here: update it here to \
+                 record it again.",
+                foreign_platform()
+            )
+        );
+        assert_eq!(
+            fixture.case().comparison.text_tolerance,
+            Some(TextTolerance::DEFAULT)
+        );
+
+        let same = fixture.run(&session, Mode::Update, &images.png());
+        assert_eq!(same.verdict, Verdict::Updated, "{}", same.message);
+        assert_eq!(
+            fs::read(&fixture.golden).unwrap(),
+            stamped_here(&images.golden)
+        );
+        let glyph =
+            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
+        assert_eq!(
+            glyph.verdict,
+            Verdict::Mismatch,
+            "now its own: {}",
+            glyph.message
+        );
+        assert!(glyph.warning.is_empty(), "{}", glyph.warning);
+    }
+
+    /// `GLEON_REQUIRE_CANONICAL` makes the `fallback_platform` compare a golden another platform
+    /// recorded as its own, so its glyphs fail there until it is recorded again.
+    #[test]
+    fn test_the_fallback_platform_can_require_its_own_goldens() {
+        let images = TextImages::new();
+        let fixture = images.fixture(PlatformKey::host().as_str());
+        let required = |value: &str| {
+            fixture.session_with(SessionOptions {
+                require_canonical_env: Some(value.to_owned()),
+                ..SessionOptions::default()
+            })
+        };
+        fixture.stamp_golden(foreign_platform());
+
+        let session = required(" TRUE ");
+        let glyph =
+            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
+        assert_eq!(glyph.verdict, Verdict::Mismatch, "{}", glyph.message);
+        assert!(
+            glyph.message.contains(&format!(
+                "text ≤ 5.00% per tile). The golden was recorded on {}, and \
+                 GLEON_REQUIRE_CANONICAL compares it as a golden of this platform (the \
+                 `fallback_platform`): update it here.",
+                foreign_platform()
+            )),
+            "{}",
+            glyph.message
+        );
+        assert!(glyph.warning.is_empty(), "{}", glyph.warning);
+        let noise =
+            fixture.compare_raw(&session, &images.noise, None, images.regions.clone(), None);
+        assert_eq!(noise.verdict, Verdict::Match, "{}", noise.message);
+
+        // Off, and elsewhere, it changes nothing.
+        let off = fixture.compare_raw(
+            &required("0"),
+            &images.glyph,
+            None,
+            images.regions.clone(),
+            None,
+        );
+        assert_eq!(off.verdict, Verdict::Match, "{}", off.message);
+        let elsewhere = images.fixture(foreign_platform());
+        let elsewhere_session = elsewhere.session_with(SessionOptions {
+            require_canonical_env: Some("1".to_owned()),
+            ..SessionOptions::default()
+        });
+        let glyph = elsewhere.compare_raw(
+            &elsewhere_session,
+            &images.glyph,
+            None,
+            images.regions.clone(),
+            None,
+        );
+        assert_eq!(glyph.verdict, Verdict::Match, "{}", glyph.message);
+
+        let invalid = fixture.run(&required("maybe"), Mode::Compare, &images.png());
+        assert_eq!(invalid.error_kind, ErrorKind::Config);
+        assert!(
+            invalid
+                .message
+                .contains("GLEON_REQUIRE_CANONICAL must be 1, 0, true or false (got 'maybe')"),
+            "{}",
+            invalid.message
+        );
+    }
+
+    /// A golden no rule matches is written like Flutter writes it: never stamped.
+    #[test]
+    fn test_goldens_without_a_rule_are_not_stamped() {
+        let candidate = png(4, 4, true);
+        for fixture in [Fixture::new(None), Fixture::new(Some(EXCLUDING))] {
+            let finished = fixture.run(&fixture.session(None), Mode::Update, &candidate);
+            assert_eq!(finished.verdict, Verdict::Updated, "{}", finished.message);
+            assert_eq!(fs::read(&fixture.golden).unwrap(), candidate);
+        }
     }
 
     #[test]
@@ -2398,7 +2708,12 @@ metrics:
         let candidate = png(4, 4, true);
         let finished = fixture.run(&fixture.session(None), Mode::Update, &candidate);
         assert_eq!(finished.verdict, Verdict::Updated);
-        assert_eq!(fs::read(&fixture.golden).unwrap(), candidate);
+        let written = fs::read(&fixture.golden).unwrap();
+        assert_eq!(
+            written,
+            gleon_model::origin::stamp(&candidate, PlatformKey::host()).unwrap(),
+            "stamped with this platform"
+        );
         assert!(
             finished.console.contains("  updated  "),
             "{}",
@@ -2406,7 +2721,8 @@ metrics:
         );
         let case = fixture.case();
         assert_eq!(case.outcome, CaseOutcome::Updated);
-        assert_eq!(case.golden.sha256, case.candidate.sha256);
+        assert_eq!(case.golden.sha256, Some(case::Sha256Hex::of(&written)));
+        assert_eq!(case.golden.platform.as_ref(), Some(PlatformKey::host()));
 
         let broken = Fixture::new(Some("not: [valid"));
         let finished = broken.run(&broken.session(None), Mode::Update, &candidate);

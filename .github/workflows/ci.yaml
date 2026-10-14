@@ -107,8 +107,8 @@ jobs:
         run: cargo miri test --locked -p gleon-ffi --lib
 
   host-platforms:
-    # The integration crates depend on the host (`std::env::consts`: per-platform golden
-    # directories, platform keys that must be valid file names, path handling); the full suite
+    # The integration crates depend on the host (`std::env::consts`: the platform that tracks
+    # the goldens, platform keys that must be valid file names, path handling); the full suite
     # runs on Linux above.
     name: 🖥️ Test gleon-model and gleon-ffi on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

@@ -131,12 +131,11 @@ impl From<(&PlatformKey, &CaseReport)> for TestHistoryEntry {
             outcome: report.outcome,
             error_kind: report.error_kind,
             metrics: report.metrics,
-            message: match (&report.message, report.golden.fallback.as_deref()) {
-                (Some(message), Some(shared)) => Some(format!(
-                    "{message} ({})",
-                    text::ComparedWithFallback(shared)
-                )),
-                (None, Some(shared)) => Some(text::ComparedWithFallback(shared).to_string()),
+            message: match (&report.message, report.recorded_elsewhere()) {
+                (Some(message), Some(origin)) => {
+                    Some(format!("{message} ({})", text::RecordedOn(origin)))
+                }
+                (None, Some(origin)) => Some(text::RecordedOn(origin).to_string()),
                 (message, None) => message.clone(),
             },
         }
@@ -791,28 +790,30 @@ mod tests {
             .with_run_id(RunId::new(run_id).unwrap())
     }
 
-    /// A failure compared with another platform's golden says so in the history.
+    /// A case whose golden was recorded on another platform says so in the history.
     #[test]
-    fn test_history_entries_name_a_fallback_golden() {
+    fn test_history_entries_name_a_golden_recorded_elsewhere() {
         use crate::cases::fixtures::report;
 
         let mut case = report("a", CaseOutcome::Mismatch);
+        let key = case.platform_key().unwrap();
         case.message = Some("5.00% (5 of 100px) differ".to_owned());
-        case.golden.fallback = Some("test/goldens/a.png".to_owned());
+        case.golden.platform = Some(key.clone());
+        let message = |case: &CaseReport| TestHistoryEntry::from((&key, case)).message;
         assert_eq!(
-            TestHistoryEntry::from((PlatformKey::host(), &case))
-                .message
-                .as_deref(),
-            Some(
-                "5.00% (5 of 100px) differ (compared with test/goldens/a.png of the fallback platform)"
-            )
+            message(&case).as_deref(),
+            Some("5.00% (5 of 100px) differ"),
+            "recorded on its own platform"
+        );
+        case.golden.platform = Some(PlatformKey::parse("os=elsewhere").unwrap());
+        assert_eq!(
+            message(&case).as_deref(),
+            Some("5.00% (5 of 100px) differ (golden recorded on os=elsewhere)")
         );
         case.message = None;
         assert_eq!(
-            TestHistoryEntry::from((PlatformKey::host(), &case))
-                .message
-                .as_deref(),
-            Some("compared with test/goldens/a.png of the fallback platform")
+            message(&case).as_deref(),
+            Some("golden recorded on os=elsewhere")
         );
     }
 

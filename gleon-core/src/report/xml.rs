@@ -33,7 +33,7 @@ impl<'a> XmlCase<'a> {
         Self {
             name: &report.name,
             classname: key.as_str(),
-            image: report.golden.compared(),
+            image: &report.golden.path,
             status,
             message: report
                 .outcome

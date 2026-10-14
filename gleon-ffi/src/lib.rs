@@ -56,7 +56,7 @@ use gleon_engine::{
 use gleon_model::{
     case::RUN_ID_ENV,
     compare::{Candidate, is_rgba_len},
-    config::{ARTIFACTS_ENV, METRICS_ENV},
+    config::{ARTIFACTS_ENV, METRICS_ENV, REQUIRE_CANONICAL_ENV},
     tolerance::{TextTolerance, Tolerance},
 };
 use golden::{Finished, Mode, Request};
@@ -66,7 +66,7 @@ use session::{ArtifactNames, Integration, Session, SessionOptions};
 
 /// Version of the C contract. Bumped on any breaking change so the caller can refuse a
 /// mismatched native library instead of misreading it.
-pub const ABI_VERSION: u32 = 12;
+pub const ABI_VERSION: u32 = 13;
 
 /// Session flag: goldens belong to workspaces.
 ///
@@ -76,16 +76,17 @@ pub const SESSION_FIND_WORKSPACE: u32 = 1;
 
 /// Session flag: take the environment from the session strings, not from the process.
 ///
-/// `metrics_env`, `artifacts_env` and `run_id_env` become the values of `GLEON_METRICS`,
-/// `GLEON_ARTIFACTS_DIR` and `GLEON_RUN_ID` (empty for unset), so tests of an integration never
-/// depend on the shell they run in.
+/// `metrics_env`, `artifacts_env`, `run_id_env` and `require_canonical_env` become the values of
+/// `GLEON_METRICS`, `GLEON_ARTIFACTS_DIR`, `GLEON_RUN_ID` and `GLEON_REQUIRE_CANONICAL` (empty for
+/// unset), so tests of an integration never depend on the shell they run in.
 pub const SESSION_ENV: u32 = 2;
 
 /// The strings of [`gleon_session_new`], in order.
-const SESSION_STRINGS: [&str; 9] = [
+const SESSION_STRINGS: [&str; 10] = [
     "metrics_env",
     "artifacts_env",
     "run_id_env",
+    "require_canonical_env",
     "tool",
     "tool_version",
     "renderer",
@@ -342,15 +343,16 @@ fn invalid_input(message: &str) -> Finished {
 /// Creates the session of a test process.
 ///
 /// `flags` combines [`SESSION_FIND_WORKSPACE`] and [`SESSION_ENV`]. The strings are
-/// `lengths_count` (9) UTF-8 strings packed into `strings`, `lengths` giving their byte
+/// `lengths_count` (10) UTF-8 strings packed into `strings`, `lengths` giving their byte
 /// lengths, in this order:
-/// 1. to 3. `metrics_env`, `artifacts_env`, `run_id_env`: with [`SESSION_ENV`] the values of
-///    `GLEON_METRICS` (metrics on or off), `GLEON_ARTIFACTS_DIR` (the artifacts directory of
-///    every workspace) and `GLEON_RUN_ID` (the run in case reports), empty for unset; without
-///    it they are ignored and the process environment is read;
-/// 4. `tool`, 5. `tool_version`: the integration in case reports (`gleon_flutter`, `0.1.0`);
-/// 6. `renderer`: e.g. `flutter-3.47.5`, may be empty;
-/// 7. to 9. the file name patterns of the failure artifacts of the golden, the candidate and the
+/// 1. to 4. `metrics_env`, `artifacts_env`, `run_id_env`, `require_canonical_env`: with
+///    [`SESSION_ENV`] the values of `GLEON_METRICS` (metrics on or off), `GLEON_ARTIFACTS_DIR`
+///    (the artifacts directory of every workspace), `GLEON_RUN_ID` (the run in case reports) and
+///    `GLEON_REQUIRE_CANONICAL` (the `fallback_platform` compares every golden as its own), empty
+///    for unset; without it they are ignored and the process environment is read;
+/// 5. `tool`, 6. `tool_version`: the integration in case reports (`gleon_flutter`, `0.1.0`);
+/// 7. `renderer`: e.g. `flutter-3.47.5`, may be empty;
+/// 8. to 10. the file name patterns of the failure artifacts of the golden, the candidate and the
 ///    diff; each contains `{name}` (the golden's file name without extension), e.g.
 ///    `{name}_masterImage.png`.
 ///
@@ -398,6 +400,7 @@ fn session_options(flags: u32, strings: &[u8], lengths: &[u32]) -> Result<Sessio
         metrics_env,
         artifacts_env,
         run_id_env,
+        require_canonical_env,
         tool,
         tool_version,
         renderer,
@@ -423,6 +426,7 @@ fn session_options(flags: u32, strings: &[u8], lengths: &[u32]) -> Result<Sessio
         metrics_env: env(METRICS_ENV, metrics_env),
         artifacts_env: env(ARTIFACTS_ENV, artifacts_env),
         run_id_env: env(RUN_ID_ENV, run_id_env),
+        require_canonical_env: env(REQUIRE_CANONICAL_ENV, require_canonical_env),
         integration: Integration {
             tool: tool.to_owned(),
             tool_version: tool_version.to_owned(),
@@ -534,10 +538,13 @@ fn quadruples(flat: &[u32]) -> impl Iterator<Item = [u32; 4]> {
 /// Compares `candidate` against the golden file (`call.mode` 0), or writes it there (`mode` 1,
 /// update mode, PNG only), and writes the verdict with the texts to show to `summary`.
 ///
-/// `golden_path` is the shared golden. When the `.gleon/gleon.yaml` of its workspace names the
-/// `fallback_platform` the shared goldens were recorded on and this process runs on another,
-/// its own golden `<dir>/<os>-<arch>/<file>` is written and compared instead, and the shared one
-/// only while the own one does not exist.
+/// `golden_path` is the golden on every platform. A golden a rule of its workspace matches
+/// names the platform it was recorded on in its PNG ([`gleon_model::origin`], else the
+/// `fallback_platform` of its workspace): its text is compared there and ignored elsewhere by
+/// default.
+/// Update mode writes the golden stamped with this platform, unless it is the same image, or it
+/// was recorded on another platform and the candidate passes against it; the `fallback_platform`
+/// records again what other platforms recorded.
 ///
 /// The strings are `lengths_count` (4) UTF-8 strings packed into `strings`, `lengths` giving
 /// their byte lengths, in this order: `golden_path` (the file), `golden_uri` (the key shown in
@@ -689,9 +696,9 @@ mod tests {
     }
 
     /// A session of the Flutter integration; with [`SESSION_ENV`], `env` gives the values of
-    /// `GLEON_METRICS`, `GLEON_ARTIFACTS_DIR` and `GLEON_RUN_ID`.
-    fn new_session(flags: u32, env: [&str; 3]) -> repr_c::Box<GleonSession> {
-        let [metrics, artifacts, run_id] = env;
+    /// `GLEON_METRICS`, `GLEON_ARTIFACTS_DIR`, `GLEON_RUN_ID` and `GLEON_REQUIRE_CANONICAL`.
+    fn new_session(flags: u32, env: [&str; 4]) -> repr_c::Box<GleonSession> {
+        let [metrics, artifacts, run_id, require_canonical] = env;
         let [golden, candidate, diff] = FLUTTER_ARTIFACTS;
         session_with(
             flags,
@@ -699,6 +706,7 @@ mod tests {
                 metrics,
                 artifacts,
                 run_id,
+                require_canonical,
                 "gleon_flutter",
                 "0.1.0",
                 "",
@@ -709,7 +717,7 @@ mod tests {
         )
     }
 
-    const UNSET: [&str; 3] = ["", "", ""];
+    const UNSET: [&str; 4] = ["", "", "", ""];
 
     fn session_with(flags: u32, strings: &[&str]) -> repr_c::Box<GleonSession> {
         let (bytes, lengths) = packed(strings);
@@ -1162,17 +1170,18 @@ mod tests {
     fn test_invalid_session_inputs_fail_every_call() {
         let [golden_artifact, candidate, diff] = FLUTTER_ARTIFACTS;
         for (flags, strings, needle) in [
-            (4, vec![""; 9], "unknown session flags 0x4"),
-            (0, vec![""; 8], "expected 9 strings, got 8"),
+            (4, vec![""; 10], "unknown session flags 0x4"),
+            (0, vec![""; 9], "expected 10 strings, got 9"),
             (
                 0,
-                vec!["", "", "", "", "", "", "master.png", candidate, diff],
+                vec!["", "", "", "", "", "", "", "master.png", candidate, diff],
                 "must contain `{name}`",
             ),
             (
                 SESSION_ENV,
                 vec![
                     "maybe",
+                    "",
                     "",
                     "",
                     "",
@@ -1186,7 +1195,18 @@ mod tests {
             ),
             (
                 SESSION_ENV,
-                vec!["", "out", "", "", "", "", golden_artifact, candidate, diff],
+                vec![
+                    "",
+                    "out",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    golden_artifact,
+                    candidate,
+                    diff,
+                ],
                 "GLEON_ARTIFACTS_DIR: 'out' must be",
             ),
             (
@@ -1198,11 +1218,28 @@ mod tests {
                     "",
                     "",
                     "",
+                    "",
                     golden_artifact,
                     candidate,
                     diff,
                 ],
                 "GLEON_RUN_ID: a run id must be",
+            ),
+            (
+                SESSION_ENV,
+                vec![
+                    "",
+                    "",
+                    "",
+                    "maybe",
+                    "",
+                    "",
+                    "",
+                    golden_artifact,
+                    candidate,
+                    diff,
+                ],
+                "GLEON_REQUIRE_CANONICAL must be 1, 0, true or false (got 'maybe')",
             ),
         ] {
             let session = session_with(flags, &strings);
@@ -1218,8 +1255,8 @@ mod tests {
             assert!(answer.message.contains(needle), "{}", answer.message);
             gleon_session_free(Some(session));
         }
-        let (bytes, _) = packed(&[""; 9]);
-        let session = unsafe { gleon_session_new(0, bytes.as_ptr(), 0, std::ptr::null(), 9) };
+        let (bytes, _) = packed(&[""; 10]);
+        let session = unsafe { gleon_session_new(0, bytes.as_ptr(), 0, std::ptr::null(), 10) };
         let answer = golden(Some(&session), Call::default());
         assert_eq!(answer.error_kind, INVALID_INPUT);
         assert!(
@@ -1233,10 +1270,15 @@ mod tests {
 
     #[test]
     fn test_the_environment_is_read_without_the_flag() {
-        let session = new_session(0, ["maybe", "out", "run 1"]);
-        let is_set = [METRICS_ENV, ARTIFACTS_ENV, RUN_ID_ENV]
-            .into_iter()
-            .any(|name| std::env::var_os(name).is_some());
+        let session = new_session(0, ["maybe", "out", "run 1", "maybe"]);
+        let is_set = [
+            METRICS_ENV,
+            ARTIFACTS_ENV,
+            RUN_ID_ENV,
+            REQUIRE_CANONICAL_ENV,
+        ]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some());
         assert!(
             session.0.failure().is_none() || is_set,
             "the given values are ignored"
@@ -1327,7 +1369,7 @@ mod tests {
         let golden_path = root.join("test/goldens/counter.png");
         std::fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
         std::fs::write(&golden_path, COUNTER_0).unwrap();
-        let session = new_session(SESSION_FIND_WORKSPACE | SESSION_ENV, ["", "", "ci-7"]);
+        let session = new_session(SESSION_FIND_WORKSPACE | SESSION_ENV, ["", "", "ci-7", ""]);
         let path = golden_path.display().to_string();
         let failures = root.join("test/failures").display().to_string();
         let strings = [path.as_str(), "goldens/counter.png", failures.as_str(), "t"];
@@ -1415,8 +1457,19 @@ mod tests {
             },
         );
         assert_eq!(updated.verdict, golden::Verdict::Updated as u8);
-        assert_eq!(std::fs::read(&golden_path).unwrap(), COUNTER_3);
+        let written = std::fs::read(&golden_path).unwrap();
+        assert!(
+            gleon_model::origin::locate(&written)
+                .unwrap()
+                .is_stripped(&written, COUNTER_3)
+        );
+        assert_eq!(
+            gleon_model::origin::read(&written).as_ref(),
+            Some(PlatformKey::host()),
+            "stamped with this platform"
+        );
         assert_eq!(case()["outcome"], "updated");
+        assert_eq!(case()["golden"]["platform"], PlatformKey::host().as_str());
         assert_eq!(
             case()["schema_version"],
             gleon_model::case::CASE_SCHEMA_VERSION
