@@ -166,7 +166,7 @@ pub enum ApproveError {
         paths: String,
         /// The filters, listed for the message (` matching 'a', 'b'`), or empty.
         filters: String,
-        /// The warning about skipped cases on its own line ([`skipped_cases`]), or empty.
+        /// The warning about the skipped cases of integrations on its own line, or empty.
         skipped: String,
     },
 
