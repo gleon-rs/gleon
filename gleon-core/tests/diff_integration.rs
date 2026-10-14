@@ -62,7 +62,7 @@ fn test_diff_full_flow_with_real_fixtures() {
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
     // 1. Init workspace
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     // 2. Copy real PNG fixture (baseline_100x100.png)
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -116,7 +116,7 @@ fn test_diff_from_nested_subdirectory() {
     let root_dir = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), root_dir).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let nested_dir = root_dir.join("src").join("billing");
     fs::create_dir_all(&nested_dir).unwrap();
@@ -126,7 +126,7 @@ fn test_diff_from_nested_subdirectory() {
     fs::copy(fixture, root_dir.join("shot.png")).unwrap();
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &nested_dir).unwrap();
-    assert_eq!(ctx.base_dir, root_dir);
+    assert_eq!(ctx.base_dir, gleon_model::fs::canonical(root_dir).unwrap());
 
     let report = run_diff(&ctx, &DiffOptions::default())
         .expect("run_diff should succeed when using ctx.base_dir");
@@ -139,7 +139,7 @@ fn test_diff_cross_platform_backslash_manifest_keys() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -176,7 +176,7 @@ fn test_diff_missing_baseline_returns_missing_baseline() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -234,7 +234,7 @@ fn test_diff_missing_blob_file_and_corrupt_images() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -328,7 +328,7 @@ fn test_diff_with_mask_rules_ignores_masked_differences() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -366,7 +366,7 @@ fn test_diff_baseline_staged_before_mask_configuration() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -418,7 +418,7 @@ fn test_diff_fallback_platform_integration() {
     common::copy_config(base_path, "fallback");
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).unwrap();
+    init_workspace(&ctx_init, None).unwrap();
 
     // 2. Add real screenshot fixture
     let baseline_png_bytes = fs::read(fixtures_dir.join("baseline_100x100.png")).unwrap();
@@ -467,7 +467,7 @@ fn test_diff_nested_test_name_directory_creation() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -514,7 +514,7 @@ fn test_diff_missing_baseline_saved_and_approved() {
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
     // 1. Init workspace
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     // 2. Add an actual image WITHOUT running stage_workspace first, meaning no baseline
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -578,7 +578,7 @@ fn test_diff_applies_the_pixel_options_of_a_rule() {
     let root = temp_dir.path();
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
     common::copy_config(root, "pixel_options");
     // One anti-aliased column moves from 128 to 100 on a black-to-white edge.
     let dirs = ["strict", "aa", "channel", "short", "edges"];
@@ -641,7 +641,7 @@ fn test_diff_keeps_a_diff_of_both_sizes_for_a_dimension_mismatch() {
     let root = temp_dir.path();
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
     common::copy_config(root, "pixel_options");
     fs::create_dir_all(root.join("size")).unwrap();
     fs::copy(

@@ -3,11 +3,14 @@
 
 use std::path::{Path, PathBuf};
 
-use gleon_engine::config::{DiffConfig, Dimension, Mode, Zone};
+use gleon_engine::config::{DiffConfig, Dimension, Zone};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use crate::platform::{PlatformConfig, PlatformError};
+use crate::{
+    platform::{PlatformConfig, PlatformError},
+    tolerance::{TextTolerance, Tolerance},
+};
 
 /// Errors that can occur during configuration loading or manifest operations.
 #[derive(Debug, Error)]
@@ -216,11 +219,14 @@ impl Serialize for GlobPattern {
 #[serde(deny_unknown_fields)]
 #[schemars(title = "gleon workspace configuration (.gleon/gleon.yaml)")]
 pub struct GleonConfig {
-    /// The required version range of the CLI to run this configuration.
+    /// The version range of the CLI this configuration needs; `gleon init` writes the CLI's
+    /// version as the floor.
     ///
-    /// Enforced by the CLI only; other readers (the Flutter package) just check its syntax.
-    #[schemars(with = "String")]
-    pub required_version: semver::VersionReq,
+    /// Optional: a workspace of an integration alone (the Flutter package) needs none, and only
+    /// the CLI enforces it; other readers just check its syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>")]
+    pub required_version: Option<semver::VersionReq>,
     /// The platform the CLI runs as (e.g. `macos-aarch64`, or `{renderer: impeller}` over the
     /// detected OS and architecture); its flags and `GLEON_PLATFORM` override it.
     ///
@@ -228,23 +234,27 @@ pub struct GleonConfig {
     /// architecture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformConfig>,
-    /// Optional fallback platform identifier used when current platform baselines are missing.
+    /// The canonical platform: the CLI falls back to its baselines when the current platform has
+    /// none.
     ///
-    /// For integrations that commit goldens as image files (the Flutter package) it is the
-    /// canonical platform; only its OS and architecture count, under the names a process
-    /// reports (`macos-aarch64`, not `macos-arm64`: others are an error for integrations). Every
-    /// golden names the platform it was recorded on in its PNG (see `gleon_model::origin`), and
-    /// its text is compared there by default (see `text_tolerance`); a golden without that stamp
-    /// counts as recorded on the `fallback_platform`. Update mode on the `fallback_platform`
-    /// records again what other platforms recorded, a golden recorded elsewhere draws a warning
-    /// there, and `GLEON_REQUIRE_CANONICAL` makes it compare such goldens as its own. `platform`
-    /// and the `GLEON_*PLATFORM` variables are read by the CLI only.
+    /// For integrations that commit goldens as image files (the Flutter package), only its OS and
+    /// architecture count, under the names a process reports (`macos-aarch64`, `linux-x86_64`;
+    /// `arm64`, `x64`, `amd64` and `darwin` are read as them; other names are an error). A
+    /// golden of the workspace without a platform stamp counts as recorded there (unless the
+    /// workspace excludes it). Update mode on it records again what other platforms recorded;
+    /// on another platform it keeps a golden recorded elsewhere while only its text differs
+    /// (without a `fallback_platform` it writes such a golden over). On it a golden recorded
+    /// elsewhere draws a warning, and `GLEON_REQUIRE_CANONICAL=1` compares it as its own.
+    /// `platform` and the `GLEON_*PLATFORM` variables are read by the CLI only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_platform: Option<PlatformConfig>,
-    /// List of screenshot match rules.
+    /// The screenshot rules: the first whose `include` matches a `.png` applies. May be left
+    /// out or empty (a workspace naming only its `fallback_platform`): no golden is matched then,
+    /// so integrations compare exactly and record nothing, and the CLI finds no screenshots.
+    #[serde(default)]
     pub screenshots: Vec<ScreenshotRule>,
     /// Globs of paths to exclude from testing.
-    #[serde(default, with = "item_or_vec")]
+    #[serde(default, with = "item_or_vec", skip_serializing_if = "Vec::is_empty")]
     #[schemars(with = "item_or_vec::OneOrMany<GlobPattern>")]
     pub exclude: Vec<GlobPattern>,
     /// Per-golden comparison metrics recorded by integrations such as the Flutter package.
@@ -541,30 +551,296 @@ pub mod item_or_vec {
     }
 }
 
+/// The comparison of a screenshot rule: `exact`, `pixel` or `ssim`.
+///
+/// Required: a rule without a mode would silently compare under `pixel`'s default of 1%
+/// differing pixels, while a rule added for its masks alone means exact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleMode {
+    /// Every pixel must be identical; `diff` keys are an error (nothing is tolerated).
+    Exact,
+    /// Up to `diff.threshold` of the pixels may differ (1% by default), and the pixel options
+    /// (`channel_tolerance`, `anti_alias`, `edge_threshold`) let some differing pixels pass.
+    Pixel,
+    /// The engine's SSIM policy: `diff.min_similarity` and `diff.color_tolerance`.
+    Ssim,
+}
+
 /// A rule specifying how to match and process screenshots.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+///
+/// The files it applies to and how they compare, read from the `mode` and `diff` keys of the rule
+/// in `gleon.yaml` (written back with the `diff` keys of its mode alone).
+#[derive(Debug, Clone, Deserialize, PartialEq, schemars::JsonSchema)]
+#[serde(try_from = "RuleFile")]
 pub struct ScreenshotRule {
+    /// Glob patterns representing the files to include.
+    pub include: Vec<GlobPattern>,
+    /// How the files compare: the rule's `mode` with the `diff` keys of that mode.
+    pub tolerance: Tolerance,
+    /// Optional zones to mask out (ignore) during verification.
+    pub masks: Vec<MaskRule>,
+    /// How much text may differ, in any mode: the largest share of differing pixels in any tile
+    /// of the text an integration reports, `[0, 1]`; `None` for the default of the golden
+    /// ([`TextTolerance::resolve`]).
+    pub text_tolerance: Option<TextTolerance>,
+}
+
+/// A rule specifying how to match and process screenshots.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RuleFile {
     /// Glob patterns representing the files to include.
     #[serde(with = "item_or_vec")]
     #[schemars(with = "item_or_vec::OneOrMany<GlobPattern>")]
-    pub include: Vec<GlobPattern>,
-    /// Diffing mode (pixel or ssim).
-    #[serde(default = "default_mode")]
-    pub mode: Mode,
-    /// Specific diffing configuration.
-    #[serde(default)]
-    pub diff: DiffConfig,
+    include: Vec<GlobPattern>,
+    /// The comparison: `exact`, `pixel` or `ssim` (required, see [`RuleMode`]).
+    // An `Option` for serde alone (a missing one is `None`): a rule without it gets an error
+    // that names the modes. Without `#[serde(default)]` the schema requires it.
+    #[schemars(with = "RuleMode")]
+    mode: Option<RuleMode>,
+    /// The thresholds of the mode: each key belongs to one mode, and a key of another mode is an
+    /// error, even at its default (it would be silently ignored).
+    // `skip_serializing_if` (never serialized) keeps a `default` out of the schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "DiffConfig")]
+    diff: Option<DiffFile>,
     /// Optional zones to mask out (ignore) during verification.
-    #[serde(default)]
-    pub masks: Vec<MaskRule>,
-    /// How much text may differ, in `pixel` and `ssim` mode: the largest share of differing pixels in any
-    /// tile of the text an integration reports, `[0, 1]`. Unset, it depends on the golden
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    masks: Vec<MaskRule>,
+    /// How much text may differ, in any mode: the largest share of differing pixels in any tile
+    /// of the text an integration reports, `[0, 1]`. Unset, it depends on the golden
     /// ([`crate::tolerance::TextTolerance::resolve`]): 0.05 on the platform the golden was
     /// recorded on (see `fallback_platform`), else 1, so text never fails. A value set here
     /// applies to every golden of the rule: 1 turns text comparison off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_tolerance: Option<crate::tolerance::TextTolerance>,
+    text_tolerance: Option<TextTolerance>,
+}
+
+/// A screenshot rule of `gleon.yaml` spelled wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RuleError {
+    /// No `mode`: there is no default, a rule added for its masks alone would otherwise tolerate
+    /// what `pixel` tolerates.
+    #[error(
+        "missing field `mode`: `exact` (every pixel identical), `pixel` (a share of the pixels may \
+         differ, 1% by default; what a rule without a mode meant in earlier versions) or `ssim`"
+    )]
+    MissingMode,
+    /// A `diff` key of another mode than the rule's (at any value: it would never apply).
+    #[error("diff.{key} applies to `mode: {owner}` only")]
+    ForeignKey {
+        /// The key.
+        key: &'static str,
+        /// The mode it belongs to.
+        owner: &'static str,
+    },
+    /// A `diff` key outside its range.
+    #[error("diff.{key} must be {range} (got {value})")]
+    OutOfRange {
+        /// The key.
+        key: &'static str,
+        /// Its range, in words.
+        range: &'static str,
+        /// The value written.
+        value: String,
+    },
+}
+
+/// The `diff` keys of a rule as written, each one there or not: a key of another mode is an
+/// error by being there, a key of the rule's mode left out is its default.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiffFile {
+    threshold: Option<f64>,
+    min_similarity: Option<f64>,
+    color_tolerance: Option<f64>,
+    channel_tolerance: Option<u8>,
+    anti_alias: Option<bool>,
+    edge_threshold: Option<u8>,
+}
+
+impl DiffFile {
+    /// The first key written that does not belong to `mode`, with the mode it belongs to;
+    /// `exact` owns none.
+    fn foreign_key(&self, mode: RuleMode) -> Option<(&'static str, &'static str)> {
+        let pixel = [
+            ("threshold", self.threshold.is_some()),
+            ("channel_tolerance", self.channel_tolerance.is_some()),
+            ("anti_alias", self.anti_alias.is_some()),
+            ("edge_threshold", self.edge_threshold.is_some()),
+        ];
+        let ssim = [
+            ("min_similarity", self.min_similarity.is_some()),
+            ("color_tolerance", self.color_tolerance.is_some()),
+        ];
+        let foreign = |keys: &[(&'static str, bool)], owner: &'static str| {
+            keys.iter()
+                .find(|&&(_, is_written)| is_written)
+                .map(|&(key, _)| (key, owner))
+        };
+        match mode {
+            RuleMode::Exact => foreign(&pixel, "pixel").or_else(|| foreign(&ssim, "ssim")),
+            RuleMode::Pixel => foreign(&ssim, "ssim"),
+            RuleMode::Ssim => foreign(&pixel, "pixel"),
+        }
+    }
+
+    /// The thresholds: each key written, checked against its range, else its default.
+    fn config(&self) -> Result<DiffConfig, RuleError> {
+        fn checked<T: Copy + ToString>(
+            key: &'static str,
+            range: &'static str,
+            value: Option<T>,
+            default: T,
+            is_valid: impl Fn(T) -> bool,
+        ) -> Result<T, RuleError> {
+            match value {
+                Some(value) if !is_valid(value) => Err(RuleError::OutOfRange {
+                    key,
+                    range,
+                    value: value.to_string(),
+                }),
+                value => Ok(value.unwrap_or(default)),
+            }
+        }
+
+        const RATIO: &str = "between 0.0 and 1.0";
+        const PIXEL_OPTION: &str = "between 0 and 254 (0 turns it off)";
+        let defaults = DiffConfig::default();
+        let ratio = |value: f64| (0.0..=1.0).contains(&value);
+        let pixel_option = |value: u8| value <= gleon_engine::config::MAX_PIXEL_OPTION;
+        Ok(DiffConfig {
+            threshold: checked(
+                "threshold",
+                RATIO,
+                self.threshold,
+                defaults.threshold,
+                ratio,
+            )?,
+            min_similarity: checked(
+                "min_similarity",
+                RATIO,
+                self.min_similarity,
+                defaults.min_similarity,
+                ratio,
+            )?,
+            color_tolerance: checked(
+                "color_tolerance",
+                "between 0 and 255 (8-bit channel units)",
+                self.color_tolerance,
+                defaults.color_tolerance,
+                gleon_engine::config::is_valid_color_tolerance,
+            )?,
+            channel_tolerance: checked(
+                "channel_tolerance",
+                PIXEL_OPTION,
+                self.channel_tolerance,
+                defaults.channel_tolerance,
+                pixel_option,
+            )?,
+            anti_alias: self.anti_alias.unwrap_or(defaults.anti_alias),
+            edge_threshold: checked(
+                "edge_threshold",
+                PIXEL_OPTION,
+                self.edge_threshold,
+                defaults.edge_threshold,
+                pixel_option,
+            )?,
+        })
+    }
+}
+
+impl TryFrom<RuleFile> for ScreenshotRule {
+    type Error = RuleError;
+
+    fn try_from(file: RuleFile) -> Result<Self, Self::Error> {
+        let mode = file.mode.ok_or(RuleError::MissingMode)?;
+        let diff = file.diff.unwrap_or_default();
+        if let Some((key, owner)) = diff.foreign_key(mode) {
+            return Err(RuleError::ForeignKey { key, owner });
+        }
+        Ok(Self {
+            include: file.include,
+            tolerance: Tolerance::from_rule(mode, &diff.config()?),
+            masks: file.masks,
+            text_tolerance: file.text_tolerance,
+        })
+    }
+}
+
+/// The `diff` keys a rule is written with: those of its mode, the threshold of `pixel` always
+/// (the share of pixels it tolerates is never implicit), its pixel options when set.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum DiffKeys {
+    Pixel {
+        threshold: f64,
+        #[serde(skip_serializing_if = "crate::serde_skip::is_default")]
+        channel_tolerance: u8,
+        #[serde(skip_serializing_if = "crate::serde_skip::is_default")]
+        anti_alias: bool,
+        #[serde(skip_serializing_if = "crate::serde_skip::is_default")]
+        edge_threshold: u8,
+    },
+    Ssim {
+        min_similarity: f64,
+        color_tolerance: f64,
+    },
+}
+
+impl Serialize for ScreenshotRule {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// [`RuleFile`] as written.
+        #[derive(Serialize)]
+        struct Written<'a> {
+            #[serde(serialize_with = "item_or_vec::serialize")]
+            include: &'a [GlobPattern],
+            mode: RuleMode,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            diff: Option<DiffKeys>,
+            #[serde(skip_serializing_if = "<[_]>::is_empty")]
+            masks: &'a [MaskRule],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            text_tolerance: Option<TextTolerance>,
+        }
+
+        let (mode, diff) = match self.tolerance {
+            Tolerance::Exact {} => (RuleMode::Exact, None),
+            Tolerance::Pixel {
+                max_diff_ratio,
+                channel_tolerance,
+                anti_alias,
+                edge_threshold,
+            } => (
+                RuleMode::Pixel,
+                Some(DiffKeys::Pixel {
+                    threshold: max_diff_ratio,
+                    channel_tolerance,
+                    anti_alias,
+                    edge_threshold,
+                }),
+            ),
+            Tolerance::Ssim {
+                min_similarity,
+                color_tolerance,
+            } => (
+                RuleMode::Ssim,
+                Some(DiffKeys::Ssim {
+                    min_similarity,
+                    color_tolerance,
+                }),
+            ),
+        };
+        Written {
+            include: &self.include,
+            mode,
+            diff,
+            masks: &self.masks,
+            text_tolerance: self.text_tolerance,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl ScreenshotRule {
@@ -590,10 +866,6 @@ pub struct MaskRule {
     pub path: GlobPattern,
     /// List of bounding zones to ignore.
     pub zones: Vec<Zone>,
-}
-
-const fn default_mode() -> Mode {
-    Mode::Pixel
 }
 
 impl GleonConfig {
@@ -722,40 +994,16 @@ impl GleonConfig {
                     source,
                 })?;
         }
-        if self.screenshots.is_empty() {
-            return Err(ConfigError::Validation(
-                "'screenshots' must contain at least one rule".to_string(),
-            ));
-        }
         for (i, rule) in self.screenshots.iter().enumerate() {
             if rule.include.is_empty() {
                 return Err(ConfigError::Validation(format!(
                     "screenshots[{i}].include must contain at least one glob pattern"
                 )));
             }
-            if !(0.0..=1.0).contains(&rule.diff.threshold) {
-                return Err(ConfigError::Validation(format!(
-                    "screenshots[{i}].diff.threshold must be between 0.0 and 1.0 (got {})",
-                    rule.diff.threshold
-                )));
-            }
-            if !(0.0..=1.0).contains(&rule.diff.min_similarity) {
-                return Err(ConfigError::Validation(format!(
-                    "screenshots[{i}].diff.min_similarity must be between 0.0 and 1.0 (got {})",
-                    rule.diff.min_similarity
-                )));
-            }
-            if !gleon_engine::config::is_valid_color_tolerance(rule.diff.color_tolerance) {
-                return Err(ConfigError::Validation(format!(
-                    "screenshots[{i}].diff.color_tolerance must be between 0 and 255 (got {})",
-                    rule.diff.color_tolerance
-                )));
-            }
-            if let Some((key, owner)) = foreign_diff_key(rule.mode, &rule.diff) {
-                return Err(ConfigError::Validation(format!(
-                    "screenshots[{i}].diff.{key} applies to `mode: {owner}` only"
-                )));
-            }
+            // A rule read from YAML is checked when parsed; one built in code is checked here.
+            rule.tolerance
+                .validate()
+                .map_err(|e| ConfigError::Validation(format!("screenshots[{i}].diff: {e}")))?;
             if let Some(text) = &rule.text_tolerance {
                 text.validate().map_err(|e| {
                     ConfigError::Validation(format!("screenshots[{i}].text_tolerance: {e}"))
@@ -802,10 +1050,8 @@ static DEFAULT_VERSION: LazyLock<semver::VersionReq> = LazyLock::new(|| {
 
 impl Default for GleonConfig {
     fn default() -> Self {
-        let required_version = DEFAULT_VERSION.clone();
-
         Self {
-            required_version,
+            required_version: Some(DEFAULT_VERSION.clone()),
             platform: None,
             fallback_platform: None,
             metrics: MetricsConfig::default(),
@@ -818,8 +1064,7 @@ impl Default for GleonConfig {
                 include: vec![
                     GlobPattern::new("**/*.png").expect("Default glob pattern must be valid"),
                 ],
-                mode: Mode::Pixel,
-                diff: DiffConfig::default(),
+                tolerance: Tolerance::from_rule(RuleMode::Pixel, &DiffConfig::default()),
                 masks: vec![],
                 text_tolerance: None,
             }],
@@ -849,38 +1094,34 @@ impl Default for GleonConfig {
     }
 }
 
-/// The first key of `diff` that belongs to the other mode than `mode` and is off its default (it
-/// would be silently ignored), with the mode it belongs to.
-fn foreign_diff_key(mode: Mode, diff: &DiffConfig) -> Option<(&'static str, &'static str)> {
-    let defaults = DiffConfig::default();
-    let changed = |value: f64, default: f64| value.total_cmp(&default).is_ne();
-    let (keys, owner): (&[(&'static str, bool)], _) = match mode {
-        Mode::Pixel => (
-            &[
-                (
-                    "min_similarity",
-                    changed(diff.min_similarity, defaults.min_similarity),
-                ),
-                (
-                    "color_tolerance",
-                    changed(diff.color_tolerance, defaults.color_tolerance),
-                ),
-            ],
-            "ssim",
-        ),
-        Mode::Ssim => (
-            &[
-                ("threshold", changed(diff.threshold, defaults.threshold)),
-                ("channel_tolerance", diff.channel_tolerance != 0),
-                ("anti_alias", diff.anti_alias),
-                ("edge_threshold", diff.edge_threshold != 0),
-            ],
-            "pixel",
-        ),
-    };
-    keys.iter()
-        .find(|&&(_, is_set)| is_set)
-        .map(|&(key, _)| (key, owner))
+impl GleonConfig {
+    /// The config `gleon init` writes for a Flutter package or app (a `pubspec.yaml` in the
+    /// workspace root): the goldens under every `test/` (the root's, the packages' of a pub
+    /// workspace, `example/`'s) compared exactly, their text on `canonical` (the platform they
+    /// are recorded on, normally the host running `gleon init`), the images Flutter and gleon
+    /// write for failures (`failures/`) excluded; the version floor of [`Self::default`].
+    ///
+    /// # Panics
+    /// Never: the hard-coded patterns are valid.
+    #[must_use]
+    pub fn for_flutter(canonical: PlatformConfig) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "hard-coded patterns are statically valid and covered by tests"
+        )]
+        let glob = |pattern| GlobPattern::new(pattern).expect("the Flutter globs must be valid");
+        Self {
+            fallback_platform: Some(canonical),
+            screenshots: vec![ScreenshotRule {
+                include: vec![glob("**/test/**/*.png")],
+                tolerance: Tolerance::Exact {},
+                masks: vec![],
+                text_tolerance: None,
+            }],
+            exclude: vec![glob("**/failures/**")],
+            ..Self::default()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -900,6 +1141,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::tolerance::Tolerance;
 
     #[test]
     fn test_default_yaml_snapshot() {
@@ -921,7 +1163,7 @@ mod tests {
 
         assert_eq!(
             config.required_version,
-            VersionReq::parse(">=0.1.0").unwrap()
+            Some(VersionReq::parse(">=0.1.0").unwrap())
         );
         assert_eq!(
             config.platform,
@@ -932,9 +1174,13 @@ mod tests {
 
         let rule = &config.screenshots[0];
         assert_eq!(rule.include[0].as_str(), "src/login.png");
-        assert_eq!(rule.mode, Mode::Ssim);
-        assert_eq!(rule.diff.min_similarity, 0.98);
-        assert_eq!(rule.diff.color_tolerance, 12.0);
+        assert_eq!(
+            rule.tolerance,
+            Tolerance::Ssim {
+                min_similarity: 0.98,
+                color_tolerance: 12.0,
+            }
+        );
         assert_eq!(rule.masks.len(), 1);
 
         let mask = &rule.masks[0];
@@ -1047,16 +1293,144 @@ screenshots:
         assert!(VersionReq::parse(DEFAULT_VERSION_REQ).is_ok());
     }
 
+    /// A workspace may name only its canonical platform: no rule, no version floor.
     #[test]
-    fn test_validation_empty_screenshots() {
-        let yaml = "required_version: \">=0.1.0\"\nscreenshots: []";
-        let config: GleonConfig = serde_yaml::from_str(yaml).unwrap();
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ConfigError::Validation(msg) if msg.contains("screenshots")
-        ));
+    fn test_minimal_config_has_no_rules_and_no_version() {
+        let config = GleonConfig::from_yaml_str("fallback_platform: macos-aarch64\n").unwrap();
+        assert_eq!(config.required_version, None);
+        assert!(config.screenshots.is_empty());
+        assert_eq!(
+            config.fallback_platform,
+            Some(PlatformConfig::Opaque("macos-aarch64".to_owned()))
+        );
+        assert!(
+            GleonConfig::from_yaml_str("required_version: \">=0.1.0\"\nscreenshots: []").is_ok()
+        );
+        assert!(GleonConfig::from_yaml_str("{}").is_ok());
+        // Serialized, an absent version stays absent.
+        assert!(
+            !serde_yaml::to_string(&config)
+                .unwrap()
+                .contains("required_version")
+        );
+    }
+
+    /// A rule names its mode: a default would silently tolerate 1% of the pixels.
+    #[test]
+    fn test_rule_without_mode_is_an_error() {
+        let yaml = "screenshots:\n  - include: 'a/*.png'\n";
+        let err = GleonConfig::from_yaml_str(yaml).unwrap_err();
+        assert!(matches!(err, ConfigError::YamlParse(_)), "{err:?}");
+        // The modes are named, and what a rule without one meant (an upgrade adds `mode: pixel`).
+        for needle in [
+            "missing field `mode`",
+            "`exact`",
+            "`ssim`",
+            "in earlier versions",
+            "line 2",
+        ] {
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
+        for (mode, expected) in [
+            ("exact", Tolerance::Exact {}),
+            ("pixel", Tolerance::pixel(0.01)),
+            (
+                "ssim",
+                Tolerance::Ssim {
+                    min_similarity: 0.8,
+                    color_tolerance: 8.0,
+                },
+            ),
+        ] {
+            let yaml = format!("screenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n");
+            let config = GleonConfig::from_yaml_str(&yaml).unwrap();
+            assert_eq!(config.screenshots[0].tolerance, expected, "{mode}");
+            // Written back with the keys of its mode alone.
+            let written = serde_yaml::to_string(&config).unwrap();
+            assert!(written.contains(&format!("mode: {mode}\n")), "{written}");
+            assert_eq!(
+                written.contains("threshold: 0.01"),
+                mode == "pixel",
+                "{written}"
+            );
+            assert_eq!(
+                written.contains("min_similarity: 0.8"),
+                mode == "ssim",
+                "{written}"
+            );
+            assert_eq!(written.contains("diff"), mode != "exact", "{written}");
+            assert!(!written.contains("anti_alias"), "{written}");
+            assert_eq!(GleonConfig::from_yaml_str(&written).unwrap(), config);
+        }
+    }
+
+    /// `exact` tolerates nothing, so every `diff` key is foreign to it.
+    #[test]
+    fn test_exact_rule_refuses_diff_keys() {
+        for (diff, key, owner) in [
+            ("{ threshold: 0.5 }", "threshold", "pixel"),
+            ("{ anti_alias: true }", "anti_alias", "pixel"),
+            ("{ channel_tolerance: 2 }", "channel_tolerance", "pixel"),
+            ("{ edge_threshold: 64 }", "edge_threshold", "pixel"),
+            ("{ min_similarity: 0.9 }", "min_similarity", "ssim"),
+            ("{ color_tolerance: 9 }", "color_tolerance", "ssim"),
+        ] {
+            let yaml = format!(
+                "screenshots:\n  - include: 'a/*.png'\n    mode: exact\n    diff: {diff}\n"
+            );
+            let err = GleonConfig::from_yaml_str(&yaml).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!(
+                    "diff.{key} applies to `mode: {owner}` only at line 2"
+                )),
+                "{err}"
+            );
+        }
+        // A key is an error by being there, even at its default: `threshold: 0.01` under `exact`
+        // reads like a tolerance that would never apply. An empty `diff` sets nothing.
+        let yaml = "screenshots:\n  - include: 'a/*.png'\n    mode: exact\n    diff: { threshold: 0.01 }\n";
+        let err = GleonConfig::from_yaml_str(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("diff.threshold applies to `mode: pixel` only"),
+            "{err}"
+        );
+        let yaml = "screenshots:\n  - include: 'a/*.png'\n    mode: exact\n    diff: {}\n";
+        assert!(GleonConfig::from_yaml_str(yaml).is_ok());
+    }
+
+    /// The template of a Flutter workspace: exact goldens under every `test/` (a package of a pub
+    /// workspace too), text on the canonical platform, the images of failures left out.
+    #[test]
+    fn test_flutter_template() {
+        let config = GleonConfig::for_flutter(PlatformConfig::Opaque("macos-aarch64".to_owned()));
+        assert!(config.validate().is_ok());
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("fallback_platform: macos-aarch64"), "{yaml}");
+        assert!(yaml.contains("include: '**/test/**/*.png'"), "{yaml}");
+        assert!(yaml.contains("mode: exact"), "{yaml}");
+        assert!(yaml.contains("exclude: '**/failures/**'"), "{yaml}");
+        assert!(!yaml.contains("masks"), "{yaml}");
+        let rules = crate::rules::RuleSet::new(&config);
+        for (path, matched) in [
+            ("test/goldens/a.png", true),
+            ("packages/app/test/goldens/a.png", true),
+            ("example/test/a.png", true),
+            ("test/failures/a_masterImage.png", false),
+            ("packages/app/test/failures/a_isolatedDiff.png", false),
+            ("lib/assets/logo.png", false),
+        ] {
+            assert_eq!(
+                matches!(
+                    rules.resolve(path).unwrap(),
+                    crate::rules::RuleMatch::Matched { .. }
+                ),
+                matched,
+                "{path}"
+            );
+        }
+        let parsed = GleonConfig::from_yaml_str(&yaml).unwrap();
+        assert_eq!(parsed, config);
+        assert_eq!(parsed.screenshots[0].tolerance, Tolerance::Exact {});
     }
 
     #[test]
@@ -1065,6 +1439,7 @@ screenshots:
 required_version: \">=0.1.0\"
 screenshots:
   - include: []
+    mode: exact
 ";
         let config: GleonConfig = serde_yaml::from_str(yaml).unwrap();
         let result = config.validate();
@@ -1078,13 +1453,23 @@ screenshots:
     #[test]
     fn test_validation_invalid_threshold() {
         let mut config = GleonConfig::default();
-        config.screenshots[0].diff.threshold = 1.5;
+        config.screenshots[0].tolerance = Tolerance::pixel(1.5);
         let result = config.validate();
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ConfigError::Validation(msg) if msg.contains("threshold must be between 0.0 and 1.0")
+            ConfigError::Validation(msg) if msg.contains("screenshots[0].diff: `max_diff_ratio` must be between 0.0 and 1.0")
         ));
+        // Read from YAML, the key is checked when parsed, by its name.
+        let err = GleonConfig::from_yaml_str(
+            "screenshots:\n  - include: a.png\n    mode: pixel\n    diff: { threshold: 1.5 }\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("diff.threshold must be between 0.0 and 1.0 (got 1.5) at line 2"),
+            "{err}"
+        );
     }
 
     /// Pixel options set on an SSIM rule would silently do nothing: a config error naming them.
@@ -1115,9 +1500,8 @@ screenshots:
         ] {
             let err = GleonConfig::from_yaml_str(&yaml(other, diff)).unwrap_err();
             assert!(
-                err.to_string().contains(&format!(
-                    "screenshots[0].diff.{key} applies to `mode: {owner}` only"
-                )),
+                err.to_string()
+                    .contains(&format!("diff.{key} applies to `mode: {owner}` only")),
                 "{err}"
             );
             assert!(
@@ -1125,11 +1509,29 @@ screenshots:
                 "{diff}"
             );
         }
-        // The defaults (`gleon init` writes them all) are fine in any mode.
+        // The keys of another mode are errors at their defaults too (the full `diff` blocks
+        // `gleon init` wrote before 0.4.0 keep the keys of their mode only); a rule's own keys
+        // at their defaults are fine.
         let defaults = "{ threshold: 0.01, min_similarity: 0.8, color_tolerance: 8.0, \
                         channel_tolerance: 0, anti_alias: false, edge_threshold: 0 }";
-        for mode in ["pixel", "ssim"] {
-            assert!(GleonConfig::from_yaml_str(&yaml(mode, defaults)).is_ok());
+        for (mode, foreign) in [("pixel", "min_similarity"), ("ssim", "threshold")] {
+            let err = GleonConfig::from_yaml_str(&yaml(mode, defaults))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("diff.{foreign} applies to")), "{err}");
+        }
+        let own = [
+            (
+                "pixel",
+                "{ threshold: 0.01, channel_tolerance: 0, anti_alias: false, edge_threshold: 0 }",
+            ),
+            ("ssim", "{ min_similarity: 0.8, color_tolerance: 8.0 }"),
+        ];
+        for (mode, diff) in own {
+            assert!(
+                GleonConfig::from_yaml_str(&yaml(mode, diff)).is_ok(),
+                "{mode}"
+            );
         }
     }
 
@@ -1145,7 +1547,7 @@ screenshots:
             let config = GleonConfig::from_yaml_str(&yaml(mode, "0.1")).unwrap();
             assert_eq!(
                 config.screenshots[0].text_tolerance,
-                Some(crate::tolerance::TextTolerance(0.1))
+                Some(TextTolerance(0.1))
             );
         }
         let err = GleonConfig::from_yaml_str(&yaml("pixel", "2")).unwrap_err();
@@ -1161,10 +1563,13 @@ screenshots:
     fn test_validation_invalid_color_tolerance() {
         for bad in [f64::NAN, -1.0, 255.5, f64::INFINITY] {
             let mut config = GleonConfig::default();
-            config.screenshots[0].diff.color_tolerance = bad;
+            config.screenshots[0].tolerance = Tolerance::Ssim {
+                min_similarity: 0.8,
+                color_tolerance: bad,
+            };
             assert!(matches!(
                 config.validate(),
-                Err(ConfigError::Validation(msg)) if msg.contains("color_tolerance must be between 0 and 255")
+                Err(ConfigError::Validation(msg)) if msg.contains("color_tolerance` must be between 0 and 255")
             ));
         }
     }
@@ -1172,12 +1577,15 @@ screenshots:
     #[test]
     fn test_validation_invalid_min_similarity() {
         let mut config = GleonConfig::default();
-        config.screenshots[0].diff.min_similarity = -0.1;
+        config.screenshots[0].tolerance = Tolerance::Ssim {
+            min_similarity: -0.1,
+            color_tolerance: 8.0,
+        };
         let result = config.validate();
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ConfigError::Validation(msg) if msg.contains("min_similarity must be between 0.0 and 1.0")
+            ConfigError::Validation(msg) if msg.contains("`min_similarity` must be between 0.0 and 1.0")
         ));
     }
 
@@ -1252,7 +1660,7 @@ screenshots:
     fn test_invalid_globs_name_the_pattern_and_the_reason() {
         for (yaml, needles) in [
             (
-                "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'test/{a,b}/*.png'\n",
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'test/{a,b}/*.png'\n    mode: exact\n",
                 [
                     "screenshots[0].include",
                     "\"test/{a,b}/*.png\"",
@@ -1261,7 +1669,7 @@ screenshots:
                 ],
             ),
             (
-                "required_version: '>=0.1.0'\nscreenshots:\n  - include: ['a/*.png', 'b/[^c].png']\n",
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: ['a/*.png', 'b/[^c].png']\n    mode: exact\n",
                 [
                     "screenshots[0].include",
                     "\"b/[^c].png\"",
@@ -1270,11 +1678,11 @@ screenshots:
                 ],
             ),
             (
-                "required_version: '>=0.1.0'\nscreenshots:\n  - include: '**/*.png'\nexclude: build/\n",
-                ["exclude", "\"build/\"", "cannot end with `/`", "line 4"],
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: '**/*.png'\n    mode: exact\nexclude: build/\n",
+                ["exclude", "\"build/\"", "cannot end with `/`", "line 5"],
             ),
             (
-                "required_version: '>=0.1.0'\nscreenshots:\n  - include: '../other/**/*.png'\n",
+                "required_version: '>=0.1.0'\nscreenshots:\n  - include: '../other/**/*.png'\n    mode: exact\n",
                 [
                     "screenshots[0].include",
                     "\"../other/**/*.png\"",
@@ -1411,6 +1819,7 @@ screenshots:
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: exact
 metrics:
   enabled: true
 ";
@@ -1441,6 +1850,7 @@ metrics:
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: exact
 artifacts: .gleon/runs/ram
 ";
         let config = GleonConfig::from_yaml_str(yaml).unwrap();
@@ -1585,7 +1995,7 @@ artifacts: .gleon/runs/ram
     fn test_structured_platforms_are_validated_on_load() {
         let config = |platforms: &str| {
             GleonConfig::from_yaml_str(&format!(
-                "required_version: '>=0.1.0'\n{platforms}\nscreenshots:\n  - include: a.png\n"
+                "required_version: '>=0.1.0'\n{platforms}\nscreenshots:\n  - include: a.png\n    mode: exact\n"
             ))
         };
         assert!(config("platform: {os: macos, arch: aarch64, labels: {theme: dark}}").is_ok());
@@ -1614,7 +2024,7 @@ artifacts: .gleon/runs/ram
     #[test]
     fn test_from_yaml_str_validates() {
         assert!(matches!(
-            GleonConfig::from_yaml_str("required_version: \">=0.1.0\"\nscreenshots: []"),
+            GleonConfig::from_yaml_str("screenshots:\n  - include: []\n    mode: exact\n"),
             Err(ConfigError::Validation(_))
         ));
         assert!(matches!(
@@ -1629,6 +2039,7 @@ artifacts: .gleon/runs/ram
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: pixel
 ";
         let config: GleonConfig = serde_yaml::from_str(minimal_yaml).unwrap();
         // Check structural defaults
@@ -1637,12 +2048,9 @@ screenshots:
         assert_eq!(config.screenshots.len(), 1);
 
         let rule = &config.screenshots[0];
-        assert_eq!(rule.mode, Mode::Pixel); // default mode
         assert_eq!(rule.masks, Vec::<MaskRule>::new()); // default empty masks
-
-        // Check nested DiffConfig defaults
-        assert_eq!(rule.diff.threshold, 0.01);
-        assert_eq!(rule.diff.min_similarity, 0.8);
+        // The defaults of the mode's `diff` keys.
+        assert_eq!(rule.tolerance, Tolerance::pixel(0.01));
     }
 
     #[test]
@@ -1689,7 +2097,11 @@ screenshots:
     fn test_load_config_validation_failure() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("invalid_config.yaml");
-        std::fs::write(&file_path, "required_version: \">=0.1.0\"\nscreenshots: []").unwrap();
+        std::fs::write(
+            &file_path,
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: []\n    mode: exact\n",
+        )
+        .unwrap();
 
         let err = GleonConfig::load_from_file(&file_path).unwrap_err();
         assert!(matches!(err, ConfigError::Validation(_)));

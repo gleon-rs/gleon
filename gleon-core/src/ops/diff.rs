@@ -184,7 +184,7 @@ impl DiffRun<'_> {
                 source,
             })?;
         let candidate_image = CandidateImage::of(&candidate);
-        let tolerance = Tolerance::from_rule(case.rule.mode, &case.rule.diff);
+        let tolerance = case.rule.tolerance;
         let masks = case.rule.matched_mask_zones(&case.image.relative_path);
         let manifest = self.index.get(&case.name);
         let judged = self.judge(manifest, &candidate, &candidate_image, &tolerance, &masks);

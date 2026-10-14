@@ -12,6 +12,8 @@ use gleon_engine::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::config::RuleMode;
+
 /// A [`Tolerance`] parameter outside its range.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum ToleranceError {
@@ -90,17 +92,19 @@ impl Tolerance {
         }
     }
 
-    /// The tolerance a `gleon.yaml` screenshot rule describes.
+    /// The tolerance a `gleon.yaml` screenshot rule describes: `exact` is [`Self::Exact`]
+    /// whatever `diff` says (the config refuses `diff` keys under it).
     #[must_use]
-    pub const fn from_rule(mode: Mode, diff: &DiffConfig) -> Self {
+    pub const fn from_rule(mode: RuleMode, diff: &DiffConfig) -> Self {
         match mode {
-            Mode::Pixel => Self::Pixel {
+            RuleMode::Exact => Self::Exact {},
+            RuleMode::Pixel => Self::Pixel {
                 max_diff_ratio: diff.threshold,
                 channel_tolerance: diff.channel_tolerance,
                 anti_alias: diff.anti_alias,
                 edge_threshold: diff.edge_threshold,
             },
-            Mode::Ssim => Self::Ssim {
+            RuleMode::Ssim => Self::Ssim {
                 min_similarity: diff.min_similarity,
                 color_tolerance: diff.color_tolerance,
             },
@@ -436,7 +440,7 @@ mod tests {
             anti_alias: true,
             edge_threshold: 64,
         };
-        let pixel = Tolerance::from_rule(Mode::Pixel, &diff);
+        let pixel = Tolerance::from_rule(RuleMode::Pixel, &diff);
         assert_eq!(
             pixel,
             Tolerance::Pixel {
@@ -478,7 +482,7 @@ mod tests {
             PixelOptions::STRICT
         );
 
-        let ssim = Tolerance::from_rule(Mode::Ssim, &diff);
+        let ssim = Tolerance::from_rule(RuleMode::Ssim, &diff);
         let (mode, config) = ssim.engine_config();
         assert_eq!(mode, Mode::Ssim);
         assert_eq!((config.min_similarity, config.color_tolerance), (0.7, 12.0));
@@ -496,11 +500,11 @@ mod tests {
             ..DiffConfig::default()
         };
         assert!(matches!(
-            Tolerance::from_rule(Mode::Pixel, &zeros),
+            Tolerance::from_rule(RuleMode::Pixel, &zeros),
             Tolerance::Pixel { max_diff_ratio, .. } if max_diff_ratio.is_sign_positive()
         ));
         assert_eq!(
-            serde_json::to_string(&Tolerance::from_rule(Mode::Ssim, &zeros)).unwrap(),
+            serde_json::to_string(&Tolerance::from_rule(RuleMode::Ssim, &zeros)).unwrap(),
             r#"{"kind":"ssim","min_similarity":0.0,"color_tolerance":0.0}"#
         );
         assert_eq!(

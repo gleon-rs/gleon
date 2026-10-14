@@ -1,4 +1,9 @@
 words = [
+    "amd64",
+    "armv9",
+    "beos",
+    "osx",
+    "pubspec",
     "graya",
     "PIL",
     "trns",

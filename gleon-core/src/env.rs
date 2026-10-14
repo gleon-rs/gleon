@@ -48,19 +48,30 @@ pub fn get_trimmed_var(env: &dyn EnvProvider, key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn find_gleon_dir(base_dir: &Path) -> PathBuf {
-    crate::paths::find_workspace_root(base_dir, |p| p.gleon_dir().is_dir())
+/// The home directory of the user ([`gleon_model::workspace::HOME_VAR`] of `env`), resolved like
+/// the paths the CLI walks; never the root of a workspace.
+#[must_use]
+pub fn home(env: &dyn EnvProvider) -> Option<PathBuf> {
+    env.get_var(gleon_model::workspace::HOME_VAR)
+        .and_then(|named| gleon_model::workspace::home(named.as_ref()))
+}
+
+/// The `.gleon/` directory of the workspace of `base_dir` ([`crate::paths::find_workspace_root`]
+/// with [`crate::paths::has_gleon_dir`]), else of `base_dir` itself.
+fn find_gleon_dir(base_dir: &Path, home: Option<&Path>) -> PathBuf {
+    crate::paths::find_workspace_root(base_dir, home, crate::paths::has_gleon_dir)
         .unwrap_or_else(|| crate::paths::GleonPaths::new(base_dir))
         .gleon_dir()
 }
 
-/// Parses `.gleon/.env` and `.gleon/.env.local` into a key-value map.
+/// Parses `.gleon/.env` and `.gleon/.env.local` of the workspace of `base_dir` into a key-value
+/// map; `home` (see [`home`]) is never a workspace, so its `.gleon/.env` applies nowhere else.
 ///
 /// Precedence order: `.env.local` keys override `.env` keys.
 /// Does NOT mutate the process-global environment.
 #[must_use]
-pub fn load_dotenv(base_dir: &Path) -> HashMap<String, String> {
-    let gleon_dir = find_gleon_dir(base_dir);
+pub fn load_dotenv(base_dir: &Path, home: Option<&Path>) -> HashMap<String, String> {
+    let gleon_dir = find_gleon_dir(base_dir, home);
     let mut map = HashMap::new();
     merge_env_file(&mut map, &gleon_dir.join(".env"));
     merge_env_file(&mut map, &gleon_dir.join(".env.local"));
@@ -139,7 +150,7 @@ mod tests {
     #[test]
     fn test_load_dotenv_missing_dir() {
         let temp = tempdir().unwrap();
-        assert!(load_dotenv(temp.path()).is_empty());
+        assert!(load_dotenv(temp.path(), None).is_empty());
     }
 
     #[test]
@@ -160,7 +171,7 @@ mod tests {
         )
         .unwrap();
 
-        let env_map = load_dotenv(temp.path());
+        let env_map = load_dotenv(temp.path(), None);
         assert_eq!(env_map.get("TEST_VAR_ENV").map(String::as_str), Some("1"));
         assert_eq!(env_map.get("TEST_VAR_LOCAL").map(String::as_str), Some("1"));
         assert_eq!(
@@ -180,7 +191,7 @@ mod tests {
         )
         .unwrap();
 
-        let env_map = load_dotenv(temp.path());
+        let env_map = load_dotenv(temp.path(), None);
         assert_eq!(env_map.get("VALID_MIXED").map(String::as_str), Some("1"));
         assert_eq!(env_map.get("VALID_LOCAL").map(String::as_str), Some("1"));
     }

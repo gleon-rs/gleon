@@ -17,7 +17,7 @@ use gleon_core::{
     config::{GleonConfig, GlobPattern, ScreenshotRule},
     scanner::{FileScanner, TestCase},
 };
-use gleon_engine::config::{DiffConfig, Mode};
+use gleon_model::tolerance::Tolerance;
 
 #[test]
 fn test_scanner_with_real_fixture() {
@@ -35,8 +35,7 @@ fn test_scanner_with_real_fixture() {
     let exclude = vec![GlobPattern::new("**/report_output/**").unwrap()];
     let rule = Arc::new(ScreenshotRule {
         include: include.clone(),
-        mode: Mode::Pixel,
-        diff: DiffConfig::default(),
+        tolerance: Tolerance::pixel(0.01),
         masks: vec![],
         text_tolerance: None,
     });

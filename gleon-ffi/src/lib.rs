@@ -423,6 +423,9 @@ fn session_options(flags: u32, strings: &[u8], lengths: &[u32]) -> Result<Sessio
     };
     Ok(SessionOptions {
         finds_workspaces: flags & SESSION_FIND_WORKSPACE != 0,
+        // Never a workspace root (see `gleon_model::workspace`), whatever the environment flag
+        // says: a test sandbox lies elsewhere.
+        home: home_dir(),
         metrics_env: env(METRICS_ENV, metrics_env),
         artifacts_env: env(ARTIFACTS_ENV, artifacts_env),
         run_id_env: env(RUN_ID_ENV, run_id_env),
@@ -434,6 +437,13 @@ fn session_options(flags: u32, strings: &[u8], lengths: &[u32]) -> Result<Sessio
             artifacts,
         },
     })
+}
+
+/// The home directory of the user, from `HOME` (`USERPROFILE` on Windows) alone: the variable
+/// the test runner forwards, without the `getpwuid_r` fallback of `std::env::home_dir`
+/// (unavailable under Miri). `None` when unset.
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os(gleon_model::workspace::HOME_VAR).map(std::path::PathBuf::from)
 }
 
 /// Releases a session. Passing null is a no-op.
@@ -1358,7 +1368,7 @@ mod tests {
         const COUNTER_3: &[u8] = include_bytes!("../tests/fixtures/counter_three_taps.png");
         let dir = tempfile::tempdir().unwrap();
         // Without the `\\?\` prefix of Windows, like the session's own paths.
-        let root = session::canonical(dir.path()).unwrap();
+        let root = gleon_model::fs::canonical(dir.path()).unwrap();
         std::fs::create_dir_all(root.join(".gleon")).unwrap();
         std::fs::write(
             root.join(".gleon/gleon.yaml"),

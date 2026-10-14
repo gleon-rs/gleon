@@ -130,9 +130,8 @@ impl PlatformResolver {
         if let Some(opaque_val) = overrides.platform {
             Self::check_opaque_conflict(overrides, env, env_fields.as_ref())?;
 
-            let validated_opaque = validate_segment(opaque_val)?.into_owned();
             return Ok(PlatformInfo {
-                os: validated_opaque,
+                os: canonical_opaque_segment(opaque_val)?,
                 arch: None,
                 renderer: None,
                 labels: BTreeMap::new(),
@@ -152,9 +151,8 @@ impl PlatformResolver {
         if let Some(PlatformConfig::Opaque(opaque_val)) = active_config {
             Self::check_opaque_conflict(overrides, env, env_fields.as_ref())?;
 
-            let validated_opaque = validate_segment(opaque_val)?.into_owned();
             return Ok(PlatformInfo {
-                os: validated_opaque,
+                os: canonical_opaque_segment(opaque_val)?,
                 arch: None,
                 renderer: None,
                 labels: BTreeMap::new(),
@@ -255,13 +253,23 @@ impl PlatformResolver {
             }
         }
 
+        // Flags and config values are read under their canonical names, like parsed ones
+        // (`--os darwin --arch arm64` is `macos-aarch64`).
         Ok(PlatformInfo {
-            os: resolved_os,
-            arch: resolved_arch,
+            os: gleon_model::platform::canonical_os(&resolved_os).into_owned(),
+            arch: resolved_arch
+                .map(|arch| gleon_model::platform::canonical_arch(&arch).into_owned()),
             renderer: resolved_renderer,
             labels: resolved_labels,
         })
     }
+}
+
+/// An opaque platform value validated ([`validate_segment`]) under its canonical names
+/// ([`gleon_model::platform::canonical_opaque`]): `--platform macos-arm64` is `macos-aarch64`, like
+/// `GLEON_PLATFORM` and the config read it.
+fn canonical_opaque_segment(value: &str) -> Result<String, PlatformError> {
+    Ok(gleon_model::platform::canonical_opaque(&validate_segment(value)?).into_owned())
 }
 
 #[cfg(test)]

@@ -95,34 +95,38 @@ impl GleonPaths {
     pub fn gitignore(&self) -> PathBuf {
         self.gleon_dir().join(".gitignore")
     }
-
-    /// Moves `base_dir` to its parent in place, mirroring [`PathBuf::pop`].
-    ///
-    /// Returns `false` (and leaves `base_dir` unchanged) once there is no parent left, exactly
-    /// like `PathBuf::pop`. Lets [`find_workspace_root`] walk up the tree by mutating a single
-    /// `GleonPaths` instead of allocating a new `PathBuf` on every ancestor.
-    pub fn pop(&mut self) -> bool {
-        self.base_dir.pop()
-    }
 }
 
-/// Walks up from `start_dir` (inclusive) through parent directories, returning the first
-/// [`GleonPaths`] for which `marker` returns `true`, or `None` if no ancestor matches.
+/// Whether `dir` has a `.gleon/` directory: the root of a workspace whose config may be named
+/// explicitly (`--config`), or live elsewhere.
+#[must_use]
+pub fn has_gleon_dir(dir: &Path) -> bool {
+    dir.join(".gleon").is_dir()
+}
+
+/// The workspace of `start_dir`: the nearest directory above it (inclusive) that `marker` accepts.
+///
+/// The walk is the one of every integration ([`gleon_model::workspace::find_root`]): within the
+/// repository of `start_dir`, and never the home directory `home` or one of its parents unless
+/// that is a repository root. `marker` is [`gleon_model::workspace::has_config`] to discover a
+/// workspace by its config, or [`has_gleon_dir`]. The root is returned resolved
+/// ([`gleon_model::fs::canonical`]).
 pub fn find_workspace_root(
     start_dir: &Path,
-    marker: impl Fn(&GleonPaths) -> bool,
+    home: Option<&Path>,
+    marker: impl Fn(&Path) -> bool,
 ) -> Option<GleonPaths> {
-    // Walk up in place: a single `GleonPaths` is mutated via `pop`, so only one `PathBuf`
-    // ever exists for the whole walk (no per-ancestor allocation).
-    let mut candidate = GleonPaths::new(start_dir);
-    loop {
-        if marker(&candidate) {
-            return Some(candidate);
-        }
-        if !candidate.pop() {
-            return None;
-        }
-    }
+    // Walked resolved, like integrations walk their goldens, so `home` (resolved too) is
+    // recognized behind a symbolic link, a junction or a `subst` drive; the root found is
+    // resolved as well.
+    gleon_model::workspace::find_root(&resolved(start_dir), home, marker).map(GleonPaths::new)
+}
+
+/// `dir` with symbolic links resolved ([`gleon_model::fs::canonical`]), as the roots of
+/// [`find_workspace_root`] are; as it is when it cannot be resolved (it may not exist).
+#[must_use]
+pub fn resolved(dir: &Path) -> PathBuf {
+    gleon_model::fs::canonical(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
 #[cfg(all(test, not(miri)))]
@@ -176,13 +180,20 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(root.join(".gleon")).unwrap();
 
-        let found = find_workspace_root(&nested, |p| p.gleon_dir().is_dir()).unwrap();
-        assert_eq!(found.base_dir(), root);
+        let found = find_workspace_root(&nested, None, has_gleon_dir).unwrap();
+        // Resolved, like the walks of integrations.
+        let resolved = gleon_model::fs::canonical(root).unwrap();
+        assert_eq!(found.base_dir(), resolved);
+        // The home directory is never a workspace root.
+        assert_eq!(
+            find_workspace_root(&nested, Some(&resolved), has_gleon_dir),
+            None
+        );
     }
 
     #[test]
     fn test_find_workspace_root_returns_none_when_marker_never_matches() {
         let temp = tempdir().unwrap();
-        assert!(find_workspace_root(temp.path(), |_| false).is_none());
+        assert!(find_workspace_root(temp.path(), None, |_| false).is_none());
     }
 }

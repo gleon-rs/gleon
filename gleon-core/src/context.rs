@@ -19,14 +19,18 @@ pub enum ContextError {
     Git(#[from] crate::git::GitError),
 }
 
-/// Traverses parent directories starting from `start_dir` to find `.gleon/gleon.yaml`.
+/// Traverses parent directories starting from `start_dir` to find `.gleon/gleon.yaml`, within the
+/// repository of `start_dir` and never in the home directory `home` or above
+/// ([`crate::paths::find_workspace_root`]).
 ///
 /// Returns `Some((config_path, root_dir))` if found, or `None` if not found.
 #[must_use]
 pub fn find_config_and_root(
     start_dir: &std::path::Path,
+    home: Option<&std::path::Path>,
 ) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    let paths = crate::paths::find_workspace_root(start_dir, |p| p.config_file().is_file())?;
+    let paths =
+        crate::paths::find_workspace_root(start_dir, home, gleon_model::workspace::has_config)?;
     Some((paths.config_file(), paths.base_dir().to_path_buf()))
 }
 
@@ -136,10 +140,12 @@ impl ResolvedContext {
             })
             .transpose()?;
 
+        let home = crate::env::home(env_provider);
         let (config, resolved_base_dir) = load_config(
             options.config_path.as_deref(),
             base_dir,
             cli_version.as_ref(),
+            home.as_deref(),
         )?;
 
         let overrides = PlatformOverrides {
@@ -217,11 +223,13 @@ impl ResolvedContext {
 
 /// The config of the workspace and its root: the explicit `config_path` (relative to
 /// `base_dir`), else the nearest `.gleon/gleon.yaml` above `base_dir`, else none; loaded for the
-/// CLI of `cli_version` ([`GleonConfig::load_for_cli`]).
+/// CLI of `cli_version` ([`GleonConfig::load_for_cli`]). No walk reaches past a repository root
+/// or into `home` ([`crate::paths::find_workspace_root`]).
 fn load_config(
     config_path: Option<&std::path::Path>,
     base_dir: &std::path::Path,
     cli_version: Option<&semver::Version>,
+    home: Option<&std::path::Path>,
 ) -> Result<(Option<GleonConfig>, std::path::PathBuf), ContextError> {
     let found = if let Some(path) = config_path {
         tracing::debug!("Loading configuration from explicitly provided path: {path:?}");
@@ -233,11 +241,13 @@ fn load_config(
         let cfg = GleonConfig::load_for_cli(&resolved_path, cli_version)?;
         // A loaded file has a parent: `resolved_path` is absolute or joined to `base_dir`.
         let config_dir = resolved_path.parent().unwrap_or(base_dir);
-        let root = crate::paths::find_workspace_root(config_dir, |p| p.gleon_dir().is_dir())
-            .or_else(|| crate::paths::find_workspace_root(base_dir, |p| p.gleon_dir().is_dir()))
+        let workspace =
+            |start| crate::paths::find_workspace_root(start, home, crate::paths::has_gleon_dir);
+        let root = workspace(config_dir)
+            .or_else(|| workspace(base_dir))
             .map_or_else(|| base_dir.to_path_buf(), |p| p.base_dir().to_path_buf());
         (Some(cfg), root)
-    } else if let Some((config_path, root_dir)) = find_config_and_root(base_dir) {
+    } else if let Some((config_path, root_dir)) = find_config_and_root(base_dir, home) {
         tracing::debug!(
             "Discovered gleon.yaml at {:?} (root: {:?})",
             config_path,
@@ -299,7 +309,7 @@ mod tests {
         let mut file = File::create(&config_path).unwrap();
         writeln!(
             file,
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\""
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel"
         )
         .unwrap();
 
@@ -322,7 +332,7 @@ mod tests {
         let config_path = dir.path().join("my_config.yaml");
         std::fs::write(
             &config_path,
-            "required_version: \">=99.0.0\"\nscreenshots:\n  - include: \"*.png\"\n",
+            "required_version: \">=99.0.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n",
         )
         .unwrap();
         let options = ContextOptions {
@@ -364,7 +374,7 @@ mod tests {
         let mut file = File::create(&config_file).unwrap();
         writeln!(
             file,
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\""
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel"
         )
         .unwrap();
 
@@ -390,7 +400,7 @@ mod tests {
         let mut file = File::create(&config_path).unwrap();
         writeln!(
             file,
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\""
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel"
         )
         .unwrap();
 
@@ -401,7 +411,11 @@ mod tests {
 
         // Pass unrelated_dir as the base_dir argument; resolve must derive base_dir from config_path's root.
         let context = ResolvedContext::resolve(&options, unrelated_dir.path(), &EmptyEnv).unwrap();
-        assert_eq!(context.base_dir, external_dir.path());
+        // Resolved, like every workspace root the walk finds.
+        assert_eq!(
+            context.base_dir,
+            gleon_model::fs::canonical(external_dir.path()).unwrap()
+        );
         assert_eq!(context.branch, "feature");
     }
 
@@ -430,7 +444,7 @@ mod tests {
         let mut file = File::create(&default_path).unwrap();
         writeln!(
             file,
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\""
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel"
         )
         .unwrap();
 
@@ -500,7 +514,8 @@ mod tests {
         std::fs::create_dir_all(&gleon_dir).unwrap();
 
         let config_path = gleon_dir.join("gleon.yaml");
-        let yaml_content = "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"";
+        let yaml_content =
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel";
         std::fs::write(&config_path, yaml_content).unwrap();
 
         let options = ContextOptions::default();
@@ -509,7 +524,7 @@ mod tests {
         let ctx = ResolvedContext::resolve(&options, &nested_dir, &EmptyEnv).unwrap();
 
         assert!(ctx.config.is_some());
-        assert_eq!(ctx.base_dir, root_dir);
+        assert_eq!(ctx.base_dir, gleon_model::fs::canonical(root_dir).unwrap());
     }
 
     #[test]
@@ -536,7 +551,7 @@ mod tests {
         let gleon_dir = root_dir.join(".gleon");
         std::fs::create_dir_all(&gleon_dir).unwrap();
         let config_path = gleon_dir.join("gleon.yaml");
-        let yaml_content = "required_version: \">=0.1.0\"\nfallback_platform:\n  os: linux\n  arch: x86_64\nscreenshots:\n  - include: \"*.png\"";
+        let yaml_content = "required_version: \">=0.1.0\"\nfallback_platform:\n  os: linux\n  arch: x86_64\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel";
         std::fs::write(&config_path, yaml_content).unwrap();
 
         let options = ContextOptions::default();
@@ -647,9 +662,9 @@ mod tests {
     #[test]
     #[cfg(not(miri))]
     fn test_context_resolve_head_commit_sha() {
-        fn run_check(predicate: impl Fn(&crate::paths::GleonPaths) -> bool) {
+        fn run_check(predicate: impl Fn(&std::path::Path) -> bool) {
             let cur = std::env::current_dir().unwrap();
-            let Some(paths) = crate::paths::find_workspace_root(&cur, predicate) else {
+            let Some(paths) = crate::paths::find_workspace_root(&cur, None, predicate) else {
                 return;
             };
             let ctx =
@@ -658,7 +673,7 @@ mod tests {
             assert!(ctx.commit_sha.is_some());
         }
 
-        run_check(|p| p.base_dir().join(".git").exists());
+        run_check(|dir| dir.join(".git").exists());
         run_check(|_| false);
     }
 }

@@ -441,8 +441,7 @@ mod tests {
             config: Some(crate::config::GleonConfig {
                 screenshots: vec![crate::config::ScreenshotRule {
                     include: vec![crate::config::GlobPattern::new("**/*.png").unwrap()],
-                    mode: gleon_engine::config::Mode::Pixel,
-                    diff: gleon_engine::config::DiffConfig::default(),
+                    tolerance: gleon_model::tolerance::Tolerance::pixel(0.01),
                     masks: vec![crate::config::MaskRule {
                         path: crate::config::GlobPattern::new("**/*.png").unwrap(),
                         zones: vec![gleon_engine::config::Zone {
@@ -767,8 +766,7 @@ screenshots:
             config: Some(crate::config::GleonConfig {
                 screenshots: vec![crate::config::ScreenshotRule {
                     include: vec![crate::config::GlobPattern::new("**/*.png").unwrap()],
-                    mode: gleon_engine::config::Mode::Pixel,
-                    diff: gleon_engine::config::DiffConfig::default(),
+                    tolerance: gleon_model::tolerance::Tolerance::pixel(0.01),
                     masks: vec![crate::config::MaskRule {
                         path: crate::config::GlobPattern::new("**/*.png").unwrap(),
                         zones: vec![gleon_engine::config::Zone {

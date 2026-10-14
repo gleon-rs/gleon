@@ -46,9 +46,19 @@ pub(crate) fn filter_test_cases(
     filter_paths: Option<&[PathBuf]>,
 ) {
     if let Some(filters) = filter_paths {
+        // An absolute filter is resolved like the workspace root the cases lie under
+        // ([`crate::paths::find_workspace_root`]), so a path through a symbolic link matches.
         let normalized_filters: Vec<_> = filters
             .iter()
-            .map(|f| (f, FileScanner::normalize_path_str(f).into_owned()))
+            .map(|f| {
+                let f = if f.is_absolute() {
+                    gleon_model::fs::canonical(f).unwrap_or_else(|_| f.clone())
+                } else {
+                    f.clone()
+                };
+                let norm = FileScanner::normalize_path_str(&f).into_owned();
+                (f, norm)
+            })
             .collect();
 
         test_cases.retain(|case| {
@@ -266,8 +276,7 @@ mod tests {
 
         let rule = Arc::new(crate::config::ScreenshotRule {
             include: vec![],
-            mode: gleon_engine::config::Mode::Pixel,
-            diff: gleon_engine::config::DiffConfig::default(),
+            tolerance: gleon_model::tolerance::Tolerance::pixel(0.01),
             masks: vec![],
             text_tolerance: None,
         });

@@ -1,6 +1,6 @@
 //! Platform identity: the `platform` / `fallback_platform` config values and their storage keys.
 
-use std::{collections::BTreeMap, path::Path, sync::LazyLock};
+use std::{borrow::Cow, collections::BTreeMap, path::Path, sync::LazyLock};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -124,7 +124,7 @@ impl PartialEq<&str> for PlatformKey {
 
 impl<'de> Deserialize<'de> for PlatformKey {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let key = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        let key = Cow::<'de, str>::deserialize(deserializer)?;
         Self::parse(&key).map_err(serde::de::Error::custom)
     }
 }
@@ -160,19 +160,13 @@ pub struct PlatformFields {
     #[schemars(regex(pattern = r"^[A-Za-z0-9_.-]+$"))]
     pub renderer: Option<String>,
     /// Arbitrary key-value label overrides.
+    // Names and values are segments of the key, like the other fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "labels_schema")]
+    #[schemars(extend(
+        "propertyNames" = { "pattern": r"^[A-Za-z0-9_.-]+$" },
+        "additionalProperties" = { "type": "string", "pattern": r"^[A-Za-z0-9_.-]+$" }
+    ))]
     pub labels: Option<BTreeMap<String, String>>,
-}
-
-/// The schema of [`PlatformFields::labels`]: names and values are segments of the key, like the
-/// other fields.
-fn labels_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "type": ["object", "null"],
-        "propertyNames": { "pattern": r"^[A-Za-z0-9_.-]+$" },
-        "additionalProperties": { "type": "string", "pattern": r"^[A-Za-z0-9_.-]+$" }
-    })
 }
 
 /// User- or config-supplied platform configuration, either an opaque string or
@@ -204,7 +198,8 @@ impl PlatformConfig {
     ///
     /// # Errors
     /// Returns [`PlatformError`] if the value names no OS, or an OS or architecture under a name
-    /// no process reports ([`KNOWN_OS`], [`KNOWN_ARCH`]; e.g. `macos-arm64` for
+    /// no process reports ([`KNOWN_OS`], [`KNOWN_ARCH`], or an alias of them, [`OS_ALIASES`],
+    /// [`ARCH_ALIASES`]; e.g. `macos-armv9` for
     /// `macos-aarch64`): such a value would silently never match.
     pub fn matches_host(&self) -> Result<bool, PlatformError> {
         self.matches(HOST_OS, HOST_ARCH)
@@ -229,18 +224,34 @@ impl PlatformConfig {
         }
     }
 
+    /// Checks that this platform names an OS, and an architecture if any, the way a process
+    /// reports them (aliases read as them): what integrations require of a `fallback_platform`,
+    /// whatever the host is.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError`] like [`Self::matches_host`] does.
+    pub fn validate_host_names(&self) -> Result<(), PlatformError> {
+        self.host_names().map(drop)
+    }
+
     fn matches(&self, os: &str, arch: &str) -> Result<bool, PlatformError> {
-        let matches = |fields: &PlatformFields| -> Result<bool, PlatformError> {
-            let own_os = known_name(fields.os.as_deref(), "OS", KNOWN_OS)?
+        let (own_os, own_arch) = self.host_names()?;
+        Ok(own_os == os && own_arch.is_none_or(|own| own == arch))
+    }
+
+    /// The OS and architecture (if any) this platform names, under the names a process reports.
+    fn host_names(&self) -> Result<(String, Option<String>), PlatformError> {
+        let names = |fields: &PlatformFields| -> Result<(String, Option<String>), PlatformError> {
+            let os = known_name(fields.os.as_deref(), &OS_NAMES)?
                 .ok_or_else(|| PlatformError::UnknownHost("an OS is required".to_owned()))?;
-            let own_arch = known_name(fields.arch.as_deref(), "architecture", KNOWN_ARCH)?;
-            Ok(own_os == os && own_arch.is_none_or(|own| own == arch))
+            let arch = known_name(fields.arch.as_deref(), &ARCH_NAMES)?;
+            Ok((os.into_owned(), arch.map(Cow::into_owned)))
         };
         match self {
             Self::Opaque(key) => {
-                matches(&PlatformFields::parse_key_value(key).map_err(PlatformError::ParseError)?)
+                names(&PlatformFields::parse_key_value(key).map_err(PlatformError::ParseError)?)
             }
-            Self::Structured(fields) => matches(fields),
+            Self::Structured(fields) => names(fields),
         }
     }
 
@@ -320,7 +331,7 @@ impl<'de> Deserialize<'de> for PlatformConfig {
                 E: serde::de::Error,
             {
                 validate_segment(v)
-                    .map(|c| PlatformConfig::Opaque(c.into_owned()))
+                    .map(|c| PlatformConfig::Opaque(canonical_opaque(&c).into_owned()))
                     .map_err(E::custom)
             }
 
@@ -328,17 +339,23 @@ impl<'de> Deserialize<'de> for PlatformConfig {
             where
                 E: serde::de::Error,
             {
-                validate_segment(&v)
-                    .map(|c| PlatformConfig::Opaque(c.into_owned()))
-                    .map_err(E::custom)
+                self.visit_str(&v)
             }
 
             fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
             where
                 A: serde::de::MapAccess<'de>,
             {
-                let fields =
+                let mut fields =
                     PlatformFields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                // Normalized when read, like the keys: `{os: darwin, arch: arm64}` is
+                // `macos-aarch64` wherever it is compared or printed.
+                if let Some(os) = &fields.os {
+                    fields.os = Some(canonical_os(os).into_owned());
+                }
+                if let Some(arch) = &fields.arch {
+                    fields.arch = Some(canonical_arch(arch).into_owned());
+                }
                 Ok(PlatformConfig::Structured(fields))
             }
         }
@@ -369,7 +386,7 @@ enum PlatformConfigSchema {
 }
 
 impl schemars::JsonSchema for PlatformConfig {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
+    fn schema_name() -> Cow<'static, str> {
         "PlatformConfig".into()
     }
 
@@ -405,8 +422,10 @@ impl PlatformFields {
                 }
 
                 match key {
-                    "os" | "platform" => fields.os = Some(val.to_string()),
-                    "arch" | "architecture" => fields.arch = Some(val.to_string()),
+                    "os" | "platform" => fields.os = Some(canonical_os(val).into_owned()),
+                    "arch" | "architecture" => {
+                        fields.arch = Some(canonical_arch(val).into_owned());
+                    }
                     "renderer" => fields.renderer = Some(val.to_string()),
                     _ => {
                         let labels = fields.labels.get_or_insert_with(BTreeMap::new);
@@ -420,10 +439,10 @@ impl PlatformFields {
                     "invalid format: ambiguous platform string '{s}'. Use 'key=value' comma-separated format for complex platforms"
                 ));
             }
-            fields.os = Some(os.to_string());
-            fields.arch = Some(arch.to_string());
+            fields.os = Some(canonical_os(os).into_owned());
+            fields.arch = Some(canonical_arch(arch).into_owned());
         } else {
-            fields.os = Some(s.to_string());
+            fields.os = Some(canonical_os(s).into_owned());
         }
 
         Ok(fields)
@@ -437,22 +456,104 @@ pub const KNOWN_OS: &[&str] = &["linux", "macos", "windows", "android", "ios", "
 /// The architecture names a process reports (`std::env::consts::ARCH`) on those platforms.
 pub const KNOWN_ARCH: &[&str] = &["x86_64", "aarch64", "x86", "arm"];
 
-/// `name` normalized ([`validate_segment`]) if it is one of `known`, `None` if absent.
+/// Other names of the operating systems of [`KNOWN_OS`], read as them wherever a platform is
+/// parsed (configs, flags, `GLEON_PLATFORM`): `darwin` is `macos`.
+pub const OS_ALIASES: &[(&str, &str)] = &[("darwin", "macos"), ("osx", "macos")];
+
+/// Other names of the architectures of [`KNOWN_ARCH`], read as them wherever a platform is
+/// parsed: the names of Dart's `Abi` and of the Flutter package's release assets (`arm64`,
+/// `x64`), and `amd64`.
+pub const ARCH_ALIASES: &[(&str, &str)] =
+    &[("arm64", "aarch64"), ("x64", "x86_64"), ("amd64", "x86_64")];
+
+/// `name` under its canonical name when it is an alias of `aliases` (ASCII case-insensitively),
+/// else as it is.
+fn canonical<'a>(name: &'a str, aliases: &[(&str, &'static str)]) -> Cow<'a, str> {
+    Cow::Borrowed(
+        aliases
+            .iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
+            .map_or(name, |&(_, canonical)| canonical),
+    )
+}
+
+/// The canonical OS name of `name` ([`OS_ALIASES`]).
+#[must_use]
+pub fn canonical_os(name: &str) -> Cow<'_, str> {
+    canonical(name, OS_ALIASES)
+}
+
+/// The canonical architecture name of `name` ([`ARCH_ALIASES`]).
+#[must_use]
+pub fn canonical_arch(name: &str) -> Cow<'_, str> {
+    canonical(name, ARCH_ALIASES)
+}
+
+/// An opaque platform value with its names canonical.
+///
+/// `<os>-<arch>` ([`canonical_os`], [`canonical_arch`]) and an OS alone (`darwin` is `macos`, as
+/// `GLEON_PLATFORM=darwin` reads); any other value as it is (a custom key keeps its spelling).
+#[must_use]
+pub fn canonical_opaque(value: &str) -> Cow<'_, str> {
+    match value.split_once('-') {
+        None => canonical_os(value),
+        Some((os, arch)) if !arch.contains('-') => {
+            let normalized = format!("{}-{}", canonical_os(os), canonical_arch(arch));
+            if normalized == value {
+                Cow::Borrowed(value)
+            } else {
+                Cow::Owned(normalized)
+            }
+        }
+        Some(_) => Cow::Borrowed(value),
+    }
+}
+
+/// The names of one dimension of a platform: what messages call it, the names a process reports
+/// and their aliases.
+struct Names {
+    what: &'static str,
+    known: &'static [&'static str],
+    aliases: &'static [(&'static str, &'static str)],
+}
+
+/// The names of operating systems.
+const OS_NAMES: Names = Names {
+    what: "OS",
+    known: KNOWN_OS,
+    aliases: OS_ALIASES,
+};
+
+/// The names of architectures.
+const ARCH_NAMES: Names = Names {
+    what: "architecture",
+    known: KNOWN_ARCH,
+    aliases: ARCH_ALIASES,
+};
+
+/// `name` normalized ([`validate_segment`]) and canonical if it is one of `names` or an alias of
+/// one, `None` if absent.
 fn known_name<'a>(
     name: Option<&'a str>,
-    what: &str,
-    known: &[&str],
-) -> Result<Option<std::borrow::Cow<'a, str>>, PlatformError> {
+    names: &Names,
+) -> Result<Option<Cow<'a, str>>, PlatformError> {
     let Some(name) = name else {
         return Ok(None);
     };
-    let clean = validate_segment(name)?;
-    if known.contains(&clean.as_ref()) {
+    // Read as the canonical name even when built in code (a flag, a test), not only when parsed.
+    let clean = match validate_segment(name)? {
+        Cow::Borrowed(valid) => canonical(valid, names.aliases),
+        Cow::Owned(valid) => Cow::Owned(canonical(&valid, names.aliases).into_owned()),
+    };
+    if names.known.contains(&clean.as_ref()) {
         Ok(Some(clean))
     } else {
+        let aliases: Vec<_> = names.aliases.iter().map(|(alias, _)| *alias).collect();
         Err(PlatformError::UnknownHost(format!(
-            "{what} '{name}' is not a name a process reports; use one of {}",
-            known.join(", ")
+            "{} '{name}' is not a name a process reports; use one of {} (also read as them: {})",
+            names.what,
+            names.known.join(", "),
+            aliases.join(", ")
         )))
     }
 }
@@ -473,12 +574,12 @@ pub const fn is_key_char(c: char) -> bool {
 /// # Errors
 /// Returns `PlatformError::InvalidSegment` if the key is empty, contains other characters, or
 /// has a part that is not a valid segment.
-pub fn validate_key(s: &str) -> Result<std::borrow::Cow<'_, str>, PlatformError> {
+pub fn validate_key(s: &str) -> Result<Cow<'_, str>, PlatformError> {
     let trimmed = s.trim();
     let lowered = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
-        std::borrow::Cow::Owned(trimmed.to_ascii_lowercase())
+        Cow::Owned(trimmed.to_ascii_lowercase())
     } else {
-        std::borrow::Cow::Borrowed(trimmed)
+        Cow::Borrowed(trimmed)
     };
     let is_valid = lowered.chars().all(is_key_char)
         && lowered
@@ -514,7 +615,7 @@ fn is_portable_segment(segment: &str) -> bool {
 /// Returns `PlatformError::InvalidSegment` if the trimmed segment is empty, is
 /// exactly `.` or `..`, is a Windows device name (`con`, `nul.txt`, `com1`, ...), ends in `.`, or
 /// contains characters outside `[a-z0-9_.-]`.
-pub fn validate_segment(s: &str) -> Result<std::borrow::Cow<'_, str>, PlatformError> {
+pub fn validate_segment(s: &str) -> Result<Cow<'_, str>, PlatformError> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Err(PlatformError::InvalidSegment(
@@ -526,9 +627,9 @@ pub fn validate_segment(s: &str) -> Result<std::borrow::Cow<'_, str>, PlatformEr
     // character regardless, so Unicode-aware lowercasing would only spend extra work
     // producing a string that's still invalid.
     let lowered = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
-        std::borrow::Cow::Owned(trimmed.to_ascii_lowercase())
+        Cow::Owned(trimmed.to_ascii_lowercase())
     } else {
-        std::borrow::Cow::Borrowed(trimmed)
+        Cow::Borrowed(trimmed)
     };
 
     if lowered.as_ref() == "." || lowered.as_ref() == ".." {
@@ -646,6 +747,87 @@ mod tests {
             info_rich.key().unwrap(),
             "linux-x86_64+flutter-3.22+locale=en_us+theme=dark"
         );
+    }
+
+    /// A platform any process could be, this one or not, passes; a name no process reports
+    /// fails like `matches_host` does, without being compared with the host.
+    #[test]
+    fn test_validate_host_names_does_not_need_the_host() {
+        let opaque = |value: &str| PlatformConfig::Opaque(value.to_owned());
+        let other = if HOST_OS == "linux" {
+            "windows-x64"
+        } else {
+            "linux-x64"
+        };
+        assert_eq!(opaque(other).matches_host(), Ok(false));
+        assert_eq!(opaque(other).validate_host_names(), Ok(()));
+        assert_eq!(opaque("darwin").validate_host_names(), Ok(()));
+        for invalid in ["beos-aarch64", "my-custom-env", "macos-armv9"] {
+            assert!(opaque(invalid).validate_host_names().is_err(), "{invalid}");
+        }
+    }
+
+    /// `macos-arm64`, `linux-x64` and `darwin` (the names of Dart's `Abi` and of release assets)
+    /// are read as the names a process reports, wherever a platform is parsed; custom keys stay.
+    #[test]
+    fn test_aliases_are_canonical_when_parsed() {
+        let opaque = |yaml: &str| serde_yaml::from_str::<PlatformConfig>(yaml).unwrap();
+        assert_eq!(
+            opaque("macos-arm64"),
+            PlatformConfig::Opaque("macos-aarch64".to_owned())
+        );
+        assert_eq!(
+            opaque("Darwin-X64"),
+            PlatformConfig::Opaque("macos-x86_64".to_owned())
+        );
+        assert_eq!(
+            opaque("linux-amd64"),
+            PlatformConfig::Opaque("linux-x86_64".to_owned())
+        );
+        for custom in ["custom-env", "fuchsia-x86_64", "macos"] {
+            assert_eq!(
+                opaque(custom),
+                PlatformConfig::Opaque(custom.to_owned()),
+                "{custom}"
+            );
+        }
+        // An OS alone is read like `GLEON_PLATFORM=darwin` and `{os: darwin}`.
+        for alias in ["darwin", "OSX"] {
+            assert_eq!(
+                opaque(alias),
+                PlatformConfig::Opaque("macos".to_owned()),
+                "{alias}"
+            );
+        }
+        assert_eq!(canonical_opaque("my-custom-env"), "my-custom-env");
+        assert_eq!(canonical_opaque("linux-x64"), "linux-x86_64");
+        assert_eq!(
+            opaque("{os: darwin, arch: arm64, renderer: skia}"),
+            PlatformConfig::Structured(PlatformFields {
+                os: Some("macos".to_owned()),
+                arch: Some("aarch64".to_owned()),
+                renderer: Some("skia".to_owned()),
+                labels: None,
+            })
+        );
+        let fields = PlatformFields::parse_key_value("os=darwin,arch=x64").unwrap();
+        assert_eq!(
+            (fields.os.as_deref(), fields.arch.as_deref()),
+            (Some("macos"), Some("x86_64"))
+        );
+        let fields = PlatformFields::parse_key_value("windows-x64").unwrap();
+        assert_eq!(
+            (fields.os.as_deref(), fields.arch.as_deref()),
+            (Some("windows"), Some("x86_64"))
+        );
+        assert_eq!(canonical_os("Linux"), "Linux");
+        assert_eq!(canonical_arch("ARM64"), "aarch64");
+        // The error of an unknown name says which names are read.
+        let err = PlatformConfig::Opaque("macos-armv9".to_owned())
+            .matches_host()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("arm64, x64, amd64"), "{err}");
     }
 
     #[test]
@@ -881,6 +1063,12 @@ labels:
             (opaque("MacOS-AArch64"), true),
             (opaque("macos-x86_64"), false),
             (opaque("linux-aarch64"), false),
+            // Aliases: the names of release assets and of Dart's `Abi`.
+            (opaque("macos-arm64"), true),
+            (opaque("darwin-aarch64"), true),
+            (opaque("Darwin-ARM64"), true),
+            (opaque("linux-x64"), false),
+            (structured(Some("darwin"), Some("arm64")), true),
             (structured(Some("macos"), Some("aarch64")), true),
             (structured(Some("macos "), Some(" AArch64")), true),
             (structured(Some("macos"), None), true),
@@ -894,9 +1082,8 @@ labels:
         }
         // Values that could never match fail instead of silently naming another platform.
         for (platform, needle) in [
-            (opaque("macos-arm64"), "architecture 'arm64'"),
-            (opaque("darwin-aarch64"), "OS 'darwin'"),
-            (opaque("linux-x64"), "architecture 'x64'"),
+            (opaque("macos-armv9"), "architecture 'armv9'"),
+            (opaque("beos-aarch64"), "OS 'beos'"),
             (opaque("macos-aarch64-extra"), "ambiguous"),
             (structured(None, Some("aarch64")), "an OS is required"),
         ] {

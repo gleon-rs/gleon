@@ -34,8 +34,10 @@ async fn main() -> anyhow::Result<()> {
     let current_dir = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to determine current directory: {e}"))?;
 
-    // Load environment configuration from .gleon/.env and .gleon/.env.local
-    let dotenv = gleon_core::env::load_dotenv(&current_dir);
+    // Load environment configuration from .gleon/.env and .gleon/.env.local of the workspace
+    // (never of the home directory).
+    let home = gleon_core::env::home(&gleon_core::env::OsEnv);
+    let dotenv = gleon_core::env::load_dotenv(&current_dir, home.as_deref());
     if !dotenv.is_empty() {
         tracing::debug!(
             "Loaded {} environment variable(s) from .env files",
@@ -113,7 +115,11 @@ fn resolve_context(
 )]
 async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Result<i32> {
     let code = match &cli.command {
-        Commands::Init => commands::init::run_init(&resolve_context(cli, current_dir, env)?),
+        Commands::Init(args) => commands::init::run_init(
+            &resolve_context(cli, current_dir, env)?,
+            current_dir,
+            args.template(),
+        ),
         Commands::Status { json } => {
             commands::status::run_status(&resolve_context(cli, current_dir, env)?, *json)
         }

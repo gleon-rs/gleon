@@ -45,7 +45,7 @@ fn test_approve_full_flow_with_diff_failures() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     // 1. Set up baseline screenshot using real static fixtures
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -104,7 +104,7 @@ fn test_approve_uses_the_test_names_of_the_scanner() {
     let temp_dir = tempfile::tempdir().unwrap();
     let base_path = temp_dir.path();
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).unwrap();
+    init_workspace(&ctx_init, None).unwrap();
     common::copy_config(base_path, "auth_any");
     fs::create_dir_all(base_path.join("Auth")).unwrap();
     fs::write(
@@ -142,7 +142,7 @@ fn test_approve_skips_candidates_that_are_no_png() {
     let temp_dir = tempfile::tempdir().unwrap();
     let base_path = temp_dir.path();
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).unwrap();
+    init_workspace(&ctx_init, None).unwrap();
     common::copy_config(base_path, "billing");
     fs::create_dir_all(base_path.join("billing")).unwrap();
     fs::write(

@@ -50,7 +50,7 @@ fn test_stage_real_fixture_updates_index_and_makes_workspace_clean() {
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
     // 1. Init workspace
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     // 2. Copy real PNG fixture
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -116,7 +116,7 @@ fn test_stage_partial_path_filter_preserves_existing_entries() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -168,7 +168,7 @@ fn test_stage_idempotent_unchanged_screenshots() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -199,7 +199,7 @@ fn test_stage_orphan_manifest_cleanup() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -244,7 +244,7 @@ fn test_stage_absolute_path_filter() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -275,7 +275,7 @@ fn test_stage_corrupt_screenshot_returns_error() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let screenshot_dir = base_path.join("billing");
     fs::create_dir_all(&screenshot_dir).unwrap();

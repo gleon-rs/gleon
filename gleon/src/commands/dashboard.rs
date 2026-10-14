@@ -127,7 +127,7 @@ mod tests {
     async fn test_run_dashboard_reads_the_latest_run_by_default() {
         let temp = tempfile::tempdir().unwrap();
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
-        gleon_core::ops::init_workspace(&ctx).unwrap();
+        gleon_core::ops::init_workspace(&ctx, None).unwrap();
         assert_eq!(
             run_dashboard(&ctx, None, None, None, KEEP, false).await,
             ExitCode::Failure,

@@ -2,3 +2,4 @@ required_version: "^0.1.0"
 future_cool_setting: "some_value"
 screenshots:
   - include: "src/login.png"
+    mode: pixel

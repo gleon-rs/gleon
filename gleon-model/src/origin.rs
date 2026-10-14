@@ -3,7 +3,8 @@
 //!
 //! Decoders ignore text chunks, so a stamped golden shows the same pixels everywhere and stays one
 //! file next to the tests. Tools that strip ancillary chunks (PNG optimizers) drop the origin with
-//! them; a golden without one is read as recorded on the `fallback_platform` of the workspace.
+//! them; a golden without one is read as recorded on the `fallback_platform` of its workspace,
+//! or, without one, on no known platform (its text is then compared nowhere).
 
 use std::ops::Range;
 

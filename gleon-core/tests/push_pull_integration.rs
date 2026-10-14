@@ -28,7 +28,7 @@ async fn test_push_pull_local_flat_mode() {
     let temp = tempdir().unwrap();
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
 
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     // Push with no storage config -> local mode
     let push_res = push_blobs(&ctx, None, false, None).await.unwrap();
@@ -53,7 +53,7 @@ async fn test_push_pull_file_scheme_lifecycle() {
     let ctx =
         ResolvedContext::from_options(&ContextOptions::default(), workspace_temp.path()).unwrap();
 
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     // Copy fixture screenshot to workspace
     let screenshots_dir = workspace_temp.path().join("screenshots");
@@ -142,7 +142,7 @@ async fn test_push_missing_local_blob_fail_fast() {
     let ctx =
         ResolvedContext::from_options(&ContextOptions::default(), workspace_temp.path()).unwrap();
 
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let platform_key = ctx.platform.key().unwrap();
     let manifest_dir = workspace_temp
@@ -182,7 +182,7 @@ async fn test_pull_missing_remote_blob_fail_fast() {
     let ctx =
         ResolvedContext::from_options(&ContextOptions::default(), workspace_temp.path()).unwrap();
 
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let platform_key = ctx.platform.key().unwrap();
     let manifest_dir = workspace_temp
@@ -222,7 +222,7 @@ async fn test_push_pull_all_platforms_option() {
     let ctx =
         ResolvedContext::from_options(&ContextOptions::default(), workspace_temp.path()).unwrap();
 
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let manifests_root = workspace_temp.path().join(".gleon").join("manifests");
     let blobs_dir = workspace_temp

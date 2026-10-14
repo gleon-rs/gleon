@@ -207,17 +207,46 @@ pub fn could_not_compare(golden_uri: &str, message: &str) -> String {
     format!("Golden \"{golden_uri}\": gleon could not compare: {message}")
 }
 
-/// A failed comparison: `reason`, where the artifacts are and, without a workspace, a pointer to
-/// `.gleon/gleon.yaml`.
-pub fn failure(golden_uri: &str, reason: &str, feedback: &str, has_workspace: bool) -> String {
+/// A failed comparison: `reason`, where the artifacts are, then where the case `report` of the
+/// golden is (its absolute path: a golden a rule covers always records one) and what reads it,
+/// or, for a golden no rule covers, a pointer to `.gleon/gleon.yaml`.
+pub fn failure(golden_uri: &str, reason: &str, feedback: &str, report: Option<&str>) -> String {
     let mut message = format!("Golden \"{golden_uri}\": {reason}{feedback}");
-    if !has_workspace {
-        message.push_str(
-            "\nTip: tolerances can be set per golden in .gleon/gleon.yaml, the same file as the \
-             gleon CLI.",
-        );
+    match report {
+        Some(report) => {
+            let _infallible = write!(
+                message,
+                "\nCase report: {report} (the gleon CLI turns the reports of a run into one: \
+                 `gleon report html`)."
+            );
+        }
+        None => message.push_str(
+            "\nTip: tolerances per golden and the platform that compares text live in \
+             .gleon/gleon.yaml, the file of the gleon CLI (see the package README).",
+        ),
     }
     message
+}
+
+/// The warning of update mode for a golden it kept: recorded on `origin`, another platform, and
+/// the new image passes against it with its text ignored; only `fallback`, the
+/// `fallback_platform`, records it again.
+pub fn kept_foreign(golden_uri: &str, origin: &str, fallback: &str) -> String {
+    format!(
+        "gleon: golden \"{golden_uri}\" was kept: it was recorded on {origin}, and the new image \
+         passes against it with its text ignored; `--update-goldens` on {fallback} (the \
+         `fallback_platform`) records it again."
+    )
+}
+
+/// The warning, once per session, for a golden whose text differed but was not compared because
+/// no platform is known to have recorded it (no stamp, no `fallback_platform`).
+pub fn unknown_origin(golden_uri: &str) -> String {
+    format!(
+        "gleon: golden \"{golden_uri}\" has no platform stamp, so its text is not compared \
+         (it differs here): record it with --update-goldens on the platform that should compare \
+         text, or name that platform as the `fallback_platform` of .gleon/gleon.yaml."
+    )
 }
 
 /// Where the failure artifacts of a failed comparison were written.
@@ -227,8 +256,8 @@ pub fn feedback(failures_dir: &str) -> String {
 
 /// Printed once per session when `GLEON_METRICS` asks for metrics without a workspace.
 pub const MISSING_WORKSPACE_WARNING: &str = "gleon: GLEON_METRICS is set but there is no \
-     .gleon/gleon.yaml: create it (same format as the gleon CLI, see `gleon init`); metrics are \
-     written to .gleon/runs/latest/cases/.";
+     .gleon/gleon.yaml: create it (see the package README; `gleon init` of the gleon CLI writes \
+     one); metrics are written to .gleon/runs/latest/cases/.";
 
 #[cfg(all(test, not(miri)))]
 #[allow(
@@ -445,8 +474,15 @@ mod tests {
         );
         let feedback = feedback("/t/failures/");
         assert_eq!(
-            failure("a.png", "x.", &feedback, true),
-            "Golden \"a.png\": x.\nFailure feedback can be found at /t/failures/"
+            failure(
+                "a.png",
+                "x.",
+                &feedback,
+                Some("/t/.gleon/runs/latest/cases/macos-aarch64/a.json")
+            ),
+            "Golden \"a.png\": x.\nFailure feedback can be found at /t/failures/\nCase report: \
+             /t/.gleon/runs/latest/cases/macos-aarch64/a.json (the gleon CLI turns the reports of \
+             a run into one: `gleon report html`)."
         );
         assert_eq!(
             clamped_masks("a.png", 1),
@@ -456,9 +492,18 @@ mod tests {
             clamped_masks("a.png", 2),
             "gleon: 2 masks of golden \"a.png\" reach beyond the image and were clipped to it."
         );
+        assert!(failure("a.png", "x.", &feedback, None).ends_with(
+            "\nTip: tolerances per golden and the platform that compares text live in \
+             .gleon/gleon.yaml, the file of the gleon CLI (see the package README)."
+        ));
+        assert_eq!(
+            kept_foreign("a.png", "linux-x86_64", "macos-aarch64"),
+            "gleon: golden \"a.png\" was kept: it was recorded on linux-x86_64, and the new image \
+             passes against it with its text ignored; `--update-goldens` on macos-aarch64 (the \
+             `fallback_platform`) records it again."
+        );
         assert!(
-            failure("a.png", "x.", &feedback, false)
-                .ends_with("\nTip: tolerances can be set per golden in .gleon/gleon.yaml, the same file as the gleon CLI.")
+            unknown_origin("a.png").starts_with("gleon: golden \"a.png\" has no platform stamp")
         );
     }
 }
