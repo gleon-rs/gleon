@@ -3,3 +3,4 @@ required_version: ">=99.0.0"
 future_option: true
 screenshots:
   - include: "**/*.png"
+    mode: pixel

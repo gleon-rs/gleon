@@ -19,7 +19,7 @@ pub use gc::{
     GcError, GcMode, GcOptions, GcResult, collect_all_referenced_hashes, filter_orphans_to_delete,
     garbage_collect, partition_remote_blobs,
 };
-pub use init::{InitError, InitResult, init_workspace};
+pub use init::{InitError, InitResult, Template, init_workspace};
 pub use lint::{LintError, LintReport, lint_workspace_manifests};
 pub use pull::{PullError, PullResult, pull_blobs};
 pub use push::{PushError, PushResult, push_blobs};

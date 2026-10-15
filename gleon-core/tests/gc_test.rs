@@ -183,7 +183,7 @@ async fn test_gc_full_lifecycle_with_storage() {
 
     let ctx =
         ResolvedContext::from_options(&ContextOptions::default(), workspace_temp.path()).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let adapter = ObjectStoreAdapter::from_config(&storage_cfg).unwrap();
 
@@ -300,7 +300,7 @@ async fn test_gc_integration_real_data_mtime() {
     );
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), repo_root).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let adapter = ObjectStoreAdapter::from_config(&storage_cfg).unwrap();
 
@@ -392,7 +392,7 @@ async fn test_gc_grace_period_under_24h_fails_even_with_force() {
     let storage_cfg = StorageConfig::new(file_url(remote_temp.path()));
     let ctx =
         ResolvedContext::from_options(&ContextOptions::default(), workspace_temp.path()).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     // 0h fails
     let opts = GcOptions::new(false, 0, false);

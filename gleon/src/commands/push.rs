@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(exit_code_uninit, ExitCode::Failure);
 
         // 2. Initialized + Local Mode -> Success
-        gleon_core::ops::init_workspace(&ctx).unwrap();
+        gleon_core::ops::init_workspace(&ctx, None).unwrap();
         let exit_code_local = run_push(&ctx, None, false, None).await;
         assert_eq!(exit_code_local, ExitCode::Success);
 

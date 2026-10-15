@@ -1,6 +1,6 @@
 //! Initialization operation for gleon workspace.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -9,7 +9,31 @@ use crate::{
     context::ContextError,
     ops::common::{CoreError, append_missing_gitignore_lines, create_new_file_with_content},
     paths::GleonPaths,
+    platform::{PlatformConfig, PlatformError, PlatformInfo},
 };
+
+/// Which `gleon.yaml` `gleon init` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Template {
+    /// A Flutter package or app ([`GleonConfig::for_flutter`]): the goldens under every `test/`
+    /// compared exactly, their text on the platform of the run.
+    Flutter,
+    /// Any screenshots ([`GleonConfig::default`]): every `.png`, `pixel` mode.
+    Generic,
+}
+
+impl Template {
+    /// The template for the workspace at `base_dir`: [`Self::Flutter`] next to a `pubspec.yaml`
+    /// (a Flutter package or app, or the root of a pub workspace), else [`Self::Generic`].
+    #[must_use]
+    pub fn detect(base_dir: &Path) -> Self {
+        if base_dir.join("pubspec.yaml").is_file() {
+            Self::Flutter
+        } else {
+            Self::Generic
+        }
+    }
+}
 
 /// Errors that can occur during workspace initialization.
 #[derive(Debug, Error)]
@@ -17,6 +41,20 @@ pub enum InitError {
     /// YAML serialization error when writing default config.
     #[error("YAML serialization error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+
+    /// The platform of the run names no OS and architecture a process reports, so the Flutter
+    /// template cannot name it as the platform that compares text.
+    #[error(
+        "the Flutter template names the platform of this run as the one that compares text \
+         (`fallback_platform`), but '{platform}' is not an OS and architecture a process reports \
+         ({reason}): run it without `--platform`, or with `--os` and `--arch`"
+    )]
+    FlutterPlatform {
+        /// The platform of the run.
+        platform: String,
+        /// Why integrations would refuse it.
+        reason: PlatformError,
+    },
 
     /// Error shared across `ops::*` operations.
     #[error(transparent)]
@@ -28,19 +66,25 @@ pub enum InitError {
 pub struct InitResult {
     /// Path to the `.gleon` directory.
     pub gleon_dir: PathBuf,
-    /// Path to the created `gleon.yaml` config file, if created.
-    pub config_created: Option<PathBuf>,
+    /// Path to the `gleon.yaml` config file of the workspace.
+    pub config_path: PathBuf,
+    /// The template the config was created from; `None` when one existed and was kept.
+    pub created: Option<Template>,
 }
 
-/// Initializes the `.gleon` directory structure and default `gleon.yaml` if missing.
+/// Initializes the `.gleon` directory structure and, if missing, a `gleon.yaml` of `template`
+/// (`None`: [`Template::detect`]).
 ///
 /// # Errors
 ///
-/// Returns an error if the platform has no key (nothing is created then), if the `.gleon`
-/// directory tree cannot be created, if the default
-/// `gleon.yaml` configuration fails to serialize, or if writing the `.gitignore`,
-/// `.env.template`, or `gleon.yaml` scaffold files fails.
-pub fn init_workspace(context: &crate::context::ResolvedContext) -> Result<InitResult, InitError> {
+/// Returns an error if the platform has no key, or names no OS and architecture a process
+/// reports for the Flutter template (nothing is created then), if the `.gleon` directory tree
+/// cannot be created, if the `gleon.yaml` configuration fails to serialize, or if writing the
+/// `.gitignore`, `.env.template`, or `gleon.yaml` scaffold files fails.
+pub fn init_workspace(
+    context: &crate::context::ResolvedContext,
+    template: Option<Template>,
+) -> Result<InitResult, InitError> {
     // Checked before anything is created: the manifests of the platform go to its directory.
     let platform_key = context
         .platform
@@ -48,6 +92,14 @@ pub fn init_workspace(context: &crate::context::ResolvedContext) -> Result<InitR
         .map_err(|e| CoreError::Context(ContextError::Platform(e)))?;
     let paths = GleonPaths::new(&context.base_dir);
     let gleon_dir = paths.gleon_dir();
+    let config_path = paths.config_file();
+    // An existing config is kept, whatever the template; a new one is built (and checked) first.
+    let new_config = if config_path.exists() {
+        None
+    } else {
+        let template = template.unwrap_or_else(|| Template::detect(&context.base_dir));
+        Some((template, new_config(context, template)?))
+    };
     let blobs_dir = paths.blob_scheme_dir("sha256");
     let runs_dir = paths.runs_latest();
 
@@ -72,32 +124,71 @@ pub fn init_workspace(context: &crate::context::ResolvedContext) -> Result<InitR
         &gleon_dir,
     )?;
 
-    let internal_config = paths.config_file();
-    // New configs require the CLI that wrote them (its release, without a pre-release part).
-    let default_config = GleonConfig {
-        required_version: context.cli_version.as_ref().map_or_else(
-            || GleonConfig::default().required_version,
-            |version| semver::VersionReq {
-                comparators: vec![semver::Comparator {
-                    op: semver::Op::GreaterEq,
-                    major: version.major,
-                    minor: Some(version.minor),
-                    patch: Some(version.patch),
-                    pre: semver::Prerelease::EMPTY,
-                }],
-            },
-        ),
-        ..GleonConfig::default()
-    };
-    let yaml_content = serde_yaml::to_string(&default_config).map_err(InitError::Yaml)?;
-    let config_created =
-        create_new_file_with_content(&internal_config, yaml_content.as_bytes(), &gleon_dir)?
-            .then_some(internal_config);
+    let mut created = None;
+    if let Some((template, config)) = new_config {
+        let yaml_content = serde_yaml::to_string(&config).map_err(InitError::Yaml)?;
+        if create_new_file_with_content(&config_path, yaml_content.as_bytes(), &gleon_dir)? {
+            created = Some(template);
+        }
+    }
 
     Ok(InitResult {
         gleon_dir,
-        config_created,
+        config_path,
+        created,
     })
+}
+
+/// The config `gleon init` writes from `template`: it requires the CLI that wrote it (its
+/// release, without a pre-release part), and the Flutter template names the OS and architecture
+/// of the run as the platform that compares text.
+fn new_config(
+    context: &crate::context::ResolvedContext,
+    template: Template,
+) -> Result<GleonConfig, InitError> {
+    let base = match template {
+        Template::Flutter => GleonConfig::for_flutter(flutter_platform(&context.platform)?),
+        Template::Generic => GleonConfig::default(),
+    };
+    Ok(GleonConfig {
+        required_version: context.cli_version.as_ref().map_or_else(
+            || GleonConfig::default().required_version,
+            |version| {
+                Some(semver::VersionReq {
+                    comparators: vec![semver::Comparator {
+                        op: semver::Op::GreaterEq,
+                        major: version.major,
+                        minor: Some(version.minor),
+                        patch: Some(version.patch),
+                        pre: semver::Prerelease::EMPTY,
+                    }],
+                })
+            },
+        ),
+        ..base
+    })
+}
+
+/// The OS and architecture of `platform` (its renderer and labels are no matter for the
+/// integrations that read `fallback_platform`), written as integrations read them
+/// (`macos-aarch64`).
+///
+/// # Errors
+/// Returns [`InitError::FlutterPlatform`] for a platform no process reports (`--platform
+/// my-env`): integrations would refuse the config.
+fn flutter_platform(platform: &PlatformInfo) -> Result<PlatformConfig, InitError> {
+    let name = platform.arch.as_ref().map_or_else(
+        || platform.os.clone(),
+        |arch| format!("{}-{arch}", platform.os),
+    );
+    let config = PlatformConfig::Opaque(name.clone());
+    match config.validate_host_names() {
+        Ok(()) => Ok(config),
+        Err(reason) => Err(InitError::FlutterPlatform {
+            platform: name,
+            reason,
+        }),
+    }
 }
 
 #[cfg(all(test, not(miri)))]
@@ -123,11 +214,12 @@ mod tests {
             ..ResolvedContext::default()
         };
 
-        let res = init_workspace(&ctx).unwrap();
+        let res = init_workspace(&ctx, None).unwrap();
+        assert_eq!(res.created, Some(Template::Generic));
         assert!(res.gleon_dir.exists());
         assert!(res.gleon_dir.join(".gitignore").exists());
         let expected_config = res.gleon_dir.join("gleon.yaml");
-        assert_eq!(res.config_created, Some(expected_config.clone()));
+        assert_eq!(res.config_path, expected_config);
         assert!(expected_config.exists());
 
         let gitignore = std::fs::read_to_string(res.gleon_dir.join(".gitignore")).unwrap();
@@ -155,7 +247,7 @@ mod tests {
 
         // An invalid platform fails before anything is created: a workspace without the
         // manifests directory of its platform would only fail later, less clearly.
-        let err = init_workspace(&ctx).unwrap_err();
+        let err = init_workspace(&ctx, None).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -180,7 +272,7 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let res = init_workspace(&ctx);
+        let res = init_workspace(&ctx, None);
         assert!(res.is_ok());
 
         let content = std::fs::read_to_string(gleon_dir.join(".gitignore")).unwrap();
@@ -206,7 +298,7 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let res = init_workspace(&ctx);
+        let res = init_workspace(&ctx, None);
 
         // Restore permissions before assertions
         perms.set_mode(0o755);
@@ -215,5 +307,37 @@ mod tests {
         if !can_write {
             assert!(matches!(res, Err(InitError::Core(CoreError::Io(_)))));
         }
+    }
+
+    /// A `pubspec.yaml` in the workspace root picks the Flutter template; an existing config is
+    /// kept whatever the template asked for.
+    #[test]
+    fn test_template_follows_the_pubspec_and_keeps_a_config() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(Template::detect(temp.path()), Template::Generic);
+        std::fs::write(temp.path().join("pubspec.yaml"), "name: app\n").unwrap();
+        assert_eq!(Template::detect(temp.path()), Template::Flutter);
+
+        let ctx = ResolvedContext {
+            base_dir: temp.path().to_path_buf(),
+            platform: PlatformInfo {
+                os: "linux".to_owned(),
+                arch: Some("x86_64".to_owned()),
+                renderer: Some("skia".to_owned()),
+                labels: std::collections::BTreeMap::from([("theme".to_owned(), "dark".to_owned())]),
+            },
+            ..ResolvedContext::default()
+        };
+        let res = init_workspace(&ctx, None).unwrap();
+        assert_eq!(res.created, Some(Template::Flutter));
+        let written = std::fs::read_to_string(&res.config_path).unwrap();
+        assert!(
+            written.contains("fallback_platform: linux-x86_64\n"),
+            "{written}"
+        );
+
+        let again = init_workspace(&ctx, Some(Template::Generic)).unwrap();
+        assert_eq!(again.created, None);
+        assert_eq!(std::fs::read_to_string(&res.config_path).unwrap(), written);
     }
 }

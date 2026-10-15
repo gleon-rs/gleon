@@ -497,8 +497,9 @@ pub struct GoldenImage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
     /// The platform the golden was recorded on, as the gleon chunk of its PNG names it
-    /// ([`crate::origin`]); absent for a golden without one (recorded by another tool or before
-    /// gleon 0.4.0, then taken as recorded on the `fallback_platform` of the workspace).
+    /// ([`crate::origin`]); absent for a golden without one (recorded by another tool, or by the
+    /// Flutter package before 0.4.0; then taken as recorded on the `fallback_platform` of the
+    /// workspace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformKey>,
 }

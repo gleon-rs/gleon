@@ -15,6 +15,8 @@
 //!   (`.gleon/runs/latest/cases/<platform>/<name>.json`) and the images of a failure next to it;
 //! - [`hash`]: content hashes of images (`sha256:<hex>`), shared by manifests and case reports;
 //! - [`origin`]: the platform a golden PNG was recorded on, in a chunk of the PNG;
+//! - [`workspace`]: which workspace a path belongs to (the nearest `.gleon/gleon.yaml` above
+//!   it, within its repository);
 //! - [`fs`]: atomic file writes.
 //!
 //! JSON Schemas for the config and the case report are committed under `schema/` and kept in sync
@@ -31,3 +33,4 @@ pub mod platform;
 pub mod rules;
 mod serde_skip;
 pub mod tolerance;
+pub mod workspace;

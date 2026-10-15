@@ -68,7 +68,7 @@ pub enum RuleMatch {
         name: String,
         /// The rule's tolerance.
         tolerance: Tolerance,
-        /// The rule's tolerance of text (`pixel` mode only).
+        /// The rule's tolerance of text (`text_tolerance`, any mode).
         text_tolerance: Option<crate::tolerance::TextTolerance>,
         /// Mask zones of the rule's masks whose `path` matches, in declaration order.
         masks: Vec<Zone>,
@@ -179,7 +179,7 @@ impl RuleSet {
         Ok(RuleMatch::Matched {
             index,
             name: name.to_owned(),
-            tolerance: Tolerance::from_rule(rule.mode, &rule.diff),
+            tolerance: rule.tolerance,
             text_tolerance: rule
                 .text_tolerance
                 .map(crate::tolerance::TextTolerance::without_negative_zero),
@@ -227,6 +227,7 @@ screenshots:
       - path: "**/other.png"
         zones: [{ x: 5, y: 5, width: 1, height: 1 }]
   - include: "test/**/*.png"
+    mode: pixel
     diff: { threshold: 0.02 }
 "#;
 

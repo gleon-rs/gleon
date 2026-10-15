@@ -2,6 +2,7 @@
 required_version: ">=0.1.0"
 screenshots:
   - include: "masked_app/*.png"
+    mode: pixel
     masks:
       - path: "**/*.png"
         zones:

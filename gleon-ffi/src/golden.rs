@@ -37,7 +37,7 @@ use gleon_model::{
 use crate::{
     compare::{self, Timed},
     error::{ErrorKind, Failure},
-    session::{ArtifactNames, Plan, Session, Tracking},
+    session::{ArtifactNames, Membership, Plan, Session, Tracking},
     text,
 };
 
@@ -181,8 +181,8 @@ pub fn run(session: &Session, request: &Request<'_>) -> Finished {
     finished.warn(warning)
 }
 
-/// Writes `candidate` as the golden, stamped with this platform when a rule matches the golden
-/// ([`gleon_model::origin`]), unless the golden stays ([`Call::kept`]).
+/// Writes `candidate` as the golden, stamped with this platform ([`gleon_model::origin`]) unless
+/// the workspace excludes the golden, and unless the golden stays ([`Call::kept`]).
 fn update(
     session: &Session,
     request: &Request<'_>,
@@ -200,14 +200,20 @@ fn update(
             Kept::Same => {
                 return call.finish(CaseOutcome::Updated, Details::default(), String::new);
             }
-            Kept::Passes(timed) => return judge(&call, *timed),
+            Kept::Passes(timed) => {
+                let kept = call.kept_warning();
+                return judge(&call, *timed).warn(kept);
+            }
             Kept::Replaced => {}
         }
     }
-    let stamped = plan
-        .in_workspace
-        .as_ref()
-        .and_then(|_| gleon_model::origin::stamp(candidate, PlatformKey::host()));
+    let stamped = match plan.membership {
+        // The opt-out is written like Flutter writes it.
+        Membership::Excluded => None,
+        Membership::Outside | Membership::Unmatched | Membership::Matched(_) => {
+            gleon_model::origin::stamp(candidate, PlatformKey::host())
+        }
+    };
     let written = stamped.as_deref().unwrap_or(candidate);
     match gleon_model::fs::write_atomically(path, written, Durability::Durable) {
         // After an update the golden is the (stamped) candidate.
@@ -261,8 +267,7 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
             Details {
                 images: ArtifactImages {
                     candidate: plan
-                        .in_workspace
-                        .as_ref()
+                        .in_workspace()
                         .and_then(|_| call.candidate_png())
                         .filter(|png| case::png_size(png).is_some()),
                     ..ArtifactImages::default()
@@ -334,8 +339,9 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
         }
     };
     match compared {
-        Compared::Match { metrics, regions } => call
-            .finish(
+        Compared::Match { metrics, regions } => {
+            let unknown_origin = call.unknown_origin_warning(&metrics);
+            call.finish(
                 CaseOutcome::Match,
                 Details {
                     metrics: Some(metrics),
@@ -345,7 +351,9 @@ fn judge(call: &Call<'_>, Timed { comparison, native }: Timed) -> Finished {
                 },
                 String::new,
             )
-            .warn(clamped_masks(uri, clamped)),
+            .warn(clamped_masks(uri, clamped))
+            .warn(unknown_origin)
+        }
         Compared::DimensionMismatch {
             golden,
             candidate,
@@ -407,7 +415,7 @@ struct Details<'a> {
 /// Where a golden was recorded, as far as a call knows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Origin {
-    /// Unknown: no stamp and no `fallback_platform`, or a golden no rule matches.
+    /// Unknown: no stamp and no `fallback_platform`, or a golden the workspace excludes.
     Unknown,
     /// The platform the stamp of its PNG names ([`gleon_model::origin`]).
     Stamped(PlatformKey),
@@ -416,9 +424,10 @@ enum Origin {
 }
 
 impl Origin {
-    /// The origin of the golden of `plan` with the stamp `stamp` (`None` without one).
+    /// The origin of the golden of `plan` with the stamp `stamp` (`None` without one): the stamp
+    /// counts with or without a workspace, an excluded golden has none.
     fn of(plan: &Plan, stamp: Option<&Stamp>) -> Self {
-        if plan.in_workspace.is_none() {
+        if plan.is_excluded() {
             return Self::Unknown;
         }
         if let Some(stamp) = stamp {
@@ -520,12 +529,20 @@ impl Call<'_> {
 
     /// The tolerance of text that applies, for text regions (any tolerance): the plan's, else
     /// the default of the golden ([`TextTolerance::resolve`]): text is compared on the platform
-    /// it was recorded on (and on the `fallback_platform` under `GLEON_REQUIRE_CANONICAL`).
+    /// it was recorded on (and on the `fallback_platform` under `GLEON_REQUIRE_CANONICAL`). A
+    /// golden the workspace excludes has none but the plan's: its text is pixels like the rest.
     fn text(&self) -> Option<TextTolerance> {
+        if self.request.text_regions.is_empty() {
+            return None;
+        }
+        // The opt-out compares text like Flutter does, as pixels like the rest, unless the call
+        // sets a tolerance of its own.
+        if self.plan.is_excluded() {
+            return self.plan.text;
+        }
         let is_own = self.plan.requires_canonical
             || (self.origin != Origin::Unknown && self.origin.elsewhere().is_none());
-        (!self.request.text_regions.is_empty())
-            .then(|| TextTolerance::resolve(self.plan.text, is_own))
+        Some(TextTolerance::resolve(self.plan.text, is_own))
     }
 
     /// The clause of a failure against a golden recorded on another platform; empty for any
@@ -561,9 +578,10 @@ impl Call<'_> {
 
     /// What update mode does with the existing `golden` given `candidate`: the
     /// `fallback_platform` records again what another platform recorded; otherwise the same image
-    /// is never written again, and a golden recorded on another platform stays while the candidate
-    /// passes against it as compared here (text ignored by default), so it never flips between
-    /// platforms over their glyphs.
+    /// is written again only to stamp it, and, in a workspace with a `fallback_platform`, a golden recorded
+    /// on another platform stays while the candidate passes against it as compared here (text
+    /// ignored by default), so it never flips between platforms over their glyphs. Without a
+    /// `fallback_platform` nothing could record it again, so the update wins.
     fn kept(&self, golden: &[u8], candidate: &[u8]) -> Kept {
         let canonicalizes = self.plan.tracking == Tracking::Here
             && matches!(self.origin, Origin::Stamped(_))
@@ -572,9 +590,16 @@ impl Call<'_> {
             return Kept::Replaced;
         }
         if self.is_image(golden, candidate) {
-            return Kept::Same;
+            // The same image is written again only to stamp a golden that names no platform
+            // yet (recorded by Flutter, or by the gleon package before 0.5.0) as recorded here:
+            // once per golden, and
+            // never one the workspace excludes or assumes recorded elsewhere.
+            let stamps = self.stamp.is_none()
+                && !self.plan.is_excluded()
+                && self.origin.elsewhere().is_none();
+            return if stamps { Kept::Replaced } else { Kept::Same };
         }
-        if self.origin.elsewhere().is_none() {
+        if self.origin.elsewhere().is_none() || self.plan.tracking == Tracking::Unknown {
             return Kept::Replaced;
         }
         let text = self.text().map(|tolerance| Text {
@@ -599,6 +624,31 @@ impl Call<'_> {
         } else {
             Kept::Replaced
         }
+    }
+
+    /// The warning of update mode for a golden it kept ([`Kept::Passes`]): recorded on another
+    /// platform, only the `fallback_platform` (elsewhere, or the golden would be replaced)
+    /// records it again.
+    fn kept_warning(&self) -> Option<String> {
+        match (&self.plan.tracking, self.origin.elsewhere()) {
+            (Tracking::Elsewhere(fallback), Some(origin)) => Some(text::kept_foreign(
+                self.request.golden_uri,
+                origin.as_str(),
+                fallback.as_str(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The warning (once per session) of a pass whose text differed but was not compared because
+    /// no platform is known to have recorded the golden: without it the pass hides the
+    /// difference silently. An explicit text tolerance (the call's or the rule's) is the
+    /// integration's choice, not the default's.
+    fn unknown_origin_warning(&self, metrics: &Metrics) -> Option<String> {
+        let text_differs = metrics.text().is_some_and(|text| text.diff_pixels > 0);
+        (self.origin == Origin::Unknown && self.plan.text.is_none() && text_differs)
+            .then(|| self.session.unknown_origin_warning(self.request.golden_uri))
+            .flatten()
     }
 
     /// Flutter's message for a missing golden.
@@ -676,7 +726,7 @@ impl Call<'_> {
     /// this call writes into the workspace (a failure, or any outcome with metrics); returns the
     /// warning when it cannot, since the writes themselves may still succeed.
     fn ensure_gitignore(&self, outcome: CaseOutcome) -> Option<String> {
-        let golden = self.plan.in_workspace.as_ref()?;
+        let golden = self.plan.in_workspace()?;
         if !self.records(outcome) {
             return None;
         }
@@ -694,7 +744,7 @@ impl Call<'_> {
     /// the golden stay. Like the case report, the images are a side channel: failing to update
     /// them is a warning.
     fn keep(&self, images: ArtifactImages<'_>) -> Result<Option<Artifacts>, String> {
-        let Some(golden) = &self.plan.in_workspace else {
+        let Some(golden) = self.plan.in_workspace() else {
             return Ok(None);
         };
         let platform_key = PlatformKey::host();
@@ -726,7 +776,7 @@ impl Call<'_> {
         total: Duration,
     ) -> Result<String, String> {
         let record = self.plan.record();
-        let Some(golden) = self.plan.in_workspace.as_ref() else {
+        let Some(golden) = self.plan.in_workspace() else {
             return Ok(String::new());
         };
         if !self.records(outcome) {
@@ -801,8 +851,9 @@ impl Call<'_> {
 
     /// Writes the failure artifacts (named by the integration's [`ArtifactNames`]) into the
     /// request's failures directory and returns the failure message for `reason` pointing at
-    /// them. An artifact this failure has no image for is removed, so a diff left by an earlier
-    /// mismatch never passes for this failure's.
+    /// them and at the case report (a golden a rule covers records every failure). An artifact
+    /// this failure has no image for is removed, so a diff left by an earlier mismatch never
+    /// passes for this failure's.
     fn failure(&self, reason: &str, diff_png: Option<&[u8]>) -> String {
         let Self {
             session,
@@ -836,7 +887,18 @@ impl Call<'_> {
             },
             |()| text::feedback(request.failures_dir),
         );
-        text::failure(request.golden_uri, reason, &feedback, plan.has_workspace)
+        // Absolute, like the failures directory: `flutter test` runs in a package, which need not
+        // be the workspace root (a monorepo).
+        let report = plan.in_workspace().map(|golden| {
+            CaseReport::path(
+                &golden.workspace.gleon_dir(),
+                PlatformKey::host(),
+                &golden.name,
+            )
+            .display()
+            .to_string()
+        });
+        text::failure(request.golden_uri, reason, &feedback, report.as_deref())
     }
 }
 
@@ -925,7 +987,7 @@ mod tests {
         fn new(yaml: Option<&str>) -> Self {
             let dir = tempfile::tempdir().unwrap();
             // Without the `\\?\` prefix of Windows, which takes no `/` separators.
-            let root = crate::session::canonical(dir.path()).unwrap();
+            let root = gleon_model::fs::canonical(dir.path()).unwrap();
             if let Some(yaml) = yaml {
                 fs::create_dir_all(root.join(".gleon")).unwrap();
                 fs::write(root.join(".gleon/gleon.yaml"), yaml).unwrap();
@@ -1093,6 +1155,7 @@ required_version: ">=0.1.0"
 exclude: "test/goldens/a.png"
 screenshots:
   - include: "test/goldens/*.png"
+    mode: exact
 "#;
 
     #[test]
@@ -1118,8 +1181,8 @@ screenshots:
             format!(
                 "Golden \"goldens/a.png\": 6.25% (1 of 16px) differ (gleon exact).\n\
                  Failure feedback can be found at {}\n\
-                 Tip: tolerances can be set per golden in .gleon/gleon.yaml, the same file as \
-                 the gleon CLI.",
+                 Tip: tolerances per golden and the platform that compares text live in \
+                 .gleon/gleon.yaml, the file of the gleon CLI (see the package README).",
                 fixture.failures
             )
         );
@@ -1701,6 +1764,181 @@ screenshots:
         );
     }
 
+    /// Without a workspace, text follows the stamp of the golden alone: an update stamps it,
+    /// then its text is compared here and ignored elsewhere, and nothing is recorded.
+    #[test]
+    fn test_text_follows_the_stamp_without_a_workspace() {
+        let images = TextImages::new();
+        let fixture = Fixture::new(None);
+        fs::write(&fixture.golden, images.png()).unwrap();
+        let session = fixture.session(None);
+
+        let updated = fixture.update_with_text(&session, &images.golden, images.regions.clone());
+        assert_eq!(updated.verdict, Verdict::Updated, "{}", updated.message);
+        assert_eq!(fixture.golden_origin().as_ref(), Some(PlatformKey::host()));
+        let noise =
+            fixture.compare_raw(&session, &images.noise, None, images.regions.clone(), None);
+        assert_eq!(noise.verdict, Verdict::Match, "{}", noise.message);
+        let glyph =
+            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
+        assert_eq!(
+            glyph.verdict,
+            Verdict::Mismatch,
+            "recorded here: {}",
+            glyph.message
+        );
+        assert!(
+            glyph.message.contains("text ≤ 5.00% per tile).\n"),
+            "{}",
+            glyph.message
+        );
+        assert!(glyph.warning.is_empty(), "{}", glyph.warning);
+        assert!(!fixture.root.join(".gleon").exists(), "nothing recorded");
+
+        fixture.stamp_golden(foreign_platform());
+        let glyph =
+            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
+        assert_eq!(
+            glyph.verdict,
+            Verdict::Match,
+            "elsewhere: {}",
+            glyph.message
+        );
+        assert!(glyph.warning.is_empty(), "{}", glyph.warning);
+        let outside = fixture.compare_raw(
+            &session,
+            &images.outside,
+            None,
+            images.regions.clone(),
+            None,
+        );
+        assert_eq!(outside.verdict, Verdict::Mismatch);
+        assert!(
+            outside.message.contains(&format!(
+                "(gleon exact, text ignored). The golden was recorded on {}.\n",
+                foreign_platform()
+            )),
+            "{}",
+            outside.message
+        );
+        assert!(outside.message.contains("\nTip: tolerances per golden"));
+    }
+
+    /// Without a `fallback_platform` nothing could record a golden again, so update mode writes
+    /// over a golden recorded elsewhere even when only its text differs, with or without a
+    /// workspace.
+    #[test]
+    fn test_without_a_fallback_platform_an_update_replaces_a_foreign_golden() {
+        let images = TextImages::new();
+        for fixture in [images.fixture_without_fallback(), Fixture::new(None)] {
+            fs::write(&fixture.golden, images.png()).unwrap();
+            fixture.stamp_golden(foreign_platform());
+            let session = fixture.session(None);
+            let same = fixture.update_with_text(&session, &images.golden, images.regions.clone());
+            assert_eq!(same.verdict, Verdict::Updated, "{}", same.message);
+            assert_eq!(
+                fixture.golden_origin().map(|key| key.to_string()),
+                Some(foreign_platform().to_owned()),
+                "the same image is never written again"
+            );
+            let glyph = fixture.update_with_text(&session, &images.glyph, images.regions.clone());
+            assert_eq!(glyph.verdict, Verdict::Updated, "{}", glyph.message);
+            assert!(glyph.warning.is_empty(), "{}", glyph.warning);
+            assert_eq!(
+                fs::read(&fixture.golden).unwrap(),
+                stamped_here(&images.glyph)
+            );
+        }
+    }
+
+    /// A golden update mode keeps (recorded elsewhere, the candidate passes against it) says so
+    /// and names the `fallback_platform` that records it again.
+    #[test]
+    fn test_a_kept_golden_warns_how_to_record_it_again() {
+        let images = TextImages::new();
+        let fixture = images.fixture(foreign_platform());
+        let session = fixture.session(None);
+        let glyph = fixture.update_with_text(&session, &images.glyph, images.regions.clone());
+        assert_eq!(glyph.verdict, Verdict::Match, "{}", glyph.message);
+        assert_eq!(
+            glyph.warning,
+            text::kept_foreign("goldens/a.png", foreign_platform(), foreign_platform())
+        );
+        assert_eq!(fs::read(&fixture.golden).unwrap(), images.png(), "kept");
+    }
+
+    /// A pass that ignored text because no platform is known to have recorded the golden says
+    /// so once per session, only when the text differed: a pass that hides nothing stays quiet.
+    #[test]
+    fn test_a_pass_with_unknown_origin_warns_once_when_text_differs() {
+        let images = TextImages::new();
+        let fixture = Fixture::new(None);
+        fs::write(&fixture.golden, images.png()).unwrap();
+        let session = fixture.session(None);
+
+        let outside = fixture.compare_raw(
+            &session,
+            &images.outside,
+            None,
+            images.regions.clone(),
+            None,
+        );
+        assert_eq!(outside.verdict, Verdict::Mismatch);
+        assert!(outside.warning.is_empty(), "{}", outside.warning);
+        let same =
+            fixture.compare_raw(&session, &images.golden, None, images.regions.clone(), None);
+        assert_eq!(same.verdict, Verdict::Match, "{}", same.message);
+        assert!(
+            same.warning.is_empty(),
+            "the text is the same: {}",
+            same.warning
+        );
+
+        let glyph =
+            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
+        assert_eq!(glyph.verdict, Verdict::Match, "{}", glyph.message);
+        assert_eq!(glyph.warning, text::unknown_origin("goldens/a.png"));
+        let again =
+            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
+        assert!(
+            again.warning.is_empty(),
+            "once per session: {}",
+            again.warning
+        );
+
+        // An explicit text tolerance is the integration's choice: no warning.
+        let chosen = fixture.compare_raw(
+            &fixture.session(None),
+            &images.glyph,
+            None,
+            images.regions.clone(),
+            Some(TextTolerance::DEFAULT),
+        );
+        assert_eq!(chosen.verdict, Verdict::Match, "{}", chosen.message);
+        assert!(chosen.warning.is_empty(), "{}", chosen.warning);
+    }
+
+    /// A failure of a golden a rule covers names its case report (by its absolute path), which
+    /// the CLI reads, instead of the tip about `.gleon/gleon.yaml`.
+    #[test]
+    fn test_a_failure_in_a_workspace_names_its_case_report() {
+        let fixture = Fixture::new(Some(RULE_WITHOUT_METRICS));
+        let finished = fixture.run(&fixture.session(None), Mode::Compare, &png(4, 4, true));
+        assert_eq!(finished.verdict, Verdict::Mismatch);
+        // Absolute: `flutter test` runs in a package, not always the workspace root.
+        assert!(
+            finished.message.ends_with(&format!(
+                "\nCase report: {} (the gleon CLI turns the reports of a run into one: `gleon \
+                 report html`).",
+                fixture.case_path().display()
+            )),
+            "{}",
+            finished.message
+        );
+        assert!(!finished.message.contains("Tip:"), "{}", finished.message);
+        assert!(fixture.case_path().is_file());
+    }
+
     /// The bytes of a stamped golden are identical to it, stamp included: compared and updated
     /// like the image without the stamp, never decoded nor written again.
     #[test]
@@ -1971,16 +2209,62 @@ screenshots:
         );
     }
 
-    /// A golden no rule matches is written like Flutter writes it: never stamped.
+    /// Every golden gleon writes names its platform, with or without a workspace or a rule; only
+    /// a golden the workspace excludes is written like Flutter writes it (the opt-out).
     #[test]
-    fn test_goldens_without_a_rule_are_not_stamped() {
+    fn test_goldens_are_stamped_unless_excluded() {
         let candidate = png(4, 4, true);
-        for fixture in [Fixture::new(None), Fixture::new(Some(EXCLUDING))] {
+        for fixture in [Fixture::new(None), Fixture::new(Some(UNMATCHED))] {
             let finished = fixture.run(&fixture.session(None), Mode::Update, &candidate);
             assert_eq!(finished.verdict, Verdict::Updated, "{}", finished.message);
-            assert_eq!(fs::read(&fixture.golden).unwrap(), candidate);
+            let written = fs::read(&fixture.golden).unwrap();
+            assert_eq!(
+                gleon_model::origin::read(&written).as_ref(),
+                Some(PlatformKey::host())
+            );
+            assert!(
+                !fixture.root.join(".gleon/runs").exists(),
+                "nothing recorded"
+            );
         }
+        let fixture = Fixture::new(Some(EXCLUDING));
+        let finished = fixture.run(&fixture.session(None), Mode::Update, &candidate);
+        assert_eq!(finished.verdict, Verdict::Updated, "{}", finished.message);
+        assert_eq!(fs::read(&fixture.golden).unwrap(), candidate);
     }
+
+    /// A golden the workspace excludes compares like Flutter compares it: its text is pixels like
+    /// the rest (a changed glyph fails on every platform) unless the call sets a text tolerance,
+    /// and it draws no warning about an origin it never gets.
+    #[test]
+    fn test_an_excluded_golden_compares_its_text_like_flutter() {
+        let images = TextImages::new();
+        let fixture = Fixture::new(Some(EXCLUDING));
+        fs::write(&fixture.golden, images.png()).unwrap();
+        let session = fixture.session(None);
+
+        let glyph =
+            fixture.compare_raw(&session, &images.glyph, None, images.regions.clone(), None);
+        assert_eq!(glyph.verdict, Verdict::Mismatch, "{}", glyph.message);
+        assert!(glyph.warning.is_empty(), "{}", glyph.warning);
+        let chosen = fixture.compare_raw(
+            &session,
+            &images.glyph,
+            None,
+            images.regions.clone(),
+            Some(TextTolerance(1.0)),
+        );
+        assert_eq!(chosen.verdict, Verdict::Match, "{}", chosen.message);
+        assert!(chosen.warning.is_empty(), "{}", chosen.warning);
+    }
+
+    /// A workspace whose rules do not match the golden.
+    const UNMATCHED: &str = r#"
+required_version: ">=0.1.0"
+screenshots:
+  - include: "other/*.png"
+    mode: exact
+"#;
 
     #[test]
     fn test_update_mode_takes_a_png() {
@@ -1999,7 +2283,7 @@ screenshots:
 required_version: ">=0.1.0"
 screenshots:
   - include: "test/goldens/*.png"
-    diff: { threshold: 0 }
+    mode: exact
 "#;
 
     #[test]
@@ -2135,7 +2419,7 @@ screenshots:
         );
 
         let unmatched = Fixture::new(Some(
-            "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"other/*.png\" }]",
+            "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"other/*.png\", mode: exact }]",
         ));
         let finished = unmatched.run(&unmatched.session(None), Mode::Compare, &png(4, 4, true));
         assert_eq!(finished.verdict, Verdict::Mismatch);
@@ -2766,6 +3050,8 @@ metrics:
         use std::os::unix::fs::PermissionsExt as _;
 
         let fixture = Fixture::new(None);
+        // Stamped already: an unstamped golden is written once more to stamp it.
+        fixture.stamp_golden(PlatformKey::host().as_str());
         let dir = fixture.golden.parent().unwrap().to_path_buf();
         // A read-only directory: any rewrite would fail to create its temporary file.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();

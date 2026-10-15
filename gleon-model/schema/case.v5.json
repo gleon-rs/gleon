@@ -378,7 +378,7 @@
           "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
         },
         "platform": {
-          "description": "The platform the golden was recorded on, as the gleon chunk of its PNG names it\n([`crate::origin`]); absent for a golden without one (recorded by another tool or before\ngleon 0.4.0, then taken as recorded on the `fallback_platform` of the workspace).",
+          "description": "The platform the golden was recorded on, as the gleon chunk of its PNG names it\n([`crate::origin`]); absent for a golden without one (recorded by another tool, or by the\nFlutter package before 0.4.0; then taken as recorded on the `fallback_platform` of the\nworkspace).",
           "anyOf": [
             {
               "$ref": "#/$defs/PlatformKey"

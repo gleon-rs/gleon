@@ -206,7 +206,7 @@ mod tests {
         assert!(env_of(&outside, RUN_ID_ENV).is_some());
         assert!(!temp.path().join(".gleon").exists());
 
-        gleon_core::ops::init_workspace(&ctx).unwrap();
+        gleon_core::ops::init_workspace(&ctx, None).unwrap();
         let (program, child) = prepare(&ctx, &Env, &command).unwrap();
         assert_eq!(program, "flutter");
         assert_eq!(child.get_args().collect::<Vec<_>>(), ["test"]);
@@ -246,7 +246,7 @@ mod tests {
         )
         .unwrap();
         let run_file = temp.path().join(".gleon/runs/latest/run.json");
-        gleon_core::ops::init_workspace(&ctx).unwrap();
+        gleon_core::ops::init_workspace(&ctx, None).unwrap();
         assert_eq!(run_test(&ctx, &Env, &[]), i32::from(ExitCode::Failure));
         assert!(!run_file.exists());
     }

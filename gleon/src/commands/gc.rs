@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(exit_code_uninit, ExitCode::Failure);
 
         // 2. Initialized + Local Mode (no storage) -> Success
-        gleon_core::ops::init_workspace(&ctx).unwrap();
+        gleon_core::ops::init_workspace(&ctx, None).unwrap();
         let exit_code_local = run_gc(&ctx, None, false, 24, false).await;
         assert_eq!(exit_code_local, ExitCode::Success);
 
@@ -155,7 +155,7 @@ mod tests {
     async fn test_run_gc_with_orphan_blobs_dry_run_and_execution() {
         let temp = tempdir().unwrap();
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
-        gleon_core::ops::init_workspace(&ctx).unwrap();
+        gleon_core::ops::init_workspace(&ctx, None).unwrap();
 
         let remote_temp = tempdir().unwrap();
         let remote_store_path = remote_temp.path();

@@ -1,6 +1,7 @@
 //! CLI Argument parser definition for gleon.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use gleon_core::ops::Template;
 
 /// The formats of `gleon report`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -155,11 +156,37 @@ fn parse_label(s: &str) -> Result<(String, String), String> {
         })
 }
 
+/// The options of `gleon init`.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct InitArgs {
+    /// Write the Flutter template whether or not a pubspec.yaml is present
+    #[arg(long, conflicts_with = "generic")]
+    flutter: bool,
+    /// Write the generic template (every .png, pixel mode) even next to a pubspec.yaml
+    #[arg(long)]
+    generic: bool,
+}
+
+impl InitArgs {
+    /// The template the flags ask for; `None` lets `gleon init` pick it by the `pubspec.yaml`.
+    pub const fn template(&self) -> Option<Template> {
+        if self.flutter {
+            Some(Template::Flutter)
+        } else if self.generic {
+            Some(Template::Generic)
+        } else {
+            None
+        }
+    }
+}
+
 /// The available subcommands in gleon.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Commands {
-    /// Initialize gleon directory structure and default configuration
-    Init,
+    /// Initialize gleon directory structure and default configuration (a Flutter template when
+    /// the directory has a pubspec.yaml: goldens under every test/ compared exactly, text on this
+    /// platform)
+    Init(InitArgs),
     /// Print resolved configuration and active status
     Status {
         /// Format output as JSON

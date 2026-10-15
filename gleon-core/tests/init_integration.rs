@@ -28,10 +28,11 @@ fn test_init_workspace_creates_real_structure_and_valid_config() {
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-    let result = init_workspace(&ctx).expect("init_workspace should succeed");
+    let result = init_workspace(&ctx, None).expect("init_workspace should succeed");
 
     assert_eq!(result.gleon_dir, base_path.join(".gleon"));
-    let config_path = result.config_created.expect("gleon.yaml should be created");
+    assert_eq!(result.created, Some(gleon_core::ops::Template::Generic));
+    let config_path = result.config_path;
     assert_eq!(config_path, base_path.join(".gleon").join("gleon.yaml"));
 
     // Verify directory structure exists on disk
@@ -56,9 +57,9 @@ fn test_init_workspace_idempotent_preserves_custom_config() {
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-    let result = init_workspace(&ctx).expect("Second init should succeed");
+    let result = init_workspace(&ctx, None).expect("Second init should succeed");
 
-    assert_eq!(result.config_created, None);
+    assert_eq!(result.created, None, "an existing config is kept");
     let loaded_config = GleonConfig::load_from_file(&config_path).unwrap();
     assert_eq!(
         loaded_config.screenshots[0].include[0].as_str(),
@@ -80,7 +81,7 @@ fn test_init_workspace_honors_cli_overrides() {
     };
     let ctx = ResolvedContext::from_options(&options, base_path).unwrap();
 
-    init_workspace(&ctx).expect("init_workspace should succeed");
+    init_workspace(&ctx, None).expect("init_workspace should succeed");
 
     let platform_key = ctx.platform.key().unwrap();
     assert_eq!(platform_key, "android-arm+theme=dark");
@@ -105,7 +106,7 @@ fn test_gitignore_append_no_newline() {
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let content = fs::read_to_string(&gitignore_path).unwrap();
     assert!(content.contains("node_modules\nblobs/\n"));
@@ -123,7 +124,7 @@ fn test_env_template_already_exists() {
 
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     // The .gleon/.env.template shouldn't be overwritten
     let content = fs::read_to_string(&env_template_path).unwrap();

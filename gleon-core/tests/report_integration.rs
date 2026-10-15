@@ -120,7 +120,7 @@ fn test_reports_and_approval_of_a_real_flutter_failure() {
         run.join("artifacts/macos-aarch64/test/goldens/counter_three_taps/candidate.png");
     let root = temp.path().join("app");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let cases = Cases::load(&run, None).unwrap();
     assert!(cases.warnings().is_empty(), "{:?}", cases.warnings());
@@ -185,7 +185,7 @@ fn test_a_run_on_another_platform_than_the_fallback() {
     copy_run(&fixtures().join("cases/flutter-macos-fallback"), &run);
     let root = temp.path().join("app");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let cases = Cases::load(&run, None).unwrap();
     assert_eq!(cases.run_id().unwrap().as_str(), "fallback-fixture-1");
@@ -225,7 +225,7 @@ fn test_reports_of_a_failing_diff_run_link_existing_images() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
     common::copy_config(root, "ssim_and_exact");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
     fs::create_dir_all(root.join("shots")).unwrap();
@@ -423,7 +423,7 @@ fn test_approve_writes_the_goldens_of_the_fallback_platform_only() {
     let root = temp.path().join("app");
     common::copy_config(&root, "macos_fallback");
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &root).unwrap();
-    init_workspace(&ctx).unwrap();
+    init_workspace(&ctx, None).unwrap();
 
     let approved = approve_workspace(&ctx, &[], std::slice::from_ref(&run), None).unwrap();
     assert_eq!(

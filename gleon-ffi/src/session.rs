@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     io,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -19,9 +19,11 @@ use gleon_model::{
     config::{
         ArtifactsDir, GITIGNORE_LINES, GleonConfig, MetricsConfig, REQUIRE_CANONICAL_ENV, env_flag,
     },
+    fs::{canonical, same_component},
     platform::PlatformKey,
     rules::{RuleMatch, RuleSet},
     tolerance::{TextTolerance, Tolerance},
+    workspace,
 };
 
 use crate::{error::Failure, text};
@@ -41,6 +43,9 @@ pub struct SessionOptions {
     pub run_id_env: Option<String>,
     /// Raw `GLEON_REQUIRE_CANONICAL` value, `None` when unset.
     pub require_canonical_env: Option<String>,
+    /// The home directory of the user (`HOME`, `USERPROFILE`), which is never a workspace root
+    /// (see [`gleon_model::workspace`]); `None` when unknown.
+    pub home: Option<PathBuf>,
     /// Who calls.
     pub integration: Integration,
 }
@@ -130,7 +135,7 @@ struct Compiled {
 /// again what other platforms recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tracking {
-    /// No `fallback_platform`, or a golden no rule matches.
+    /// No `fallback_platform`, no workspace, or a golden the workspace excludes.
     Unknown,
     /// This platform is the `fallback_platform`.
     Here,
@@ -253,41 +258,6 @@ fn compile(text: &str, artifacts_env: Option<&ArtifactsDir>) -> Result<Arc<Compi
     }))
 }
 
-#[cfg(not(windows))]
-fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
-    a == b
-}
-
-/// Windows paths are case-insensitive (the CLI folds case for names too). Both sides come from
-/// `canonicalize`, so they almost always match as they are; only a mismatch pays for folding.
-#[cfg(windows)]
-fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
-    a == b
-        || a.as_os_str().to_string_lossy().to_lowercase()
-            == b.as_os_str().to_string_lossy().to_lowercase()
-}
-
-/// `path` absolute with symbolic links resolved.
-#[cfg(not(windows))]
-pub fn canonical(path: &Path) -> io::Result<PathBuf> {
-    std::fs::canonicalize(path)
-}
-
-/// `path` absolute with symbolic links resolved, without the `\\?\` verbatim prefix of
-/// `canonicalize` (which Dart never shows).
-#[cfg(windows)]
-pub fn canonical(path: &Path) -> io::Result<PathBuf> {
-    let resolved = std::fs::canonicalize(path)?;
-    let text = resolved.to_string_lossy();
-    Ok(text.strip_prefix(r"\\?\UNC\").map_or_else(
-        || {
-            text.strip_prefix(r"\\?\")
-                .map_or_else(|| resolved.clone(), PathBuf::from)
-        },
-        |share| PathBuf::from(format!(r"\\{share}")),
-    ))
-}
-
 /// [`canonical`] of a file that may not exist yet: its nearest existing ancestor resolved, the
 /// missing components kept as they are.
 fn canonical_file(path: &Path) -> io::Result<PathBuf> {
@@ -308,23 +278,6 @@ fn canonical_file(path: &Path) -> io::Result<PathBuf> {
                     .rev()
                     .fold(resolved?, |dir, name| dir.join(name)));
             }
-        }
-    }
-}
-
-/// Walks up from `dir` (inclusive) to the first directory with a `.gleon/gleon.yaml` file.
-fn find_root(mut dir: PathBuf) -> Option<PathBuf> {
-    loop {
-        dir.push(".gleon");
-        dir.push("gleon.yaml");
-        let found = dir.is_file();
-        dir.pop();
-        dir.pop();
-        if found {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            return None;
         }
     }
 }
@@ -352,9 +305,12 @@ pub struct Session {
     pub run_id: Option<RunId>,
     /// `GLEON_REQUIRE_CANONICAL`: the `fallback_platform` compares every golden as its own.
     require_canonical: bool,
+    /// The home directory (resolved), never a workspace root.
+    home: Option<PathBuf>,
     /// Who calls.
     pub integration: Integration,
     warned: AtomicBool,
+    warned_origin: AtomicBool,
 }
 
 /// What one comparison uses and whether it records a case report.
@@ -372,17 +328,43 @@ pub struct Plan {
     /// Whether this platform, the `fallback_platform`, compares every golden as its own
     /// (`GLEON_REQUIRE_CANONICAL`), wherever it was recorded.
     pub requires_canonical: bool,
-    /// Whether the golden belongs to a workspace (failure messages point at `.gleon/gleon.yaml`
-    /// otherwise).
-    pub has_workspace: bool,
-    /// The golden inside its workspace, when a rule of the workspace matches it.
-    pub in_workspace: Option<InWorkspace>,
+    /// What the workspace of the golden makes of it.
+    pub membership: Membership,
+}
+
+/// What the workspace of a golden makes of it.
+#[derive(Debug)]
+pub enum Membership {
+    /// No workspace (none found, or the integration finds none): compared like without the
+    /// config, stamped, its origin read from its stamp alone.
+    Outside,
+    /// The workspace excludes it (`exclude`, a pruned directory): the one opt-out, compared and
+    /// written like Flutter does (no stamp, no origin, text compared as pixels).
+    Excluded,
+    /// In a workspace that has no rule for it: compared exactly unless the call says otherwise,
+    /// stamped and tracked on the `fallback_platform`, recorded nowhere.
+    Unmatched,
+    /// Matched by a rule: where its images and case report go.
+    Matched(InWorkspace),
 }
 
 impl Plan {
+    /// The golden inside its workspace, when a rule of the workspace matches it.
+    pub const fn in_workspace(&self) -> Option<&InWorkspace> {
+        match &self.membership {
+            Membership::Matched(golden) => Some(golden),
+            Membership::Outside | Membership::Excluded | Membership::Unmatched => None,
+        }
+    }
+
+    /// Whether the workspace excludes the golden ([`Membership::Excluded`]).
+    pub const fn is_excluded(&self) -> bool {
+        matches!(self.membership, Membership::Excluded)
+    }
+
     /// How to record the case report, when metrics are on.
     pub fn record(&self) -> Option<Record> {
-        self.in_workspace.as_ref().and_then(|golden| golden.record)
+        self.in_workspace().and_then(|golden| golden.record)
     }
 }
 
@@ -417,6 +399,18 @@ struct Rule {
     golden: InWorkspace,
 }
 
+/// What the workspace of a golden says about it, with where its regressions are tracked.
+enum Resolution {
+    /// See [`Membership::Outside`].
+    Outside,
+    /// See [`Membership::Excluded`].
+    Excluded,
+    /// See [`Membership::Unmatched`].
+    Unmatched(Tracking),
+    /// See [`Membership::Matched`].
+    Matched(Tracking, Rule),
+}
+
 impl Session {
     /// Creates a session; an invalid environment override fails every call.
     #[must_use]
@@ -448,8 +442,14 @@ impl Session {
             artifacts_override: artifacts_override.unwrap_or_default(),
             run_id: run_id.unwrap_or_default(),
             require_canonical: require_canonical.ok().flatten().unwrap_or_default(),
+            // Resolved like the goldens' paths, so a home behind a symbolic link is recognized.
+            home: options
+                .home
+                .as_deref()
+                .and_then(|home| workspace::home(home.as_os_str())),
             integration: options.integration,
             warned: AtomicBool::new(false),
+            warned_origin: AtomicBool::new(false),
         }
     }
 
@@ -472,20 +472,28 @@ impl Session {
     /// of `plan` has no workspace to record them in.
     pub fn missing_workspace_warning(&self, plan: &Plan) -> Option<&'static str> {
         (self.metrics_override == Some(true)
-            && !plan.has_workspace
+            && matches!(plan.membership, Membership::Outside)
             && !self.warned.swap(true, Ordering::Relaxed))
         .then_some(text::MISSING_WORKSPACE_WARNING)
     }
 
+    /// The warning, returned once per session, for a golden whose text differed but was not
+    /// compared because no platform is known to have recorded it.
+    pub fn unknown_origin_warning(&self, golden_uri: &str) -> Option<String> {
+        (!self.warned_origin.swap(true, Ordering::Relaxed))
+            .then(|| text::unknown_origin(golden_uri))
+    }
+
     /// The workspace of the canonical `golden` (which may be missing): the nearest directory
-    /// above it with `.gleon/gleon.yaml`, looked up once per directory.
+    /// above it with `.gleon/gleon.yaml` within its repository ([`gleon_model::workspace`]),
+    /// looked up once per directory.
     fn workspace_of(&self, golden: &Path) -> Option<Arc<Workspace>> {
         let dir = golden.parent()?.to_path_buf();
         if let Some(known) = self.lock().by_dir.get(&dir) {
             return known.clone();
         }
         // Walked outside the lock; a concurrent lookup of the same directory finds the same.
-        let root = find_root(dir.clone());
+        let root = workspace::find_root(&dir, self.home.as_deref(), workspace::has_config);
         let mut workspaces = self.lock();
         let workspace = root.map(|root| {
             workspaces
@@ -536,22 +544,26 @@ impl Session {
         let workspace = canonical
             .as_deref()
             .and_then(|canonical| Some((self.workspace_of(canonical)?, canonical)));
-        let has_workspace = workspace.is_some();
-        let (tracking, rule) = match workspace {
-            Some((workspace, canonical)) => self.rule(workspace, canonical)?,
-            None => (Tracking::Unknown, None),
+        let resolution = match workspace {
+            Some((workspace, canonical)) => self.resolve(workspace, canonical)?,
+            None => Resolution::Outside,
         };
-        let (rule_tolerance, rule_text, in_workspace) = match rule {
-            Some(Rule {
-                tolerance,
-                text,
-                masks: rule_masks,
-                golden,
-            }) => {
+        let (tracking, membership, rule_tolerance, rule_text) = match resolution {
+            Resolution::Outside => (Tracking::Unknown, Membership::Outside, None, None),
+            Resolution::Excluded => (Tracking::Unknown, Membership::Excluded, None, None),
+            Resolution::Unmatched(tracking) => (tracking, Membership::Unmatched, None, None),
+            Resolution::Matched(
+                tracking,
+                Rule {
+                    tolerance,
+                    text,
+                    masks: rule_masks,
+                    golden,
+                },
+            ) => {
                 masks.extend(rule_masks);
-                (Some(tolerance), text, Some(golden))
+                (tracking, Membership::Matched(golden), Some(tolerance), text)
             }
-            None => (None, None, None),
         };
         Ok(Plan {
             tolerance: tolerance.or(rule_tolerance).unwrap_or(Tolerance::Exact {}),
@@ -559,21 +571,16 @@ impl Session {
             text: text.or(rule_text),
             requires_canonical: self.require_canonical && tracking == Tracking::Here,
             tracking,
-            has_workspace,
-            in_workspace,
+            membership,
         })
     }
 
-    /// Where the golden `canonical` (resolved) in `workspace` is tracked, and its rule; `None`
-    /// outside the workspace or when no rule applies. Only a golden a rule matches is tracked on
-    /// the `fallback_platform`.
-    fn rule(
-        &self,
-        workspace: Arc<Workspace>,
-        canonical: &Path,
-    ) -> Result<(Tracking, Option<Rule>), Failure> {
+    /// What `workspace` says about the golden `canonical` (resolved) in it: every golden of the
+    /// workspace but an excluded one is tracked on its `fallback_platform`, with or without a
+    /// rule.
+    fn resolve(&self, workspace: Arc<Workspace>, canonical: &Path) -> Result<Resolution, Failure> {
         let Some(golden_path) = workspace.relative_path(canonical) else {
-            return Ok((Tracking::Unknown, None));
+            return Ok(Resolution::Outside);
         };
         let config_error = |message: String| {
             Failure::config(text::config_error(&workspace.config_display(), &message))
@@ -581,20 +588,21 @@ impl Session {
         let compiled = workspace
             .compiled(self.artifacts_override.as_ref())
             .map_err(config_error)?;
-        let RuleMatch::Matched {
-            name,
-            tolerance,
-            text_tolerance: text,
-            masks,
-            ..
-        } = compiled
+        let (name, tolerance, text, masks) = match compiled
             .rules
             .resolve(&golden_path)
             .map_err(|e| config_error(e.to_string()))?
-        else {
-            // Excluded or unmatched: compared like without the file, one golden for every
-            // platform.
-            return Ok((Tracking::Unknown, None));
+        {
+            RuleMatch::Matched {
+                name,
+                tolerance,
+                text_tolerance,
+                masks,
+                ..
+            } => (name, tolerance, text_tolerance, masks),
+            RuleMatch::Excluded => return Ok(Resolution::Excluded),
+            // A workspace may name only its `fallback_platform`.
+            RuleMatch::Unmatched => return Ok(Resolution::Unmatched(compiled.tracking.clone())),
         };
         let is_recorded = self.metrics_override.unwrap_or(compiled.metrics.enabled);
         let rule = Rule {
@@ -611,7 +619,7 @@ impl Session {
                 }),
             },
         };
-        Ok((compiled.tracking.clone(), Some(rule)))
+        Ok(Resolution::Matched(compiled.tracking.clone(), rule))
     }
 }
 
@@ -668,6 +676,14 @@ metrics:
         })
     }
 
+    /// The golden of a plan a rule matched.
+    fn matched(plan: Plan) -> InWorkspace {
+        match plan.membership {
+            Membership::Matched(golden) => golden,
+            other => panic!("no rule matched: {other:?}"),
+        }
+    }
+
     fn pixel_mask(x: u32) -> Zone {
         Zone {
             x,
@@ -694,8 +710,7 @@ metrics:
         );
         assert_eq!(plan.masks.len(), 2, "the call's masks, then the rule's");
         assert_eq!(plan.masks[0], pixel_mask(5));
-        assert!(plan.has_workspace);
-        let golden_in = plan.in_workspace.as_ref().unwrap();
+        let golden_in = plan.in_workspace().unwrap();
         assert_eq!(golden_in.name, "test/goldens/clock");
         assert_eq!(golden_in.golden_path, "test/goldens/Clock.png");
         assert_eq!(golden_in.record, Some(Record { console: false }));
@@ -720,15 +735,12 @@ metrics:
         let plan = session
             .plan(&root.join("test/goldens/new.png"), None, vec![], None)
             .unwrap();
-        assert_eq!(
-            plan.in_workspace.unwrap().golden_path,
-            "test/goldens/new.png"
-        );
+        assert_eq!(matched(plan).golden_path, "test/goldens/new.png");
         let plan = session
             .plan(&root.join("test/gone/new.png"), None, vec![], None)
             .unwrap();
         assert!(
-            plan.in_workspace.is_none(),
+            plan.in_workspace().is_none(),
             "a missing directory is outside"
         );
     }
@@ -766,11 +778,11 @@ metrics:
         let (_dir, root) = workspace(YAML, "Clock.png");
         let other = tempfile::tempdir().unwrap();
         let golden = other.path().join("Clock.png");
-        let rule = session(None).rule(
+        let resolution = session(None).resolve(
             Arc::new(Workspace::new(root)),
             &canonical_file(&golden).unwrap(),
         );
-        assert!(matches!(rule, Ok((Tracking::Unknown, None))));
+        assert!(matches!(resolution, Ok(Resolution::Outside)));
     }
 
     /// Only the CLI enforces `required_version`: an integration plans with a config that asks
@@ -782,7 +794,7 @@ metrics:
         let plan = session(None)
             .plan(&root.join("test/goldens/a.png"), None, vec![], None)
             .unwrap();
-        assert!(plan.in_workspace.is_some(), "the rule applies");
+        assert!(plan.in_workspace().is_some(), "the rule applies");
     }
 
     #[test]
@@ -794,11 +806,11 @@ metrics:
             .unwrap();
         assert!(plan.record().is_none());
         assert!(
-            plan.in_workspace.is_some(),
+            plan.in_workspace().is_some(),
             "images are kept without metrics"
         );
         let (_off, off_root) = workspace(
-            "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"**/*.png\" }]",
+            "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"**/*.png\", mode: exact }]",
             "a.png",
         );
         let session = session(Some("TRUE"));
@@ -870,7 +882,7 @@ metrics:
         let plan = session(Some("0"))
             .plan(&golden, None, vec![], None)
             .unwrap();
-        let golden_in = plan.in_workspace.unwrap();
+        let golden_in = matched(plan);
         assert_eq!(
             (golden_in.artifacts.as_str(), golden_in.name.as_str()),
             (".gleon/runs/shots", "test/goldens/a")
@@ -881,10 +893,7 @@ metrics:
             ..SessionOptions::default()
         });
         let plan = overridden.plan(&golden, None, vec![], None).unwrap();
-        assert_eq!(
-            plan.in_workspace.unwrap().artifacts.as_str(),
-            ".gleon/runs/ram"
-        );
+        assert_eq!(matched(plan).artifacts.as_str(), ".gleon/runs/ram");
     }
 
     #[test]
@@ -893,14 +902,21 @@ metrics:
         fs::write(root.join("lib.png"), b"").unwrap();
         let outside = tempfile::NamedTempFile::new().unwrap();
         let session = session(None);
-        for (golden, has_workspace) in [
+        for (golden, is_inside) in [
             (root.join("lib.png"), true),
             (outside.path().to_path_buf(), false),
         ] {
             let plan = session.plan(&golden, None, vec![], None).unwrap();
             assert_eq!(plan.tolerance, Tolerance::Exact {});
-            assert_eq!(plan.has_workspace, has_workspace);
-            assert!(plan.in_workspace.is_none());
+            assert!(
+                if is_inside {
+                    matches!(plan.membership, Membership::Unmatched)
+                } else {
+                    matches!(plan.membership, Membership::Outside)
+                },
+                "{:?}",
+                plan.membership
+            );
         }
     }
 
@@ -919,7 +935,11 @@ metrics:
                 .plan(&golden, None, vec![pixel_mask(1)], None)
                 .unwrap();
             assert_eq!((plan.tolerance, plan.masks.len()), (Tolerance::Exact {}, 1));
-            assert!(!plan.has_workspace, "{}", golden.display());
+            assert!(
+                matches!(plan.membership, Membership::Outside),
+                "{}",
+                golden.display()
+            );
         }
     }
 
@@ -929,13 +949,7 @@ metrics:
         let (_two, second) = workspace(YAML, "b.png");
         fs::create_dir_all(first.join("test/goldens/deep")).unwrap();
         let session = session(None);
-        let record = |golden: PathBuf| {
-            session
-                .plan(&golden, None, vec![], None)
-                .unwrap()
-                .in_workspace
-                .unwrap()
-        };
+        let record = |golden: PathBuf| matched(session.plan(&golden, None, vec![], None).unwrap());
         let a = record(first.join("test/goldens/a.png"));
         let deep = record(first.join("test/goldens/deep/c.png"));
         let b = record(second.join("test/goldens/b.png"));
@@ -952,9 +966,42 @@ metrics:
         assert!(Arc::ptr_eq(&a.workspace, &missing.workspace));
     }
 
-    /// `fallback_platform` names the platform tracking the regressions of the goldens its rules
-    /// match; every platform compares the golden the integration passes. An excluded or
-    /// unmatched golden is compared like without the file.
+    /// The home directory of the session ends the search for a workspace: a stray
+    /// `~/.gleon/gleon.yaml` never covers a scratch project without a repository, also when the
+    /// home is named through a symbolic link.
+    #[cfg(unix)]
+    #[test]
+    fn test_the_home_directory_is_never_a_workspace() {
+        let (_dir, home) = workspace(YAML, "a.png");
+        let golden = home.join("scratch/app/test/goldens/a.png");
+        fs::create_dir_all(golden.parent().unwrap()).unwrap();
+        let link = tempfile::tempdir().unwrap();
+        let linked_home = link.path().join("home");
+        std::os::unix::fs::symlink(&home, &linked_home).unwrap();
+
+        for named in [home.clone(), linked_home] {
+            let session = Session::new(SessionOptions {
+                finds_workspaces: true,
+                home: Some(named.clone()),
+                ..SessionOptions::default()
+            });
+            let plan = session.plan(&golden, None, vec![], None).unwrap();
+            assert!(
+                matches!(plan.membership, Membership::Outside),
+                "{}",
+                named.display()
+            );
+        }
+        let plan = session(None).plan(&golden, None, vec![], None).unwrap();
+        assert!(
+            !matches!(plan.membership, Membership::Outside),
+            "without a home the stray config applies"
+        );
+    }
+
+    /// `fallback_platform` names the platform tracking the regressions of the goldens of the
+    /// workspace, matched by a rule or not; every platform compares the golden the integration
+    /// passes. An excluded golden is compared like without the file.
     #[test]
     fn test_goldens_follow_the_fallback_platform() {
         let host = PlatformKey::host();
@@ -962,7 +1009,7 @@ metrics:
             format!(
                 "required_version: \">=0.1.0\"\nfallback_platform: {platform}\n\
                  exclude: \"test/goldens/skip_*.png\"\n\
-                 screenshots: [{{ include: \"test/goldens/*.png\" }}]"
+                 screenshots: [{{ include: \"test/goldens/*.png\", mode: exact }}]"
             )
         };
         let (_dir, root) = workspace(&config(host.as_str()), "a.png");
@@ -971,22 +1018,34 @@ metrics:
         assert_eq!(plan.tracking, Tracking::Here);
 
         let (_dir, root) = workspace(&config("{ os: ios }"), "a.png");
-        for unmanaged in ["test/goldens/skip_a.png", "test/other/a.png"] {
-            let golden = root.join(unmanaged);
-            let plan = session(None).plan(&golden, None, vec![], None).unwrap();
-            assert!(plan.in_workspace.is_none(), "{unmanaged}");
-            assert_eq!(plan.tracking, Tracking::Unknown, "{unmanaged}");
-        }
+        let excluded = session(None)
+            .plan(&root.join("test/goldens/skip_a.png"), None, vec![], None)
+            .unwrap();
+        assert!(matches!(excluded.membership, Membership::Excluded));
+        assert_eq!(
+            excluded.tracking,
+            Tracking::Unknown,
+            "excluded: the opt-out"
+        );
+        let unmatched = session(None)
+            .plan(&root.join("test/other/a.png"), None, vec![], None)
+            .unwrap();
+        assert!(matches!(unmatched.membership, Membership::Unmatched));
+        assert_eq!(
+            unmatched.tracking,
+            Tracking::Elsewhere(PlatformKey::parse("ios").unwrap()),
+            "unmatched: tracked like the rest of the workspace"
+        );
         let golden = root.join("test/goldens/a.png");
         let plan = session(None).plan(&golden, None, vec![], None).unwrap();
         assert_eq!(
             plan.tracking,
             Tracking::Elsewhere(PlatformKey::parse("ios").unwrap())
         );
-        assert_eq!(plan.in_workspace.unwrap().golden_path, "test/goldens/a.png");
+        assert_eq!(matched(plan).golden_path, "test/goldens/a.png");
 
         let (_dir, root) = workspace(
-            "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"test/goldens/*.png\" }]",
+            "required_version: \">=0.1.0\"\nscreenshots: [{ include: \"test/goldens/*.png\", mode: exact }]",
             "a.png",
         );
         let plan = session(None)
@@ -1000,14 +1059,14 @@ metrics:
     #[test]
     fn test_a_fallback_platform_no_process_reports_is_a_config_error() {
         for (platform, needle) in [
-            ("macos-arm64", "architecture 'arm64'"),
-            ("darwin-aarch64", "OS 'darwin'"),
+            ("macos-armv9", "architecture 'armv9'"),
+            ("beos-aarch64", "OS 'beos'"),
             ("macos-aarch64-extra", "ambiguous"),
             ("{ arch: aarch64 }", "platform.os is required"),
         ] {
             let yaml = format!(
                 "required_version: \">=0.1.0\"\nfallback_platform: {platform}\n\
-                 screenshots: [{{ include: \"**/*.png\" }}]"
+                 screenshots: [{{ include: \"**/*.png\", mode: exact }}]"
             );
             let (_dir, root) = workspace(&yaml, "a.png");
             let error = session(None)
@@ -1023,7 +1082,10 @@ metrics:
 
     #[test]
     fn test_config_errors_name_the_config() {
-        let (_dir, root) = workspace("required_version: \">=0.1.0\"\nscreenshots: []", "a.png");
+        let (_dir, root) = workspace(
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: []\n    mode: exact\n",
+            "a.png",
+        );
         let error = session(None)
             .plan(&root.join("test/goldens/a.png"), None, vec![], None)
             .unwrap_err();
@@ -1032,7 +1094,7 @@ metrics:
             "gleon: {}: ",
             Workspace::new(root.clone()).config_display()
         )));
-        assert!(error.message.contains("at least one rule"), "{error:?}");
+        assert!(error.message.contains("at least one glob"), "{error:?}");
 
         let (_dir, root) = workspace(YAML, "with space.png");
         let error = session(None)

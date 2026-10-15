@@ -15,7 +15,8 @@ pub enum ErrorKind {
     /// The integration broke the C contract (null or misaligned buffers, invalid UTF-8, unknown
     /// codes, invalid session strings or tolerances).
     InvalidInput = 1,
-    /// `.gleon/gleon.yaml`, `GLEON_METRICS` or a golden name is invalid.
+    /// `.gleon/gleon.yaml`, an environment variable (`GLEON_METRICS`, `GLEON_ARTIFACTS_DIR`,
+    /// `GLEON_RUN_ID`, `GLEON_REQUIRE_CANONICAL`) or a golden name is invalid.
     Config = 2,
     /// A file could not be read or written.
     Io = 3,

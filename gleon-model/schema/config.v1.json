@@ -17,11 +17,10 @@
     },
     "exclude": {
       "description": "Globs of paths to exclude from testing.",
-      "$ref": "#/$defs/OneOrMany",
-      "default": []
+      "$ref": "#/$defs/OneOrMany"
     },
     "fallback_platform": {
-      "description": "Optional fallback platform identifier used when current platform baselines are missing.\n\nFor integrations that commit goldens as image files (the Flutter package) it is the\ncanonical platform; only its OS and architecture count, under the names a process\nreports (`macos-aarch64`, not `macos-arm64`: others are an error for integrations). Every\ngolden names the platform it was recorded on in its PNG (see `gleon_model::origin`), and\nits text is compared there by default (see `text_tolerance`); a golden without that stamp\ncounts as recorded on the `fallback_platform`. Update mode on the `fallback_platform`\nrecords again what other platforms recorded, a golden recorded elsewhere draws a warning\nthere, and `GLEON_REQUIRE_CANONICAL` makes it compare such goldens as its own. `platform`\nand the `GLEON_*PLATFORM` variables are read by the CLI only.",
+      "description": "The canonical platform: the CLI falls back to its baselines when the current platform has\nnone.\n\nFor integrations that commit goldens as image files (the Flutter package), only its OS and\narchitecture count, under the names a process reports (`macos-aarch64`, `linux-x86_64`;\n`arm64`, `x64`, `amd64` and `darwin` are read as them; other names are an error). A\ngolden of the workspace without a platform stamp counts as recorded there (unless the\nworkspace excludes it). Update mode on it records again what other platforms recorded;\non another platform it keeps a golden recorded elsewhere while only its text differs\n(without a `fallback_platform` it writes such a golden over). On it a golden recorded\nelsewhere draws a warning, and `GLEON_REQUIRE_CANONICAL=1` compares it as its own.\n`platform` and the `GLEON_*PLATFORM` variables are read by the CLI only.",
       "anyOf": [
         {
           "$ref": "#/$defs/PlatformConfig"
@@ -47,22 +46,22 @@
       ]
     },
     "required_version": {
-      "description": "The required version range of the CLI to run this configuration.\n\nEnforced by the CLI only; other readers (the Flutter package) just check its syntax.",
-      "type": "string"
+      "description": "The version range of the CLI this configuration needs; `gleon init` writes the version of\nthe CLI as the floor.\n\nOptional: a workspace of an integration alone (the Flutter package) needs none, and only\nthe CLI enforces it; other readers just check its syntax.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "screenshots": {
-      "description": "List of screenshot match rules.",
+      "description": "The screenshot rules: the first whose `include` matches a `.png` applies. May be left\nout or empty (a workspace naming only its `fallback_platform`): no golden is matched then,\nso integrations compare exactly and record nothing, and the CLI finds no screenshots.",
       "type": "array",
+      "default": [],
       "items": {
         "$ref": "#/$defs/ScreenshotRule"
       }
     }
   },
   "additionalProperties": false,
-  "required": [
-    "required_version",
-    "screenshots"
-  ],
   "$defs": {
     "ArtifactsDir": {
       "description": "`.gleon/runs/latest/artifacts` or a directory under `.gleon/runs/` outside `latest/`: `/`-separated names of ASCII letters, digits, `.`, `_` and `-`, without `.` or `..`.",
@@ -178,21 +177,6 @@
       },
       "additionalProperties": false
     },
-    "Mode": {
-      "description": "Comparison mode for visual regression testing.",
-      "oneOf": [
-        {
-          "description": "Pixel-by-pixel color comparison.",
-          "type": "string",
-          "const": "pixel"
-        },
-        {
-          "description": "Structural Similarity Index comparison.",
-          "type": "string",
-          "const": "ssim"
-        }
-      ]
-    },
     "OneOrMany": {
       "description": "JSON Schema shape of a field serialized through this module.",
       "anyOf": [
@@ -268,21 +252,33 @@
       },
       "additionalProperties": false
     },
+    "RuleMode": {
+      "description": "The comparison of a screenshot rule: `exact`, `pixel` or `ssim`.\n\nRequired: a rule without a mode would silently compare under `pixel`'s default of 1%\ndiffering pixels, while a rule added for its masks alone means exact.",
+      "oneOf": [
+        {
+          "description": "Every pixel must be identical; `diff` keys are an error (nothing is tolerated).",
+          "type": "string",
+          "const": "exact"
+        },
+        {
+          "description": "Up to `diff.threshold` of the pixels may differ (1% by default), and the pixel options\n(`channel_tolerance`, `anti_alias`, `edge_threshold`) let some differing pixels pass.",
+          "type": "string",
+          "const": "pixel"
+        },
+        {
+          "description": "The engine's SSIM policy: `diff.min_similarity` and `diff.color_tolerance`.",
+          "type": "string",
+          "const": "ssim"
+        }
+      ]
+    },
     "ScreenshotRule": {
-      "description": "A rule specifying how to match and process screenshots.",
+      "description": "A rule specifying how to match and process screenshots.\n\nThe files it applies to and how they compare, read from the `mode` and `diff` keys of the rule\nin `gleon.yaml` (written back with the `diff` keys of its mode alone).",
       "type": "object",
       "properties": {
         "diff": {
-          "description": "Specific diffing configuration.",
-          "$ref": "#/$defs/DiffConfig",
-          "default": {
-            "anti_alias": false,
-            "channel_tolerance": 0,
-            "color_tolerance": 8.0,
-            "edge_threshold": 0,
-            "min_similarity": 0.8,
-            "threshold": 0.01
-          }
+          "description": "The thresholds of the mode: each key belongs to one mode, and a key of another mode is an\nerror, even at its default (it would be silently ignored).",
+          "$ref": "#/$defs/DiffConfig"
         },
         "include": {
           "description": "Glob patterns representing the files to include.",
@@ -291,18 +287,16 @@
         "masks": {
           "description": "Optional zones to mask out (ignore) during verification.",
           "type": "array",
-          "default": [],
           "items": {
             "$ref": "#/$defs/MaskRule"
           }
         },
         "mode": {
-          "description": "Diffing mode (pixel or ssim).",
-          "$ref": "#/$defs/Mode",
-          "default": "pixel"
+          "description": "The comparison: `exact`, `pixel` or `ssim` (required, see [`RuleMode`]).",
+          "$ref": "#/$defs/RuleMode"
         },
         "text_tolerance": {
-          "description": "How much text may differ, in `pixel` and `ssim` mode: the largest share of differing pixels in any\ntile of the text an integration reports, `[0, 1]`. Unset, it depends on the golden\n([`crate::tolerance::TextTolerance::resolve`]): 0.05 on the platform the golden was\nrecorded on (see `fallback_platform`), else 1, so text never fails. A value set here\napplies to every golden of the rule: 1 turns text comparison off.",
+          "description": "How much text may differ, in any mode: the largest share of differing pixels in any tile\nof the text an integration reports, `[0, 1]`. Unset, it depends on the golden\n([`crate::tolerance::TextTolerance::resolve`]): 0.05 on the platform the golden was\nrecorded on (see `fallback_platform`), else 1, so text never fails. A value set here\napplies to every golden of the rule: 1 turns text comparison off.",
           "anyOf": [
             {
               "$ref": "#/$defs/TextTolerance"
@@ -315,7 +309,8 @@
       },
       "additionalProperties": false,
       "required": [
-        "include"
+        "include",
+        "mode"
       ]
     },
     "TextTolerance": {

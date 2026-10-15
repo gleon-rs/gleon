@@ -43,7 +43,7 @@ fn test_status_fresh_workspace_reports_added_with_real_fixture() {
     // 1. Initialize workspace
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     // 2. Copy real fixture file to base_path/billing/form.png
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -79,14 +79,14 @@ fn test_status_from_nested_subdirectory() {
     let root_dir = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), root_dir).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let nested_dir = root_dir.join("src").join("billing");
     fs::create_dir_all(&nested_dir).unwrap();
 
     // Resolving from nested_dir discovers gleon.yaml in root_dir and sets ctx.base_dir = root_dir
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), &nested_dir).unwrap();
-    assert_eq!(ctx.base_dir, root_dir);
+    assert_eq!(ctx.base_dir, gleon_model::fs::canonical(root_dir).unwrap());
 
     let report = check_status(&ctx).expect("check_status should succeed when using ctx.base_dir");
     assert!(report.is_clean());
@@ -98,7 +98,7 @@ fn test_status_with_mask_rules_is_clean_after_staging() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -128,7 +128,7 @@ fn test_status_reports_modified() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -168,7 +168,7 @@ fn test_status_reports_deleted() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -213,7 +213,7 @@ fn test_status_fallback_platform_integration() {
     common::copy_config(base_path, "fallback");
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).unwrap();
+    init_workspace(&ctx_init, None).unwrap();
 
     // 2. Add real screenshot fixture
     let baseline_png_bytes = fs::read(fixtures_dir.join("200x100.png")).unwrap();
@@ -257,7 +257,7 @@ fn test_status_missing_baseline_blob_returns_modified() {
     let base_path = temp_dir.path();
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-    init_workspace(&ctx_init).expect("init_workspace should succeed");
+    init_workspace(&ctx_init, None).expect("init_workspace should succeed");
 
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -299,7 +299,7 @@ fn test_status_with_corrupt_image() {
 
     let ctx_init = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-    init_workspace(&ctx_init).unwrap();
+    init_workspace(&ctx_init, None).unwrap();
 
     let screenshot_dir = base_path.join("billing");
     fs::create_dir_all(&screenshot_dir).unwrap();

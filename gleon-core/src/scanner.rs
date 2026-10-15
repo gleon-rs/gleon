@@ -214,8 +214,7 @@ mod tests {
         GleonConfig {
             screenshots: vec![crate::config::ScreenshotRule {
                 include: include.to_vec(),
-                mode: gleon_engine::config::Mode::Pixel,
-                diff: gleon_engine::config::DiffConfig::default(),
+                tolerance: gleon_model::tolerance::Tolerance::pixel(0.01),
                 masks: vec![],
                 text_tolerance: None,
             }],
@@ -299,6 +298,7 @@ screenshots:
   - include: "test/goldens/**/*.png"
     mode: ssim
   - include: "test/**/*.png"
+    mode: pixel
 "#;
         let config = GleonConfig::from_yaml_str(yaml).unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -324,7 +324,10 @@ screenshots:
             .map(|case| {
                 (
                     case.name,
-                    case.rule.mode == gleon_engine::config::Mode::Ssim,
+                    matches!(
+                        case.rule.tolerance,
+                        gleon_model::tolerance::Tolerance::Ssim { .. }
+                    ),
                 )
             })
             .collect();
@@ -484,6 +487,7 @@ screenshots:
 required_version: ">=0.1.0"
 screenshots:
   - include: "billing/**/*.png"
+    mode: pixel
 exclude:
   - "**/corrupt.png"
 "#;
@@ -516,6 +520,7 @@ exclude:
 required_version: ">=0.1.0"
 screenshots:
   - include: "billing dir/**/*.png"
+    mode: pixel
 "#;
         let config: GleonConfig = serde_yaml::from_str(raw_yaml).unwrap();
 
@@ -555,11 +560,21 @@ screenshots:
 
         let pixel_case = cases
             .iter()
-            .find(|c| c.rule.mode == gleon_engine::config::Mode::Pixel)
+            .find(|c| {
+                matches!(
+                    c.rule.tolerance,
+                    gleon_model::tolerance::Tolerance::Pixel { .. }
+                )
+            })
             .unwrap();
         let ssim_case = cases
             .iter()
-            .find(|c| c.rule.mode == gleon_engine::config::Mode::Ssim)
+            .find(|c| {
+                matches!(
+                    c.rule.tolerance,
+                    gleon_model::tolerance::Tolerance::Ssim { .. }
+                )
+            })
             .unwrap();
 
         assert_eq!(pixel_case.name, "billing/form");
@@ -694,13 +709,7 @@ screenshots:
             image: test_image,
             rule: std::sync::Arc::new(crate::config::ScreenshotRule {
                 include: vec![],
-                mode: gleon_engine::config::Mode::Pixel,
-                diff: gleon_engine::config::DiffConfig {
-                    threshold: 0.0,
-                    min_similarity: 0.99,
-                    color_tolerance: 8.0,
-                    ..Default::default()
-                },
+                tolerance: gleon_model::tolerance::Tolerance::pixel(0.0),
                 masks: vec![],
                 text_tolerance: None,
             }),
@@ -741,6 +750,7 @@ screenshots:
 required_version: ">=0.1.0"
 screenshots:
   - include: "billing/stripe/*.png"
+    mode: pixel
 "#;
         let config: GleonConfig = serde_yaml::from_str(raw_yaml).unwrap();
 

@@ -1,14 +1,65 @@
-//! Atomic file writes shared by the gleon CLI and other integrations (through `gleon-ffi`).
+//! Atomic file writes shared by the gleon CLI and other integrations (through `gleon-ffi`), and
+//! the paths they compare.
 //!
 //! Every write goes to a temporary file next to its target and is renamed over it, so a reader
 //! (another process, a concurrent test) never sees a partial file. How much durability a write
 //! also needs depends on the data, see [`Durability`].
 
 use std::{
+    ffi::OsStr,
     fs,
     io::{self, BufWriter, Write as _},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
+
+/// `path` absolute with symbolic links resolved.
+///
+/// # Errors
+/// Returns the I/O error of resolving it (a missing path among them).
+#[cfg(not(windows))]
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
+    fs::canonicalize(path)
+}
+
+/// `path` absolute with symbolic links resolved, without the `\\?\` verbatim prefix of
+/// `canonicalize` (which integrations such as Dart never show).
+///
+/// # Errors
+/// Returns the I/O error of resolving it (a missing path among them).
+#[cfg(windows)]
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
+    let resolved = fs::canonicalize(path)?;
+    let text = resolved.to_string_lossy();
+    Ok(text.strip_prefix(r"\\?\UNC\").map_or_else(
+        || {
+            text.strip_prefix(r"\\?\")
+                .map_or_else(|| resolved.clone(), PathBuf::from)
+        },
+        |share| PathBuf::from(format!(r"\\{share}")),
+    ))
+}
+
+/// Whether two components of paths name the same entry.
+///
+/// Byte for byte, and on Windows also ignoring case (its paths are case-insensitive; the CLI
+/// folds case for names too): ASCII without allocating, other characters by their lowercase.
+/// Paths that both come from [`canonical`] almost always match as they are.
+#[must_use]
+pub fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
+    if a == b {
+        return true;
+    }
+    cfg!(windows) && eq_ignoring_case(a.as_os_str(), b.as_os_str())
+}
+
+/// Whether `a` and `b` are equal but for case: ASCII without allocating, other characters by
+/// their lowercase.
+fn eq_ignoring_case(a: &OsStr, b: &OsStr) -> bool {
+    a.as_encoded_bytes()
+        .eq_ignore_ascii_case(b.as_encoded_bytes())
+        || (!(a.is_ascii() && b.is_ascii())
+            && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase())
+}
 
 /// Whether a write must survive a power loss, not only be atomic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +255,32 @@ const fn set_mode(_: &tempfile::NamedTempFile, _: &Path) -> io::Result<()> {
 )]
 mod tests {
     use super::*;
+
+    /// Components compare byte for byte; on Windows also case-insensitively, ASCII or not.
+    #[test]
+    fn test_same_component_folds_case_on_windows_only() {
+        let component = |name: &'static str| Path::new(name).components().next().unwrap();
+        assert!(same_component(component("Goldens"), component("Goldens")));
+        for (a, b) in [("Goldens", "goldens"), ("Ärger", "ärger")] {
+            assert_eq!(
+                same_component(component(a), component(b)),
+                cfg!(windows),
+                "{a} {b}"
+            );
+        }
+        assert!(!same_component(component("goldens"), component("golden")));
+    }
+
+    /// The folding Windows uses, checked on every OS.
+    #[test]
+    fn test_eq_ignoring_case() {
+        let eq = |a: &str, b: &str| eq_ignoring_case(OsStr::new(a), OsStr::new(b));
+        assert!(eq("Goldens", "goldens"));
+        assert!(eq("Ärger", "ärger"));
+        assert!(eq("Ärger", "ÄRGER"));
+        assert!(!eq("goldens", "golden"));
+        assert!(!eq("Café", "cafe"));
+    }
 
     fn entries(dir: &Path) -> Vec<String> {
         let mut names: Vec<_> = fs::read_dir(dir)

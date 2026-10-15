@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "gleon-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "image",
  "schemars",
@@ -207,9 +207,10 @@ dependencies = [
 
 [[package]]
 name = "gleon-model"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
+ "crc32fast",
  "gleon-engine",
  "glob",
  "image",
