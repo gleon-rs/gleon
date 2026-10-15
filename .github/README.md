@@ -150,13 +150,10 @@ screenshots:
     # without a mode meant 'pixel' before gleon 0.4.0).
     mode: pixel
     diff: # each key belongs to one mode: a key of another mode is a config error, even at its default
-      threshold: 0.01 # 'pixel': allowed fraction of differing pixels [0.0 - 1.0] (default: 0.01; 0: exact)
-      min_similarity: 0.8 # 'ssim': minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
-      color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
-      # 'pixel' only (a config error on an 'ssim' rule), all off by default, never inside text:
-      # differing pixels that count as equal (rendering noise of shapes; not a substitute for
-      # 'ssim' or per-platform goldens). Case reports count them as `tolerated_pixels` and
-      # `edge_pixels`.
+      threshold: 0.01 # allowed fraction of differing pixels [0.0 - 1.0] (default: 0.01; 0: exact)
+      # All off by default, never inside text: differing pixels that count as equal (rendering
+      # noise of shapes; not a substitute for 'ssim' or per-platform goldens). Case reports count
+      # them as `tolerated_pixels` and `edge_pixels`.
       channel_tolerance: 0 # no RGBA byte differs by more than this [0 - 254]: GPU and color drift
       anti_alias: false # the pixel looks anti-aliased in either image (the detection of pixelmatch)
       # The Sobel gradient of the golden's luma there exceeds this [0 - 254] (Skia Gold's edge
@@ -181,6 +178,11 @@ screenshots:
             y: 20
             width: 150 # Absolute pixels (150) or relative percentage ("25%")
             height: 40
+  - include: "test/**/charts/**/*.png"
+    mode: ssim # the keys of 'ssim' only
+    diff:
+      min_similarity: 0.8 # minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
+      color_tolerance: 8 # tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
 
 # Global directory exclusion patterns
 exclude:
