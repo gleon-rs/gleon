@@ -6,6 +6,7 @@
 //! also needs depends on the data, see [`Durability`].
 
 use std::{
+    ffi::OsStr,
     fs,
     io::{self, BufWriter, Write as _},
     path::{Component, Path, PathBuf},
@@ -48,10 +49,12 @@ pub fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
     if a == b {
         return true;
     }
-    if !cfg!(windows) {
-        return false;
-    }
-    let (a, b) = (a.as_os_str(), b.as_os_str());
+    cfg!(windows) && eq_ignoring_case(a.as_os_str(), b.as_os_str())
+}
+
+/// Whether `a` and `b` are equal but for case: ASCII without allocating, other characters by
+/// their lowercase.
+fn eq_ignoring_case(a: &OsStr, b: &OsStr) -> bool {
     a.as_encoded_bytes()
         .eq_ignore_ascii_case(b.as_encoded_bytes())
         || (!(a.is_ascii() && b.is_ascii())
@@ -266,6 +269,17 @@ mod tests {
             );
         }
         assert!(!same_component(component("goldens"), component("golden")));
+    }
+
+    /// The folding Windows uses, checked on every OS.
+    #[test]
+    fn test_eq_ignoring_case() {
+        let eq = |a: &str, b: &str| eq_ignoring_case(OsStr::new(a), OsStr::new(b));
+        assert!(eq("Goldens", "goldens"));
+        assert!(eq("Ärger", "ärger"));
+        assert!(eq("Ärger", "ÄRGER"));
+        assert!(!eq("goldens", "golden"));
+        assert!(!eq("Café", "cafe"));
     }
 
     fn entries(dir: &Path) -> Vec<String> {
