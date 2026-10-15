@@ -8,3 +8,4 @@ platform:
     locale: "en_US"
 screenshots:
   - include: "**/*.png"
+    mode: pixel

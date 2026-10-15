@@ -439,8 +439,10 @@ impl PlatformFields {
                     "invalid format: ambiguous platform string '{s}'. Use 'key=value' comma-separated format for complex platforms"
                 ));
             }
-            fields.os = Some(canonical_os(os).into_owned());
-            fields.arch = Some(canonical_arch(arch).into_owned());
+            let (os, arch) =
+                known_pair(os, arch).unwrap_or((Cow::Borrowed(os), Cow::Borrowed(arch)));
+            fields.os = Some(os.into_owned());
+            fields.arch = Some(arch.into_owned());
         } else {
             fields.os = Some(canonical_os(s).into_owned());
         }
@@ -491,22 +493,36 @@ pub fn canonical_arch(name: &str) -> Cow<'_, str> {
 
 /// An opaque platform value with its names canonical.
 ///
-/// `<os>-<arch>` ([`canonical_os`], [`canonical_arch`]) and an OS alone (`darwin` is `macos`, as
-/// `GLEON_PLATFORM=darwin` reads); any other value as it is (a custom key keeps its spelling).
+/// `<os>-<arch>` when both are names a process reports, under some alias ([`KNOWN_OS`],
+/// [`KNOWN_ARCH`], [`OS_ALIASES`], [`ARCH_ALIASES`]), and an OS alone (`darwin` is `macos`, as
+/// `GLEON_PLATFORM=darwin` reads); any other value as it is (a custom key keeps its spelling:
+/// `custom-arm64` still names its directories).
 #[must_use]
 pub fn canonical_opaque(value: &str) -> Cow<'_, str> {
     match value.split_once('-') {
         None => canonical_os(value),
-        Some((os, arch)) if !arch.contains('-') => {
-            let normalized = format!("{}-{}", canonical_os(os), canonical_arch(arch));
-            if normalized == value {
-                Cow::Borrowed(value)
-            } else {
-                Cow::Owned(normalized)
+        Some((os, arch)) if !arch.contains('-') => match known_pair(os, arch) {
+            Some((os, arch)) => {
+                let normalized = format!("{os}-{arch}");
+                if normalized == value {
+                    Cow::Borrowed(value)
+                } else {
+                    Cow::Owned(normalized)
+                }
             }
-        }
+            None => Cow::Borrowed(value),
+        },
         Some(_) => Cow::Borrowed(value),
     }
+}
+
+/// `os` and `arch` of an `<os>-<arch>` value under their canonical names ([`canonical_os`],
+/// [`canonical_arch`]) when both are names a process reports ([`KNOWN_OS`], [`KNOWN_ARCH`], ASCII
+/// case-insensitively); `None` for a custom value, whose names are not aliases of them.
+fn known_pair<'a>(os: &'a str, arch: &'a str) -> Option<(Cow<'a, str>, Cow<'a, str>)> {
+    let (os, arch) = (canonical_os(os), canonical_arch(arch));
+    let is_known = |name: &str, known: &[&str]| known.iter().any(|k| k.eq_ignore_ascii_case(name));
+    (is_known(&os, KNOWN_OS) && is_known(&arch, KNOWN_ARCH)).then_some((os, arch))
 }
 
 /// The names of one dimension of a platform: what messages call it, the names a process reports
@@ -784,7 +800,16 @@ mod tests {
             opaque("linux-amd64"),
             PlatformConfig::Opaque("linux-x86_64".to_owned())
         );
-        for custom in ["custom-env", "fuchsia-x86_64", "macos"] {
+        // Aliases are names of platforms a process reports: a custom key keeps its spelling, so
+        // it still names the directories it named.
+        for custom in [
+            "custom-env",
+            "fuchsia-x86_64",
+            "macos",
+            "custom-arm64",
+            "beos-x64",
+            "darwin-custom",
+        ] {
             assert_eq!(
                 opaque(custom),
                 PlatformConfig::Opaque(custom.to_owned()),
@@ -801,6 +826,18 @@ mod tests {
         }
         assert_eq!(canonical_opaque("my-custom-env"), "my-custom-env");
         assert_eq!(canonical_opaque("linux-x64"), "linux-x86_64");
+        assert_eq!(canonical_opaque("custom-arm64"), "custom-arm64");
+        // `GLEON_PLATFORM` reads it like the config does.
+        let fields = PlatformFields::parse_key_value("custom-arm64").unwrap();
+        assert_eq!(
+            (fields.os.as_deref(), fields.arch.as_deref()),
+            (Some("custom"), Some("arm64"))
+        );
+        let fields = PlatformFields::parse_key_value("Darwin-ARM64").unwrap();
+        assert_eq!(
+            (fields.os.as_deref(), fields.arch.as_deref()),
+            (Some("macos"), Some("aarch64"))
+        );
         assert_eq!(
             opaque("{os: darwin, arch: arm64, renderer: skia}"),
             PlatformConfig::Structured(PlatformFields {

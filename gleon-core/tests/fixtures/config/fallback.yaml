@@ -7,3 +7,4 @@ fallback_platform:
   arch: x86_64
 screenshots:
   - include: "billing/*.png"
+    mode: pixel

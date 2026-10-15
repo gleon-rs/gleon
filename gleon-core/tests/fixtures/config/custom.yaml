@@ -2,3 +2,4 @@
 required_version: ">=0.1.0"
 screenshots:
   - include: "custom/**/*.png"
+    mode: pixel

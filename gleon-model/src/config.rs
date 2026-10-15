@@ -219,8 +219,8 @@ impl Serialize for GlobPattern {
 #[serde(deny_unknown_fields)]
 #[schemars(title = "gleon workspace configuration (.gleon/gleon.yaml)")]
 pub struct GleonConfig {
-    /// The version range of the CLI this configuration needs; `gleon init` writes the CLI's
-    /// version as the floor.
+    /// The version range of the CLI this configuration needs; `gleon init` writes the version of
+    /// the CLI as the floor.
     ///
     /// Optional: a workspace of an integration alone (the Flutter package) needs none, and only
     /// the CLI enforces it; other readers just check its syntax.
@@ -1220,13 +1220,23 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// The error of an invalid config, which names `needle`: each rule has its mode, so the
+    /// intended check fails, not the missing mode.
+    fn assert_config_error(yaml: &str, needle: &str) {
+        let err = GleonConfig::from_yaml_str(yaml).unwrap_err().to_string();
+        assert!(err.contains(needle), "expected {needle:?} in: {err}");
+        assert!(!err.contains("missing field `mode`"), "{err}");
+    }
+
     #[test]
     fn test_load_config_invalid_dimension() {
-        // Test non-numeric dimension
-        let invalid_dim_yaml = "
+        // A non-numeric dimension.
+        assert_config_error(
+            "
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: pixel
     masks:
       - path: \"mask\"
         zones:
@@ -1234,15 +1244,17 @@ screenshots:
             y: 0
             width: \"not_a_number\"
             height: 10
-";
-        let result: Result<GleonConfig, _> = serde_yaml::from_str(invalid_dim_yaml);
-        assert!(result.is_err());
+",
+            "not_a_number",
+        );
 
-        // Test out of range percentage (> 100%)
-        let invalid_pct_yaml = "
+        // A percentage beyond 100%.
+        assert_config_error(
+            "
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: pixel
     masks:
       - path: \"mask\"
         zones:
@@ -1250,22 +1262,24 @@ screenshots:
             y: 0
             width: 10
             height: \"105%\"
-";
-        let result2: Result<GleonConfig, _> = serde_yaml::from_str(invalid_pct_yaml);
-        assert!(result2.is_err());
+",
+            "zones[0]: percentage must be between 0.0 and 100.0",
+        );
     }
 
     #[test]
     fn test_load_config_invalid_ratio() {
-        let invalid_yaml = "
+        assert_config_error(
+            "
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: pixel
     diff:
       threshold: 1.5
-";
-        let result: Result<GleonConfig, _> = serde_yaml::from_str(invalid_yaml);
-        assert!(result.is_err());
+",
+            "diff.threshold must be between 0.0 and 1.0 (got 1.5)",
+        );
     }
 
     #[test]
@@ -1642,16 +1656,18 @@ screenshots:
 
     #[test]
     fn test_diff_config_invalid_type() {
-        // threshold is a string, not a float
-        let invalid_yaml = "
+        // `threshold` is a string, not a float.
+        assert_config_error(
+            "
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: pixel
     diff:
       threshold: \"not-a-float\"
-";
-        let result: Result<GleonConfig, _> = serde_yaml::from_str(invalid_yaml);
-        assert!(result.is_err());
+",
+            "not-a-float",
+        );
     }
 
     /// An invalid glob of `include` or `exclude` names itself, why and where, through the
@@ -1790,27 +1806,28 @@ screenshots:
 
     #[test]
     fn test_diff_config_invalid_ratio_bounds() {
-        // Negative threshold
-        let yaml_neg_thresh = "
+        assert_config_error(
+            "
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: pixel
     diff:
       threshold: -0.1
-";
-        let res1: Result<GleonConfig, _> = serde_yaml::from_str(yaml_neg_thresh);
-        assert!(res1.is_err());
-
-        // Negative similarity
-        let yaml_neg_sim = "
+",
+            "diff.threshold must be between 0.0 and 1.0 (got -0.1)",
+        );
+        assert_config_error(
+            "
 required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
+    mode: ssim
     diff:
       min_similarity: -0.05
-";
-        let res2: Result<GleonConfig, _> = serde_yaml::from_str(yaml_neg_sim);
-        assert!(res2.is_err());
+",
+            "diff.min_similarity must be between 0.0 and 1.0 (got -0.05)",
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 words = [
     "amd64",
-    "armv9",
+    "armv",
     "beos",
     "osx",
     "pubspec",
@@ -181,6 +181,12 @@ words = [
     "xzf",
     "yamllint",
     "zeroize",
+    "Jujutsu",
+    "USERPROFILE",
+    "gitdir",
+    "getpwuid",
+    "Ärger",
+    "ärger",
 ]
 # Schemas are generated from doc comments that are spell-checked in the Rust sources; their JSON
 # `\n` escapes would only produce false positives.

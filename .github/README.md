@@ -28,8 +28,8 @@ gleon init
 
 This creates the `.gleon/` workspace scaffold:
 
-- `.gleon/gleon.yaml`: Workspace configuration file (always inside `.gleon/`, not the repository root).
-- `.gleon/.gitignore`: Automatically ignores large binary blobs (`blobs/`) and run outputs (`runs/`).
+- `.gleon/gleon.yaml`: Workspace configuration file (always inside `.gleon/`, not the repository root). Next to a `pubspec.yaml` (a Flutter package or app, or the root of a pub workspace) it is the Flutter template: the goldens under every `test/` compared exactly (`include: "**/test/**/*.png"`, `mode: exact`), their text on the platform of the run (`fallback_platform`, the OS and architecture of the host or of `--os`/`--arch`), the images of failures excluded (`exclude: "**/failures/**"`); `gleon init --generic` writes the generic template instead (every `.png`, `mode: pixel` with its `threshold` spelled out), `--flutter` the Flutter one anywhere. An existing `gleon.yaml` is never replaced. Like `git init`, `gleon init` initializes the directory it runs in: inside another workspace (a package of a monorepo) it starts a nested one, whose config applies to the goldens below it, and says so.
+- `.gleon/.gitignore`: Automatically ignores large binary blobs (`blobs/`), run outputs (`runs/`), the `.env` files, `credentials`, `dashboard.html` and `history.json`.
 - `.gleon/.env.template`: Storage credentials template.
 - `.gleon/manifests/`: Directory where lightweight, deterministic JSON baseline manifests will be stored in Git.
 
@@ -99,7 +99,7 @@ gleon dashboard
 
 | Command                    | Description                                                                                 | Example                                                                         |
 | :------------------------- | :------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------ |
-| `gleon init`               | Scaffolds the `.gleon/` directory tree and default `.gleon/gleon.yaml`.                     | `gleon init`                                                                    |
+| `gleon init`               | Scaffolds the `.gleon/` directory tree and a `.gleon/gleon.yaml` (`--flutter`/`--generic`). | `gleon init`<br>`gleon init --generic`                                          |
 | `gleon stage [PATHS...]`   | Records matching screenshots as official baseline manifests for the current platform.       | `gleon stage`<br>`gleon stage test/goldens/login.png`                           |
 | `gleon status`             | Reports the status (`Clean`, `Added`, `Modified`, `Deleted`) of all discovered screenshots. | `gleon status`<br>`gleon status --json`                                         |
 | `gleon diff`               | Runs visual comparison between actual screenshots and committed baselines.                  | `gleon diff`<br>`gleon diff --artifacts .gleon/runs/ci`                         |
@@ -117,7 +117,7 @@ gleon dashboard
 
 All commands support the following global options:
 
-- `--config <PATH>`: Specify an explicit path to the configuration file (default: `.gleon/gleon.yaml`, searched upwards from the current directory).
+- `--config <PATH>`: Specify an explicit path to the configuration file (default: `.gleon/gleon.yaml`, searched upwards from the current directory, no further than the repository root (the first directory with `.git`, `.hg`, `.jj` or `.sl`) and never in the home directory or above unless that is a repository root itself: a `~/.gleon/gleon.yaml` is no workspace, and neither is its `.env`). Integrations search upwards from each golden the same way.
 - `--target-branch <BRANCH>`: Target branch for baseline comparison (defaults to `main`, or `GLEON_TARGET_BRANCH`).
 - `--platform <STRING>`: Override platform context with an opaque string (e.g. `--platform my-custom-env`).
 - `--os <OS>` / `--arch <ARCH>` / `--renderer <RENDERER>`: Override individual platform context dimensions.
@@ -132,18 +132,24 @@ All commands support the following global options:
 Below is a complete, annotated `.gleon/gleon.yaml` reference. Unknown keys are rejected. A JSON Schema is committed at [`gleon-model/schema/config.v1.json`](../gleon-model/schema/config.v1.json).
 
 ```yaml
-# Enforce minimum CLI version across the team and CI
+# Optional: enforce a minimum CLI version across the team and CI (`gleon init` writes its own).
+# A workspace of an integration alone needs none.
 required_version: ">=0.1.0"
 
-# Rules for discovering and comparing screenshots. A file is excluded if it matches `exclude`;
+# Rules for discovering and comparing screenshots (optional: a workspace may name only its
+# `fallback_platform`). A file is excluded if it matches `exclude`;
 # otherwise the FIRST rule whose `include` matches applies (paths are matched case-insensitively,
 # relative to the workspace root, with `/` separators). Globs: `*` and `?` stay within a path
 # segment, `**` (a whole segment) crosses segments, `[...]` is a character class; `{a,b}`
 # alternatives and a trailing `/` are config errors.
 screenshots:
   - include: "test/**/goldens/**/*.png" # Single pattern or list of glob patterns
-    mode: pixel # 'pixel' (exact per-pixel compare) or 'ssim' (tolerates rendering noise, see below)
-    diff: # each key belongs to one mode: another value than its default in the other is a config error
+    # Required: 'exact' (every pixel identical, no `diff` keys), 'pixel' (a share of the pixels
+    # may differ, 1% by default) or 'ssim' (tolerates rendering noise, see below). There is no
+    # default: a rule added for its masks alone would otherwise tolerate 1% silently (rules
+    # without a mode meant 'pixel' before gleon 0.4.0).
+    mode: pixel
+    diff: # each key belongs to one mode: a key of another mode is a config error, even at its default
       threshold: 0.01 # 'pixel': allowed fraction of differing pixels [0.0 - 1.0] (default: 0.01; 0: exact)
       min_similarity: 0.8 # 'ssim': minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
       color_tolerance: 8 # 'ssim': tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
@@ -185,8 +191,10 @@ exclude:
 # Optional: Fallback platform for Sparse Multi-Platform Baselines
 # When secondary platforms render identically to the fallback, no duplicate manifests are stored.
 # For integrations with golden files (Flutter) it is the canonical platform (OS and architecture,
-# with the names a process reports: `macos-aarch64`, not `macos-arm64`): goldens without a gleon
-# stamp count as recorded there, and it records again what other platforms recorded.
+# with the names a process reports: `macos-aarch64`, `linux-x86_64`; `arm64`, `x64`, `amd64` and
+# `darwin` are read as them): goldens without a gleon stamp count as recorded there, it records
+# again what other platforms recorded, and only with it a golden recorded elsewhere is kept by
+# update mode while only its text differs.
 fallback_platform:
   os: macos
   arch: aarch64
@@ -237,26 +245,35 @@ On Windows `gleon test -- flutter test` finds `flutter.bat` like a shell does.
 #### Goldens of integrations on several platforms
 
 Integrations commit goldens as PNG files, one per test, recorded on any platform: each golden
-names the platform it was recorded on in a `tEXt` chunk of its PNG (`gleon:platform`, e.g.
-`macos-aarch64`; decoders ignore it). Its text is compared there (`text_tolerance` 0.05: a pixel of
-font-engine noise per 16x16 square passes, a changed digit fails) and ignored elsewhere (1, layout
-exact). A golden without the stamp (recorded by another tool, or before gleon 0.4.0) counts as
-recorded on `fallback_platform`, with the names a process reports (`std::env::consts`:
-`macos-aarch64`, `linux-x86_64`, `windows-x86_64`; `macos-arm64` or `darwin` are config errors,
-since they would never match), else nowhere known (text ignored everywhere).
+gleon writes names the platform it was recorded on in a `tEXt` chunk of its PNG
+(`gleon:platform`, e.g. `macos-aarch64`; decoders ignore it), with or without a workspace or a
+rule, except a golden the workspace excludes (written and compared like Flutter does: its text
+is pixels like the rest, unless the call sets a text tolerance). Its text is
+compared there (`text_tolerance` 0.05: a pixel of font-engine noise per 16x16 square passes, a
+changed digit fails) and ignored elsewhere (1, layout exact). A golden without the stamp
+(recorded by another tool, or by the Flutter package before 0.4.0) counts as recorded on
+`fallback_platform`, with the names a process reports (`std::env::consts`: `macos-aarch64`,
+`linux-x86_64`, `windows-x86_64`; `macos-arm64`, `linux-x64` and `darwin` are read as them, in
+the config, the flags and the variables alike, while a custom key such as `custom-arm64` keeps
+its spelling),
+else nowhere known: its text is ignored everywhere, and a pass whose text differed says so once
+per test process.
 
 | Update mode (`--update-goldens`) | |
 |---|---|
 | A missing golden, or one recorded here or nowhere known | written, stamped with this platform |
-| The same image | left as it is |
-| A golden recorded on another platform | left as it is while the candidate passes against it (only its text differs), so goldens never flip between platforms over their glyphs; written over when it would change |
+| The same image, stamped | left as it is |
+| The same image, unstamped (recorded here or nowhere known) | written once more, stamped: `--update-goldens` on the recording platform is how an older golden gets its stamp |
+| A golden recorded on another platform, with a `fallback_platform` | left as it is while the candidate passes against it (only its text differs), with a warning naming the `fallback_platform` that records it again, so goldens never flip between platforms over their glyphs; written over when it would change |
+| A golden recorded on another platform, without a `fallback_platform` | written over (nothing could record it again) |
 | On the `fallback_platform`, a golden recorded elsewhere | recorded again, even when only its text differs |
 
 The `fallback_platform` warns about each golden recorded elsewhere it compares (its text is not
 compared there); with `GLEON_REQUIRE_CANONICAL=1` it compares them as its own instead, so their
 glyphs fail until they are recorded there. A `text_tolerance` set in the rule or the call
 applies on every platform, so `1` turns text comparison off everywhere. `golden.platform` of a
-case report names the stamp.
+case report names the stamp. A failure of a golden a rule covers names its case report (by
+its absolute path) and `gleon report html`, which renders the reports of the run.
 
 `gleon approve` writes the candidates of integrations stamped with the platform of their case.
 When the `fallback_platform` reported a golden in the approved runs, its result holds: passed, the
