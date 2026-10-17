@@ -869,15 +869,17 @@ impl Call<'_> {
             .map_or_else(|| "golden".into(), |stem| stem.to_string_lossy());
         let dir = Path::new(request.failures_dir);
         let names = &session.integration.artifacts;
+        let file_name = |pattern: &str| pattern.replace(ArtifactNames::PLACEHOLDER, &stem);
         let files = [
             (&names.diff, diff_png),
             (&names.golden, *golden),
             (&names.candidate, self.candidate_png()),
         ];
         let written = files.into_iter().try_for_each(|(pattern, bytes)| {
-            let file = dir.join(pattern.replace(ArtifactNames::PLACEHOLDER, &stem));
+            let file = dir.join(file_name(pattern));
             gleon_model::fs::write_or_remove(&file, bytes, Durability::Atomic)
         });
+        let diff_name = diff_png.map(|_| file_name(&names.diff));
         let feedback = written.map_or_else(
             |e| {
                 format!(
@@ -885,7 +887,7 @@ impl Call<'_> {
                     request.failures_dir
                 )
             },
-            |()| text::feedback(request.failures_dir),
+            |()| text::feedback(request.failures_dir, diff_name.as_deref()),
         );
         // Absolute, like the failures directory: `flutter test` runs in a package, which need not
         // be the workspace root (a monorepo).
@@ -1180,7 +1182,7 @@ screenshots:
             finished.message,
             format!(
                 "Golden \"goldens/a.png\": 6.25% (1 of 16px) differ (gleon exact).\n\
-                 Failure feedback can be found at {}\n\
+                 Failure feedback can be found at {} (the differences: `a_gleonDiff.png`)\n\
                  Tip: tolerances per golden and the platform that compares text live in \
                  .gleon/gleon.yaml, the file of the gleon CLI (see the package README).",
                 fixture.failures
@@ -1232,6 +1234,15 @@ screenshots:
         let finished = fixture.run(&session, Mode::Compare, &png(1, 16384, false));
         assert_eq!(finished.verdict, Verdict::DimensionMismatch);
         assert_eq!(fixture.failures(), ["a_masterImage.png", "a_testImage.png"]);
+        // The message names no diff it did not write.
+        assert!(
+            finished.message.contains(&format!(
+                "Failure feedback can be found at {}\n",
+                fixture.failures
+            )),
+            "{}",
+            finished.message
+        );
     }
 
     #[test]
@@ -1261,7 +1272,8 @@ screenshots:
         assert_eq!(finished.error_kind, ErrorKind::None);
         assert_eq!(
             finished.message,
-            "Could not be compared against non-existent file: \"goldens/a.png\""
+            "Could not be compared against non-existent file: \"goldens/a.png\". Record it with \
+             `flutter test --update-goldens`."
         );
         assert_eq!(finished.warning, text::MISSING_WORKSPACE_WARNING);
         assert!(fixture.failures().is_empty());
@@ -2039,7 +2051,8 @@ screenshots:
         assert_eq!(missing.verdict, Verdict::Missing);
         assert_eq!(
             missing.message,
-            "Could not be compared against non-existent file: \"goldens/a.png\""
+            "Could not be compared against non-existent file: \"goldens/a.png\". Record it with \
+             `flutter test --update-goldens`."
         );
     }
 

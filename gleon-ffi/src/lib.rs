@@ -1353,7 +1353,8 @@ mod tests {
         assert_eq!(answer.error_kind, 0);
         assert_eq!(
             answer.message,
-            "Could not be compared against non-existent file: \"a.png\""
+            "Could not be compared against non-existent file: \"a.png\". Record it with \
+             `flutter test --update-goldens`."
         );
         assert!(answer.console.is_empty() && answer.warning.is_empty());
         gleon_session_free(Some(session));

@@ -873,7 +873,7 @@ mod tests {
     fn tracked_on(fallback: &str) -> Option<GleonConfig> {
         let yaml = format!(
             "required_version: \">=0.1.0\"\nfallback_platform: {fallback}\n\
-             screenshots:\n  - include: \"**/*.png\"\n    mode: pixel\n"
+             screenshots:\n  - include: \"**/*.png\"\n    mode: pixel\n    diff: {{ threshold: 0.01 }}\n"
         );
         Some(GleonConfig::from_yaml_str(&yaml).unwrap())
     }

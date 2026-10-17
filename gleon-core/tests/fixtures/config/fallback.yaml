@@ -8,3 +8,5 @@ fallback_platform:
 screenshots:
   - include: "billing/*.png"
     mode: pixel
+    diff:
+      threshold: 0.01

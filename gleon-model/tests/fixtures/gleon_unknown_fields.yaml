@@ -3,3 +3,5 @@ future_cool_setting: "some_value"
 screenshots:
   - include: "src/login.png"
     mode: pixel
+    diff:
+      threshold: 0.01

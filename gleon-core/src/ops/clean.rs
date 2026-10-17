@@ -46,6 +46,9 @@ pub struct CleanOptions {
 pub struct CleanResult {
     /// List of screenshot files deleted (or to be deleted in dry run).
     pub deleted_files: Vec<PathBuf>,
+    /// Screenshot files that could not be deleted, with the reason; the others are still
+    /// deleted, untracked and ignored, and the command fails.
+    pub failed_files: Vec<(PathBuf, String)>,
     /// List of files untracked from Git index (or to be untracked in dry run).
     pub untracked_files: Vec<PathBuf>,
     /// List of entries added to .gitignore (or to be added in dry run).
@@ -62,7 +65,8 @@ pub struct CleanResult {
 /// Returns an error if the workspace configuration cannot be scanned, if the `.gitignore` file
 /// exists but cannot be read (other than being missing) or cannot be written atomically, or if
 /// the `.gleon/runs` cache directory exists but fails to be removed for a reason other than
-/// already being absent.
+/// already being absent. A screenshot that cannot be deleted is no error here: the rest of the
+/// cleanup runs, and it is listed in [`CleanResult::failed_files`].
 pub fn clean_workspace(
     context: &ResolvedContext,
     options: &CleanOptions,
@@ -161,9 +165,7 @@ fn clean_screenshots(
                     // Stale entry already deleted from disk, can still be untracked from Git
                     successfully_deleted.push(rel_path.clone());
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to delete screenshot {:?}: {}", full_path, e);
-                }
+                Err(e) => result.failed_files.push((rel_path.clone(), e.to_string())),
             }
         }
 
@@ -208,29 +210,24 @@ fn clean_screenshots(
 
         let existing_set: std::collections::HashSet<&str> =
             existing.lines().map(str::trim).collect();
-        let mut new_entries = Vec::new();
-        let mut seen_new = std::collections::HashSet::new();
+        let mut new_entries: Vec<String> = Vec::new();
 
         for rule in &config.screenshots {
             for pattern in &rule.include {
+                // Rules are relative to the workspace root, where `*` never crosses a `/`: a
+                // pattern with a `/` is anchored there in `.gitignore` too, one without matches at
+                // any depth unless anchored with a leading `/`.
                 let pat_str = pattern.as_str();
-                let entry: std::borrow::Cow<'_, str> = if pat_str.starts_with("**/")
-                    || pat_str.contains('/')
-                    || pat_str.contains('\\')
-                {
-                    std::borrow::Cow::Borrowed(pat_str)
+                let entry = if pat_str.contains('/') {
+                    pat_str.to_owned()
                 } else {
-                    let mut s = String::with_capacity(3 + pat_str.len());
-                    s.push_str("**/");
-                    s.push_str(pat_str);
-                    std::borrow::Cow::Owned(s)
+                    format!("/{pat_str}")
                 };
-
-                if !existing_set.contains(entry.as_ref())
+                if !existing_set.contains(entry.as_str())
                     && !existing_set.contains(pat_str)
-                    && seen_new.insert(entry.to_string())
+                    && !new_entries.contains(&entry)
                 {
-                    new_entries.push(entry.into_owned());
+                    new_entries.push(entry);
                 }
             }
         }
@@ -283,6 +280,7 @@ screenshots:
   - include:
       - "test/goldens/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -343,6 +341,7 @@ screenshots:
   - include:
       - "test/goldens/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -382,6 +381,7 @@ screenshots:
   - include:
       - "test/goldens/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -422,6 +422,7 @@ screenshots:
   - include:
       - "test/goldens/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -487,6 +488,7 @@ screenshots:
       - "scoped/**/*.png"
       - "**/already_globbed/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -508,8 +510,11 @@ screenshots:
         assert_eq!(res.deleted_files.len(), 1);
 
         let gitignore = std::fs::read_to_string(base_path.join(".gitignore")).unwrap();
-        // Bare pattern "*.png" gets "**/" prepended
-        assert!(gitignore.contains("**/*.png"));
+        // A bare "*.png" matches the root alone, as in the rule: anchored with "/".
+        assert!(
+            gitignore.lines().any(|line| line == "/*.png"),
+            "{gitignore}"
+        );
         // Already globbed pattern stays as is
         assert!(gitignore.contains("**/already_globbed/*.png"));
         // Existing "scoped/**/*.png" was already in .gitignore and not duplicated
@@ -531,6 +536,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "locked/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -544,6 +550,11 @@ screenshots:
         let mut read_only = orig_perms.clone();
         read_only.set_mode(0o555);
         std::fs::set_permissions(&locked_dir, read_only).unwrap();
+        // A privileged process (root, `CAP_DAC_OVERRIDE`) deletes it anyway: nothing to test.
+        if std::fs::remove_file(&locked_file).is_ok() {
+            std::fs::set_permissions(&locked_dir, orig_perms).unwrap();
+            return;
+        }
 
         let ctx =
             ResolvedContext::from_options(&crate::context::ContextOptions::default(), base_path)
@@ -559,8 +570,13 @@ screenshots:
         std::fs::set_permissions(&locked_dir, orig_perms).unwrap();
 
         let clean_res = res.unwrap();
-        // File could not be deleted, so deleted_files is empty
+        // File could not be deleted: reported as failed, never as deleted.
         assert_eq!(clean_res.deleted_files.len(), 0);
+        assert_eq!(clean_res.failed_files.len(), 1);
+        assert_eq!(
+            clean_res.failed_files[0].0,
+            std::path::Path::new("locked/image.png")
+        );
         assert!(locked_file.exists());
     }
 
@@ -577,6 +593,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "nested/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -622,6 +639,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -679,6 +697,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "tracked.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 

@@ -123,9 +123,13 @@ impl Serialize for Dimension {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DiffConfig {
-    /// Largest share [0.0, 1.0] of differing pixels in pixel mode (default 0.01; 0: exact).
+    /// Largest share [0.0, 1.0] of differing pixels in pixel mode: required by `mode: pixel`
+    /// (0: every pixel identical, the pixel options aside).
     #[serde(default = "default_threshold", deserialize_with = "deserialize_ratio")]
-    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(range(min = 0.0, max = 1.0), transform = without_default)
+    )]
     pub threshold: f64,
     /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).
     #[serde(
@@ -257,6 +261,13 @@ pub struct Zone {
     pub width: Dimension,
     /// Height of the zone.
     pub height: Dimension,
+}
+
+/// Drops the `default` of a field's schema: a rule names the value, a default would read as one
+/// it falls back to.
+#[cfg(feature = "schemars")]
+fn without_default(schema: &mut schemars::Schema) {
+    schema.remove("default");
 }
 
 const fn default_threshold() -> f64 {

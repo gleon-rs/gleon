@@ -282,7 +282,7 @@ fn test_reports_of_a_failing_diff_run_link_existing_images() {
         "| `shots/size` | Dimension Mismatch: golden is 100x100px, test image is 200x100px |"
     ));
     assert!(
-        md.contains("| `ssim/dashboard` | Mismatch: changed area at "),
+        md.contains("| `ssim/dashboard` | Mismatch: failing area at "),
         "{md}"
     );
     let first_row = md.lines().find(|line| line.starts_with("| `")).unwrap();

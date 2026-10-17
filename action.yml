@@ -60,11 +60,11 @@ runs:
         OS="${{ runner.os }}"
         ARCH="${{ runner.arch }}"
 
+        # The assets of a release: Linux x64, macOS on Apple silicon, Windows x64.
         case "$OS" in
           Linux)
             case "$ARCH" in
               X64)   TARGET="linux-x86_64" ;;
-              ARM64) TARGET="linux-aarch64" ;;
               *) echo "::error::Unsupported Linux architecture: $ARCH"; exit 1 ;;
             esac
             BIN_NAME="gleon"
@@ -72,7 +72,6 @@ runs:
           macOS)
             case "$ARCH" in
               ARM64) TARGET="macos-aarch64" ;;
-              X64)   TARGET="macos-x86_64" ;;
               *) echo "::error::Unsupported macOS architecture: $ARCH"; exit 1 ;;
             esac
             BIN_NAME="gleon"

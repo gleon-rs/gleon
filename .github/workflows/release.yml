@@ -15,6 +15,9 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         include:
@@ -22,7 +25,16 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary_name: gleon
             asset_name: gleon-linux-x86_64
-          # TODO: Add macOS (x86_64, aarch64) and Windows (x86_64) targets when needed.
+          - os: macos-26
+            target: aarch64-apple-darwin
+            binary_name: gleon
+            asset_name: gleon-macos-aarch64
+          # The C runtime linked in: no Visual C++ redistributable needed.
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary_name: gleon.exe
+            asset_name: gleon-windows-x86_64.exe
+            rustflags: -C target-feature=+crt-static
 
     steps:
       - name: Checkout code
@@ -37,6 +49,7 @@ jobs:
       - name: Build release binary
         env:
           GLEON_OFFICIAL_SECRET: ${{ secrets.GLEON_OFFICIAL_SECRET }}
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           if [ -z "${GLEON_OFFICIAL_SECRET}" ]; then
             echo "::error::GLEON_OFFICIAL_SECRET is not configured"
@@ -46,12 +59,9 @@ jobs:
           cargo build --locked --release --bin gleon --target ${{ matrix.target }}
 
       - name: Prepare asset
-        shell: bash
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.asset_name }}
-          cd dist
-          shasum -a 256 ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha256
 
       - name: Generate Build Provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -79,11 +89,12 @@ jobs:
           merge-multiple: true
           path: dist/
 
-      - name: Create Checksums File
+      # One tool for every asset (as in the Flutter package's release).
+      - name: Write checksums
+        working-directory: dist
         run: |
-          cd dist
-          cat *.sha256 > SHA256SUMS.txt
-          rm *.sha256
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3

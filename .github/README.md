@@ -12,7 +12,18 @@ Follow these 5 steps to add visual regression testing to any codebase (Flutter, 
 
 ### 1. Install the CLI
 
-Ensure you have [rustup](https://rustup.rs) installed. The toolchain is pinned to Rust 1.100 nightly (`nightly-2026-09-25`, Edition 2024) in `rust-toolchain.toml`, and rustup installs it automatically when you build from the repository root. Then install `gleon`:
+Download the binary of your platform from the [Releases](https://github.com/gleon-rs/gleon/releases) page: `gleon-linux-x86_64` (Ubuntu 26.04 or newer), `gleon-macos-aarch64` (Apple silicon) or `gleon-windows-x86_64.exe`. `SHA256SUMS.txt` lists the checksums of every asset, and each binary carries a build provenance attestation:
+
+```bash
+gh release download --repo gleon-rs/gleon --pattern gleon-macos-aarch64 --pattern SHA256SUMS.txt
+shasum -a 256 --check --ignore-missing SHA256SUMS.txt
+gh attestation verify gleon-macos-aarch64 --repo gleon-rs/gleon
+mkdir -p ~/.local/bin && install -m 755 gleon-macos-aarch64 ~/.local/bin/gleon
+```
+
+Without `gh`, `curl -fLO https://github.com/gleon-rs/gleon/releases/latest/download/gleon-macos-aarch64` (and the same for `SHA256SUMS.txt`) downloads them. `~/.local/bin` must be on your `PATH`. The macOS binary is not notarized: `gh release download` and `curl` leave no quarantine attribute, while a copy downloaded with a browser runs only after `xattr -d com.apple.quarantine gleon`.
+
+To build from source (contributors), install [rustup](https://rustup.rs): the toolchain is pinned to Rust 1.100 nightly (`nightly-2026-09-25`, Edition 2024) in `rust-toolchain.toml`, and rustup installs it automatically when you build from the repository root. Then install `gleon`:
 
 ```bash
 cargo install --path gleon --bin gleon --force
@@ -144,13 +155,13 @@ required_version: ">=0.1.0"
 # alternatives and a trailing `/` are config errors.
 screenshots:
   - include: "test/**/goldens/**/*.png" # Single pattern or list of glob patterns
-    # Required: 'exact' (every pixel identical, no `diff` keys), 'pixel' (a share of the pixels
-    # may differ, 1% by default) or 'ssim' (tolerates rendering noise, see below). There is no
-    # default: a rule added for its masks alone would otherwise tolerate 1% silently (rules
-    # without a mode meant 'pixel' before gleon 0.4.0).
+    # Required: 'exact' (every pixel identical, no `diff` keys), 'pixel' (the share of the pixels
+    # in `diff.threshold` may differ) or 'ssim' (tolerates rendering noise, see below). There is
+    # no default: a rule added for its masks alone would otherwise tolerate pixels silently (rules
+    # without a mode meant 'pixel' with `threshold: 0.01` before gleon 0.4.0).
     mode: pixel
     diff: # each key belongs to one mode: a key of another mode is a config error, even at its default
-      threshold: 0.01 # allowed fraction of differing pixels [0.0 - 1.0] (default: 0.01; 0: exact)
+      threshold: 0.01 # allowed fraction of differing pixels [0.0 - 1.0], required for 'pixel' (0: none)
       # All off by default, never inside text: differing pixels that count as equal (rendering
       # noise of shapes; not a substitute for 'ssim' or per-platform goldens). Case reports count
       # them as `tolerated_pixels` and `edge_pixels`.

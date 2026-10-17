@@ -22,6 +22,8 @@ screenshots:
   # Another size, with a mask over its top-left corner.
   - include: "size/*.png"
     mode: pixel
+    diff:
+      threshold: 0.01
     masks:
       - path: "size/*.png"
         zones:

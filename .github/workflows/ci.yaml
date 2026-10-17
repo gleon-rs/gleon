@@ -107,15 +107,17 @@ jobs:
         run: cargo miri test --locked -p gleon-ffi --lib
 
   host-platforms:
-    # The integration crates depend on the host (`std::env::consts`: the platform that tracks
-    # the goldens, platform keys that must be valid file names, path handling); the full suite
-    # runs on Linux above.
-    name: 🖥️ Test gleon-model and gleon-ffi on ${{ matrix.os }}
+    # The crates depend on the host (`std::env::consts`: the platform that tracks the goldens,
+    # platform keys that must be valid file names, path handling). macOS runs the full suite;
+    # Windows the integration crates, until the paths of gleon-core and the CLI are checked there.
+    name: 🖥️ Test and build the CLI on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - { os: macos-26, packages: --workspace }
+          - { os: windows-2025, packages: -p gleon-model -p gleon-ffi }
 
     steps:
       - name: 📥 Checkout repository
@@ -127,4 +129,11 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
 
       - name: 🧪 Run tests
-        run: cargo test --locked -p gleon-model -p gleon-ffi
+        run: cargo test --locked ${{ matrix.packages }}
+
+      # The CLI is released for this host too: the release must not be its first build.
+      - name: 🔨 Build the CLI
+        run: cargo build --locked -p gleon --bin gleon
+
+      - name: ▶️ Run the CLI
+        run: ./target/debug/gleon --help

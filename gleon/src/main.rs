@@ -35,16 +35,18 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to determine current directory: {e}"))?;
 
     // Load environment configuration from .gleon/.env and .gleon/.env.local of the workspace
-    // (never of the home directory).
+    // (that of `--config` when given; never of the home directory).
     let home = gleon_core::env::home(&gleon_core::env::OsEnv);
-    let dotenv = gleon_core::env::load_dotenv(&current_dir, home.as_deref());
+    let dotenv_dir =
+        gleon_core::env::dotenv_dir(&current_dir, cli.config.as_deref(), home.as_deref());
+    let dotenv = gleon_core::env::load_dotenv(&dotenv_dir, home.as_deref());
     if !dotenv.is_empty() {
         tracing::debug!(
             "Loaded {} environment variable(s) from .env files",
             dotenv.len()
         );
     }
-    let env = MergedEnv { dotenv };
+    let env = gleon_core::env::MergedEnv::new(dotenv);
 
     // Run License/Compliance Check
     let license_status = gleon_core::license::LicenseGate::verify(&env);
@@ -71,20 +73,6 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
     Ok(())
-}
-
-/// Merges .env file values with the OS process environment.
-/// Process env always wins — dotenv values are fallback defaults.
-struct MergedEnv {
-    dotenv: std::collections::HashMap<String, String>,
-}
-
-impl EnvProvider for MergedEnv {
-    fn get_var(&self, key: &str) -> Option<String> {
-        std::env::var(key)
-            .ok()
-            .or_else(|| self.dotenv.get(key).cloned())
-    }
 }
 
 fn get_storage_config(env: &dyn EnvProvider) -> Option<gleon_core::storage::StorageConfig> {

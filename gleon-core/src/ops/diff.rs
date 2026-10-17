@@ -1228,6 +1228,7 @@ screenshots:
   - include:
       - "*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         let config_file = gleon_dir.join("gleon.yaml");
         std::fs::write(&config_file, config_yaml).unwrap();
