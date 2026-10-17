@@ -3,6 +3,8 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "unmasked_app/**/*.png"
     mode: pixel
+    diff:
+      threshold: 0.01
     masks:
       - path: "**/*.png"
         zones:

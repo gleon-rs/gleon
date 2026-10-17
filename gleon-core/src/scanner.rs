@@ -299,6 +299,7 @@ screenshots:
     mode: ssim
   - include: "test/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         let config = GleonConfig::from_yaml_str(yaml).unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -488,6 +489,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "billing/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 exclude:
   - "**/corrupt.png"
 "#;
@@ -521,6 +523,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "billing dir/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         let config: GleonConfig = serde_yaml::from_str(raw_yaml).unwrap();
 
@@ -548,6 +551,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "billing/form.png"
     mode: pixel
+    diff: { threshold: 0.01 }
   - include: "billing/receipt.png"
     mode: ssim
 "#;
@@ -751,6 +755,7 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "billing/stripe/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         let config: GleonConfig = serde_yaml::from_str(raw_yaml).unwrap();
 

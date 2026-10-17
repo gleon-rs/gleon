@@ -2,3 +2,5 @@ required_version: ">=0.1.0"
 screenshots:
   - include: "login/*.png"
     mode: pixel
+    diff:
+      threshold: 0.01

@@ -553,14 +553,14 @@ pub mod item_or_vec {
 
 /// The comparison of a screenshot rule: `exact`, `pixel` or `ssim`.
 ///
-/// Required: a rule without a mode would silently compare under `pixel`'s default of 1%
-/// differing pixels, while a rule added for its masks alone means exact.
+/// Required: a rule added for its masks alone means exact, while a rule without a mode once
+/// compared under `pixel`, silently tolerating 1% of differing pixels.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleMode {
     /// Every pixel must be identical; `diff` keys are an error (nothing is tolerated).
     Exact,
-    /// Up to `diff.threshold` of the pixels may differ (1% by default), and the pixel options
+    /// Up to `diff.threshold` of the pixels may differ (required), and the pixel options
     /// (`channel_tolerance`, `anti_alias`, `edge_threshold`) let some differing pixels pass.
     Pixel,
     /// The engine's SSIM policy: `diff.min_similarity` and `diff.color_tolerance`.
@@ -589,6 +589,7 @@ pub struct ScreenshotRule {
 /// A rule specifying how to match and process screenshots.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = pixel_needs_threshold)]
 struct RuleFile {
     /// Glob patterns representing the files to include.
     #[serde(with = "item_or_vec")]
@@ -617,16 +618,40 @@ struct RuleFile {
     text_tolerance: Option<TextTolerance>,
 }
 
+/// The schema of a rule requires `diff.threshold` under `mode: pixel`, as parsing does
+/// ([`RuleError::MissingThreshold`]), so editors flag it too.
+fn pixel_needs_threshold(schema: &mut schemars::Schema) {
+    schema.insert(
+        "if".to_owned(),
+        serde_json::json!({ "properties": { "mode": { "const": "pixel" } }, "required": ["mode"] }),
+    );
+    schema.insert(
+        "then".to_owned(),
+        serde_json::json!({
+            "required": ["diff"],
+            "properties": { "diff": { "required": ["threshold"] } }
+        }),
+    );
+}
+
 /// A screenshot rule of `gleon.yaml` spelled wrong.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RuleError {
     /// No `mode`: there is no default, a rule added for its masks alone would otherwise tolerate
     /// what `pixel` tolerates.
     #[error(
-        "missing field `mode`: `exact` (every pixel identical), `pixel` (a share of the pixels may \
-         differ, 1% by default; what a rule without a mode meant in earlier versions) or `ssim`"
+        "missing field `mode`: `exact` (every pixel identical), `pixel` (the share of the pixels \
+         in `diff.threshold` may differ; `threshold: 0.01` is what a rule without a mode meant in \
+         earlier versions) or `ssim`"
     )]
     MissingMode,
+    /// `mode: pixel` without `diff.threshold`: the share of the pixels it tolerates is never
+    /// implicit.
+    #[error(
+        "`mode: pixel` needs `diff.threshold`: the share of the pixels that may differ (0.0–1.0, \
+         0 for none)"
+    )]
+    MissingThreshold,
     /// A `diff` key of another mode than the rule's (at any value: it would never apply).
     #[error("diff.{key} applies to `mode: {owner}` only")]
     ForeignKey {
@@ -664,15 +689,24 @@ impl DiffFile {
     /// The first key written that does not belong to `mode`, with the mode it belongs to;
     /// `exact` owns none.
     fn foreign_key(&self, mode: RuleMode) -> Option<(&'static str, &'static str)> {
+        // Destructured, so a new key cannot be left out of its mode.
+        let Self {
+            threshold,
+            min_similarity,
+            color_tolerance,
+            channel_tolerance,
+            anti_alias,
+            edge_threshold,
+        } = self;
         let pixel = [
-            ("threshold", self.threshold.is_some()),
-            ("channel_tolerance", self.channel_tolerance.is_some()),
-            ("anti_alias", self.anti_alias.is_some()),
-            ("edge_threshold", self.edge_threshold.is_some()),
+            ("threshold", threshold.is_some()),
+            ("channel_tolerance", channel_tolerance.is_some()),
+            ("anti_alias", anti_alias.is_some()),
+            ("edge_threshold", edge_threshold.is_some()),
         ];
         let ssim = [
-            ("min_similarity", self.min_similarity.is_some()),
-            ("color_tolerance", self.color_tolerance.is_some()),
+            ("min_similarity", min_similarity.is_some()),
+            ("color_tolerance", color_tolerance.is_some()),
         ];
         let foreign = |keys: &[(&'static str, bool)], owner: &'static str| {
             keys.iter()
@@ -759,6 +793,9 @@ impl TryFrom<RuleFile> for ScreenshotRule {
         let diff = file.diff.unwrap_or_default();
         if let Some((key, owner)) = diff.foreign_key(mode) {
             return Err(RuleError::ForeignKey { key, owner });
+        }
+        if mode == RuleMode::Pixel && diff.threshold.is_none() {
+            return Err(RuleError::MissingThreshold);
         }
         Ok(Self {
             include: file.include,
@@ -1064,7 +1101,7 @@ impl Default for GleonConfig {
                 include: vec![
                     GlobPattern::new("**/*.png").expect("Default glob pattern must be valid"),
                 ],
-                tolerance: Tolerance::from_rule(RuleMode::Pixel, &DiffConfig::default()),
+                tolerance: Tolerance::pixel(0.01),
                 masks: vec![],
                 text_tolerance: None,
             }],
@@ -1237,6 +1274,7 @@ required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
     mode: pixel
+    diff: { threshold: 0.01 }
     masks:
       - path: \"mask\"
         zones:
@@ -1255,6 +1293,7 @@ required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
     mode: pixel
+    diff: { threshold: 0.01 }
     masks:
       - path: \"mask\"
         zones:
@@ -1329,7 +1368,7 @@ screenshots:
         );
     }
 
-    /// A rule names its mode: a default would silently tolerate 1% of the pixels.
+    /// A rule names its mode: no default tolerates a share of the pixels silently.
     #[test]
     fn test_rule_without_mode_is_an_error() {
         let yaml = "screenshots:\n  - include: 'a/*.png'\n";
@@ -1345,18 +1384,23 @@ screenshots:
         ] {
             assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
-        for (mode, expected) in [
-            ("exact", Tolerance::Exact {}),
-            ("pixel", Tolerance::pixel(0.01)),
+        for (mode, diff, expected) in [
+            ("exact", "", Tolerance::Exact {}),
+            (
+                "pixel",
+                "    diff: { threshold: 0.01 }\n",
+                Tolerance::pixel(0.01),
+            ),
             (
                 "ssim",
+                "",
                 Tolerance::Ssim {
                     min_similarity: 0.8,
                     color_tolerance: 8.0,
                 },
             ),
         ] {
-            let yaml = format!("screenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n");
+            let yaml = format!("screenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n{diff}");
             let config = GleonConfig::from_yaml_str(&yaml).unwrap();
             assert_eq!(config.screenshots[0].tolerance, expected, "{mode}");
             // Written back with the keys of its mode alone.
@@ -1376,6 +1420,28 @@ screenshots:
             assert!(!written.contains("anti_alias"), "{written}");
             assert_eq!(GleonConfig::from_yaml_str(&written).unwrap(), config);
         }
+    }
+
+    /// `pixel` names the share of the pixels it tolerates: a default would tolerate 1% silently.
+    #[test]
+    fn test_pixel_rule_without_threshold_is_an_error() {
+        for diff in ["", "    diff: {}\n", "    diff: { anti_alias: true }\n"] {
+            let yaml = format!("screenshots:\n  - include: 'a/*.png'\n    mode: pixel\n{diff}");
+            let err = GleonConfig::from_yaml_str(&yaml).unwrap_err();
+            assert!(matches!(err, ConfigError::YamlParse(_)), "{err:?}");
+            for needle in [
+                "`mode: pixel` needs `diff.threshold`",
+                "0 for none",
+                "line 2",
+            ] {
+                assert!(err.to_string().contains(needle), "{needle}: {err}");
+            }
+        }
+        // 0 is a threshold: every pixel identical, with the pixel options.
+        let yaml =
+            "screenshots:\n  - include: 'a/*.png'\n    mode: pixel\n    diff: { threshold: 0 }\n";
+        let config = GleonConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(config.screenshots[0].tolerance, Tolerance::pixel(0.0));
     }
 
     /// `exact` tolerates nothing, so every `diff` key is foreign to it.
@@ -1518,9 +1584,15 @@ screenshots:
                     .contains(&format!("diff.{key} applies to `mode: {owner}` only")),
                 "{err}"
             );
+            // `pixel` names its threshold too.
+            let own = if owner == "pixel" && key != "threshold" {
+                diff.replacen("{ ", "{ threshold: 0, ", 1)
+            } else {
+                diff.to_owned()
+            };
             assert!(
-                GleonConfig::from_yaml_str(&yaml(owner, diff)).is_ok(),
-                "{diff}"
+                GleonConfig::from_yaml_str(&yaml(owner, &own)).is_ok(),
+                "{own}"
             );
         }
         // The keys of another mode are errors at their defaults too (the full `diff` blocks
@@ -1557,14 +1629,15 @@ screenshots:
                 "required_version: '>=0.1.0'\nscreenshots:\n  - include: 'a/*.png'\n    mode: {mode}\n    text_tolerance: {text}\n"
             )
         };
-        for mode in ["pixel", "ssim"] {
+        let pixel = "pixel\n    diff: { threshold: 0.01 }";
+        for mode in [pixel, "ssim"] {
             let config = GleonConfig::from_yaml_str(&yaml(mode, "0.1")).unwrap();
             assert_eq!(
                 config.screenshots[0].text_tolerance,
                 Some(TextTolerance(0.1))
             );
         }
-        let err = GleonConfig::from_yaml_str(&yaml("pixel", "2")).unwrap_err();
+        let err = GleonConfig::from_yaml_str(&yaml(pixel, "2")).unwrap_err();
         assert!(
             err.to_string().contains(
                 "screenshots[0].text_tolerance: `text_tolerance` must be between 0.0 and 1.0"
@@ -2057,6 +2130,7 @@ required_version: \">=0.1.0\"
 screenshots:
   - include: \"test.png\"
     mode: pixel
+    diff: { threshold: 0.02 }
 ";
         let config: GleonConfig = serde_yaml::from_str(minimal_yaml).unwrap();
         // Check structural defaults
@@ -2066,8 +2140,8 @@ screenshots:
 
         let rule = &config.screenshots[0];
         assert_eq!(rule.masks, Vec::<MaskRule>::new()); // default empty masks
-        // The defaults of the mode's `diff` keys.
-        assert_eq!(rule.tolerance, Tolerance::pixel(0.01));
+        // The defaults of the pixel options.
+        assert_eq!(rule.tolerance, Tolerance::pixel(0.02));
     }
 
     #[test]

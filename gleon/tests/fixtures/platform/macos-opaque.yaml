@@ -3,3 +3,5 @@ platform: "macos-aarch64"
 screenshots:
   - include: "**/*.png"
     mode: pixel
+    diff:
+      threshold: 0.01

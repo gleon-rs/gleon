@@ -110,10 +110,9 @@
           "minimum": 0.0
         },
         "threshold": {
-          "description": "Largest share [0.0, 1.0] of differing pixels in pixel mode (default 0.01; 0: exact).",
+          "description": "Largest share [0.0, 1.0] of differing pixels in pixel mode: required by `mode: pixel`\n(0: every pixel identical, the pixel options aside).",
           "type": "number",
           "format": "double",
-          "default": 0.01,
           "maximum": 1.0,
           "minimum": 0.0
         }
@@ -253,7 +252,7 @@
       "additionalProperties": false
     },
     "RuleMode": {
-      "description": "The comparison of a screenshot rule: `exact`, `pixel` or `ssim`.\n\nRequired: a rule without a mode would silently compare under `pixel`'s default of 1%\ndiffering pixels, while a rule added for its masks alone means exact.",
+      "description": "The comparison of a screenshot rule: `exact`, `pixel` or `ssim`.\n\nRequired: a rule added for its masks alone means exact, while a rule without a mode once\ncompared under `pixel`, silently tolerating 1% of differing pixels.",
       "oneOf": [
         {
           "description": "Every pixel must be identical; `diff` keys are an error (nothing is tolerated).",
@@ -261,7 +260,7 @@
           "const": "exact"
         },
         {
-          "description": "Up to `diff.threshold` of the pixels may differ (1% by default), and the pixel options\n(`channel_tolerance`, `anti_alias`, `edge_threshold`) let some differing pixels pass.",
+          "description": "Up to `diff.threshold` of the pixels may differ (required), and the pixel options\n(`channel_tolerance`, `anti_alias`, `edge_threshold`) let some differing pixels pass.",
           "type": "string",
           "const": "pixel"
         },
@@ -308,10 +307,32 @@
         }
       },
       "additionalProperties": false,
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "pixel"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
       "required": [
         "include",
         "mode"
-      ]
+      ],
+      "then": {
+        "properties": {
+          "diff": {
+            "required": [
+              "threshold"
+            ]
+          }
+        },
+        "required": [
+          "diff"
+        ]
+      }
     },
     "TextTolerance": {
       "description": "How much text may differ, under any [`Tolerance`].\n\nThe largest share (`[0, 1]`) of differing pixels in any [`gleon_engine::pixel::TEXT_TILE`]-pixel\ntile of the text regions an integration reports (lines of its render tree); everything else\nis compared under the tolerance (in SSIM mode the text is left out of both of its gates), and\nno pixel option applies to text.\n\nOperating systems draw glyphs differently (their font engines, hinting): across them 40% or\nmore of a tile of text differs while a changed digit of the same width is about a quarter, so\nno share tells them apart. [`Self::DEFAULT`] (1) lets text never fail, which is the same verdict as\nmasking it: the layout is compared, text content is not. Lower values compare text, at the\nrisk of failing on another OS's rendering. Against a golden of the platform it runs on, the\ndefault is [`Self::OWN_PLATFORM`] instead (see [`Self::resolve`]).",

@@ -309,7 +309,7 @@ mod tests {
         let mut file = File::create(&config_path).unwrap();
         writeln!(
             file,
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel"
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n    diff: {{ threshold: 0.01 }}"
         )
         .unwrap();
 
@@ -332,7 +332,7 @@ mod tests {
         let config_path = dir.path().join("my_config.yaml");
         std::fs::write(
             &config_path,
-            "required_version: \">=99.0.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n",
+            "required_version: \">=99.0.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n    diff: { threshold: 0.01 }\n",
         )
         .unwrap();
         let options = ContextOptions {
@@ -374,7 +374,7 @@ mod tests {
         let mut file = File::create(&config_file).unwrap();
         writeln!(
             file,
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel"
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n    diff: {{ threshold: 0.01 }}"
         )
         .unwrap();
 
@@ -400,7 +400,7 @@ mod tests {
         let mut file = File::create(&config_path).unwrap();
         writeln!(
             file,
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel"
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n    diff: {{ threshold: 0.01 }}"
         )
         .unwrap();
 
@@ -444,7 +444,7 @@ mod tests {
         let mut file = File::create(&default_path).unwrap();
         writeln!(
             file,
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel"
+            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n    diff: {{ threshold: 0.01 }}"
         )
         .unwrap();
 
@@ -514,8 +514,7 @@ mod tests {
         std::fs::create_dir_all(&gleon_dir).unwrap();
 
         let config_path = gleon_dir.join("gleon.yaml");
-        let yaml_content =
-            "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel";
+        let yaml_content = "required_version: \">=0.1.0\"\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n    diff: { threshold: 0.01 }";
         std::fs::write(&config_path, yaml_content).unwrap();
 
         let options = ContextOptions::default();
@@ -551,7 +550,7 @@ mod tests {
         let gleon_dir = root_dir.join(".gleon");
         std::fs::create_dir_all(&gleon_dir).unwrap();
         let config_path = gleon_dir.join("gleon.yaml");
-        let yaml_content = "required_version: \">=0.1.0\"\nfallback_platform:\n  os: linux\n  arch: x86_64\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel";
+        let yaml_content = "required_version: \">=0.1.0\"\nfallback_platform:\n  os: linux\n  arch: x86_64\nscreenshots:\n  - include: \"*.png\"\n    mode: pixel\n    diff: { threshold: 0.01 }";
         std::fs::write(&config_path, yaml_content).unwrap();
 
         let options = ContextOptions::default();

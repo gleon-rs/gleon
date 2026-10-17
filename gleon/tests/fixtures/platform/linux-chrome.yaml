@@ -9,3 +9,5 @@ platform:
 screenshots:
   - include: "**/*.png"
     mode: pixel
+    diff:
+      threshold: 0.01

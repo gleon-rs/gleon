@@ -35,9 +35,11 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to determine current directory: {e}"))?;
 
     // Load environment configuration from .gleon/.env and .gleon/.env.local of the workspace
-    // (never of the home directory).
+    // (that of `--config` when given; never of the home directory).
     let home = gleon_core::env::home(&gleon_core::env::OsEnv);
-    let dotenv = gleon_core::env::load_dotenv(&current_dir, home.as_deref());
+    let dotenv_dir =
+        gleon_core::env::dotenv_dir(&current_dir, cli.config.as_deref(), home.as_deref());
+    let dotenv = gleon_core::env::load_dotenv(&dotenv_dir, home.as_deref());
     if !dotenv.is_empty() {
         tracing::debug!(
             "Loaded {} environment variable(s) from .env files",
@@ -84,6 +86,12 @@ impl EnvProvider for MergedEnv {
         std::env::var(key)
             .ok()
             .or_else(|| self.dotenv.get(key).cloned())
+    }
+
+    /// As [`Self::get_var`] without copying the value.
+    fn has_var(&self, key: &str) -> bool {
+        std::env::var_os(key).is_some_and(|value| value.to_str().is_some())
+            || self.dotenv.contains_key(key)
     }
 }
 

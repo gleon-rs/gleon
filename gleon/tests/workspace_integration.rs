@@ -22,6 +22,8 @@ use std::{
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+mod common;
+
 /// Variables of the environment that select platforms, runs or outputs; CI exports some of them
 /// job-wide.
 const GLEON_ENV: [&str; 8] = [
@@ -48,10 +50,10 @@ fn gleon(dir: &Path, home: &Path) -> Command {
 }
 
 /// A project directory for a test and a home directory next to it, with symbolic links resolved
-/// (the CLI sees its working directory so).
+/// as the CLI resolves them (without Windows' `\\?\` prefix).
 fn temp() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().canonicalize().unwrap();
+    let path = gleon_model::fs::canonical(dir.path()).unwrap();
     let (project, home) = (path.join("project"), path.join("home"));
     fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(&home).unwrap();
@@ -327,22 +329,18 @@ fn test_the_flutter_template_names_the_platform_of_the_run() {
     assert!(!custom.join(".gleon").exists(), "nothing created");
 }
 
-/// `mode: exact` fails where `pixel` (1% of the pixels by default) passes: one changed pixel of
-/// a real screenshot.
+/// `mode: exact` fails where `pixel` with a threshold of 1% passes: one changed pixel of a real
+/// screenshot.
 #[test]
 fn test_an_exact_rule_fails_on_one_pixel() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gleon-core/tests/fixtures");
-    for (mode, code) in [("pixel", 0), ("exact", 1)] {
+    for (config, code) in [("config/shots", 0), ("config/shots-mode-exact", 1)] {
         let (_dir, root, home) = temp();
         gleon(&root, &home)
             .args(["init", "--generic"])
             .assert()
             .success();
-        fs::write(
-            root.join(".gleon/gleon.yaml"),
-            format!("screenshots:\n  - include: 'shots/*.png'\n    mode: {mode}\n"),
-        )
-        .unwrap();
+        common::copy_config(&root, config);
         let shot = root.join("shots/a.png");
         fs::create_dir_all(shot.parent().unwrap()).unwrap();
         fs::copy(fixtures.join("baseline_gradient_100x100.png"), &shot).unwrap();

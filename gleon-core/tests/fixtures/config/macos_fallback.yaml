@@ -7,3 +7,5 @@ screenshots:
   - include:
       - "test/goldens/**/*.png"
     mode: pixel
+    diff:
+      threshold: 0.01

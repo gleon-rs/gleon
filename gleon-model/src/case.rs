@@ -1028,8 +1028,8 @@ impl CaseReport {
 
     /// Checks that the fields agree with the outcome: `error_kind` exactly for errors, no golden
     /// hash for a missing golden, equal hashes for identical images, metrics only for `match`
-    /// and `mismatch` and of the tolerance's mode, tolerances within their ranges, a text
-    /// tolerance only beside a pixel or exact one (and text metrics only with it), images only
+    /// and `mismatch` and of the tolerance's mode, tolerances within their ranges, text metrics
+    /// only with a text tolerance (beside any tolerance), images only
     /// for failures that keep them, each at `<artifacts dir>/<platform key>/<name>/<file>` of
     /// this report.
     ///
@@ -1533,7 +1533,7 @@ pub mod text {
                     );
                 }
                 match failing_region {
-                    Some(bounds) => format!("changed area at {}: {gates}", region(bounds)),
+                    Some(bounds) => format!("failing area at {}: {gates}", region(bounds)),
                     None => gates,
                 }
             }
@@ -1764,7 +1764,7 @@ pub mod text {
             };
             assert_eq!(
                 metrics_summary(&ssim_metrics(Some(area), -138.0, None)),
-                "changed area at (10, 10) 1x1px: min local SSIM 0.500, colors deviate by up to \
+                "failing area at (10, 10) 1x1px: min local SSIM 0.500, colors deviate by up to \
                  146.0 (8-bit units)"
             );
             assert_eq!(

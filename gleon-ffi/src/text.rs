@@ -192,9 +192,12 @@ pub fn non_canonical(golden_uri: &str, origin: &str) -> String {
     )
 }
 
-/// Flutter's message for a missing golden.
+/// Flutter's message for a missing golden, with the command that records it.
 pub fn missing_golden(golden_uri: &str) -> String {
-    format!("Could not be compared against non-existent file: \"{golden_uri}\"")
+    format!(
+        "Could not be compared against non-existent file: \"{golden_uri}\". Record it with \
+         `flutter test --update-goldens`."
+    )
 }
 
 /// An invalid `.gleon/gleon.yaml`, or a golden whose name its rules cannot take.
@@ -249,9 +252,14 @@ pub fn unknown_origin(golden_uri: &str) -> String {
     )
 }
 
-/// Where the failure artifacts of a failed comparison were written.
-pub fn feedback(failures_dir: &str) -> String {
-    format!("\nFailure feedback can be found at {failures_dir}")
+/// Where the failure artifacts of a failed comparison were written, and which of them shows the
+/// differences (`diff`: its file name, when the failure has a diff image).
+pub fn feedback(failures_dir: &str, diff: Option<&str>) -> String {
+    let mut feedback = format!("\nFailure feedback can be found at {failures_dir}");
+    if let Some(diff) = diff {
+        let _infallible = write!(feedback, " (the differences: `{diff}`)");
+    }
+    feedback
 }
 
 /// Printed once per session when `GLEON_METRICS` asks for metrics without a workspace.
@@ -462,7 +470,8 @@ mod tests {
     fn test_messages() {
         assert_eq!(
             missing_golden("goldens/a.png"),
-            "Could not be compared against non-existent file: \"goldens/a.png\""
+            "Could not be compared against non-existent file: \"goldens/a.png\". Record it \
+             with `flutter test --update-goldens`."
         );
         assert_eq!(
             config_error("/w/.gleon/gleon.yaml", "bad"),
@@ -472,7 +481,11 @@ mod tests {
             could_not_compare("a.png", "boom"),
             "Golden \"a.png\": gleon could not compare: boom"
         );
-        let feedback = feedback("/t/failures/");
+        assert_eq!(
+            feedback("/t/failures/", Some("a_gleonDiff.png")),
+            "\nFailure feedback can be found at /t/failures/ (the differences: `a_gleonDiff.png`)"
+        );
+        let feedback = feedback("/t/failures/", None);
         assert_eq!(
             failure(
                 "a.png",

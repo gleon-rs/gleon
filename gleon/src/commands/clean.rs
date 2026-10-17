@@ -48,8 +48,15 @@ pub fn run_clean(ctx: &ResolvedContext, options: &CleanOptions) -> ExitCode {
     if !options.dry_run && res.cache_cleaned {
         info!("Cleaned the .gleon/runs cache.");
     }
+    for (file, reason) in &res.failed_files {
+        tracing::error!("Could not delete screenshot {}: {reason}", file.display());
+    }
 
-    ExitCode::Success
+    if res.failed_files.is_empty() {
+        ExitCode::Success
+    } else {
+        ExitCode::Failure
+    }
 }
 
 #[cfg(all(test, not(miri)))]
@@ -84,6 +91,7 @@ screenshots:
   - include:
       - "test/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -142,6 +150,7 @@ screenshots:
   - include:
       - "test/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -197,6 +206,7 @@ screenshots:
   - include:
       - "test/**/*.png"
     mode: pixel
+    diff: { threshold: 0.01 }
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
@@ -215,5 +225,42 @@ screenshots:
             },
         );
         assert_eq!(exit_code, ExitCode::Failure);
+    }
+
+    /// A screenshot that cannot be deleted fails the command, while the rest is cleaned.
+    #[test]
+    #[cfg(unix)]
+    fn test_run_clean_fails_on_an_undeletable_screenshot() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let base_path = temp.path();
+        let gleon_dir = base_path.join(".gleon");
+        std::fs::create_dir_all(&gleon_dir).unwrap();
+        std::fs::write(
+            gleon_dir.join("gleon.yaml"),
+            "screenshots:\n  - include: \"**/*.png\"\n    mode: exact\n",
+        )
+        .unwrap();
+        let locked = base_path.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("a.png"), b"image").unwrap();
+        std::fs::write(base_path.join("b.png"), b"image").unwrap();
+        let permissions = std::fs::metadata(&locked).unwrap().permissions();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
+        let exit_code = run_clean(
+            &ctx,
+            &CleanOptions {
+                screenshots: true,
+                ..CleanOptions::default()
+            },
+        );
+        std::fs::set_permissions(&locked, permissions).unwrap();
+
+        assert_eq!(exit_code, ExitCode::Failure);
+        assert!(locked.join("a.png").exists());
+        assert!(!base_path.join("b.png").exists());
     }
 }

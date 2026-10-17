@@ -78,6 +78,21 @@ pub fn load_dotenv(base_dir: &Path, home: Option<&Path>) -> HashMap<String, Stri
     map
 }
 
+/// The directory to read `.gleon/.env` from ([`load_dotenv`]).
+///
+/// With an explicit `config` (relative to `current_dir`), the workspace of its directory, as the
+/// context resolves it ([`crate::context`]); else `current_dir`.
+#[must_use]
+pub fn dotenv_dir(current_dir: &Path, config: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    config
+        .and_then(|config| current_dir.join(config).parent().map(Path::to_path_buf))
+        .and_then(|dir| crate::paths::find_workspace_root(&dir, home, crate::paths::has_gleon_dir))
+        .map_or_else(
+            || current_dir.to_path_buf(),
+            |workspace| workspace.base_dir().to_path_buf(),
+        )
+}
+
 /// Parses the dotenv-format file at `path` and merges its keys into `map`, overwriting any
 /// existing keys. Missing or unparsable files are logged and otherwise ignored.
 fn merge_env_file(map: &mut HashMap<String, String>, path: &Path) {
@@ -145,6 +160,38 @@ mod tests {
         let env = MapEnv(Map::from([("SET".to_string(), String::new())]));
         assert!(env.has_var("SET"));
         assert!(!env.has_var("MISSING"));
+    }
+
+    /// `--config` of a nested workspace reads the `.env` of that workspace, not the one of the
+    /// working directory; a config outside every workspace keeps the working directory's.
+    #[test]
+    fn test_dotenv_follows_an_explicit_config() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let app = root.join("packages/app");
+        for (dir, value) in [(root, "root"), (app.as_path(), "app")] {
+            std::fs::create_dir_all(dir.join(".gleon")).unwrap();
+            std::fs::write(dir.join(".gleon/gleon.yaml"), "screenshots: []\n").unwrap();
+            std::fs::write(dir.join(".gleon/.env"), format!("KEY={value}\n")).unwrap();
+        }
+        let key = |config: Option<&Path>| {
+            load_dotenv(&dotenv_dir(root, config, None), None)
+                .get("KEY")
+                .cloned()
+        };
+
+        assert_eq!(key(None).as_deref(), Some("root"));
+        let nested = Path::new("packages/app/.gleon/gleon.yaml");
+        assert_eq!(key(Some(nested)).as_deref(), Some("app"));
+        assert_eq!(
+            key(Some(&app.join(".gleon/gleon.yaml"))).as_deref(),
+            Some("app")
+        );
+        let outside = tempdir().unwrap();
+        assert_eq!(
+            key(Some(&outside.path().join("custom.yaml"))).as_deref(),
+            Some("root")
+        );
     }
 
     #[test]
