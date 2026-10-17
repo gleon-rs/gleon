@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
             dotenv.len()
         );
     }
-    let env = MergedEnv { dotenv };
+    let env = gleon_core::env::MergedEnv::new(dotenv);
 
     // Run License/Compliance Check
     let license_status = gleon_core::license::LicenseGate::verify(&env);
@@ -73,26 +73,6 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
     Ok(())
-}
-
-/// Merges .env file values with the OS process environment.
-/// Process env always wins — dotenv values are fallback defaults.
-struct MergedEnv {
-    dotenv: std::collections::HashMap<String, String>,
-}
-
-impl EnvProvider for MergedEnv {
-    fn get_var(&self, key: &str) -> Option<String> {
-        std::env::var(key)
-            .ok()
-            .or_else(|| self.dotenv.get(key).cloned())
-    }
-
-    /// As [`Self::get_var`] without copying the value.
-    fn has_var(&self, key: &str) -> bool {
-        std::env::var_os(key).is_some_and(|value| value.to_str().is_some())
-            || self.dotenv.contains_key(key)
-    }
 }
 
 fn get_storage_config(env: &dyn EnvProvider) -> Option<gleon_core::storage::StorageConfig> {

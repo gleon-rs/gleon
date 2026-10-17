@@ -39,6 +39,33 @@ impl EnvProvider for OsEnv {
     }
 }
 
+/// The OS process environment with the values of `.gleon/.env` files ([`load_dotenv`]) as
+/// fallback defaults: the process environment always wins.
+pub struct MergedEnv {
+    dotenv: HashMap<String, String>,
+}
+
+impl MergedEnv {
+    /// Falls back to `dotenv` for the keys the process environment lacks.
+    #[must_use]
+    pub const fn new(dotenv: HashMap<String, String>) -> Self {
+        Self { dotenv }
+    }
+}
+
+impl EnvProvider for MergedEnv {
+    fn get_var(&self, key: &str) -> Option<String> {
+        OsEnv.get_var(key).or_else(|| self.dotenv.get(key).cloned())
+    }
+
+    /// As [`Self::get_var`] without copying the value: a value of the process that is no
+    /// UTF-8 falls back to `dotenv` there too.
+    fn has_var(&self, key: &str) -> bool {
+        std::env::var_os(key).is_some_and(|value| value.to_str().is_some())
+            || self.dotenv.contains_key(key)
+    }
+}
+
 /// Gets an environment variable, trims surrounding whitespace, and treats a blank result the
 /// same as unset.
 #[must_use]
@@ -160,6 +187,25 @@ mod tests {
         let env = MapEnv(Map::from([("SET".to_string(), String::new())]));
         assert!(env.has_var("SET"));
         assert!(!env.has_var("MISSING"));
+    }
+
+    /// The process environment wins over `.env` values, which fill the keys it lacks.
+    #[test]
+    fn test_merged_env_prefers_the_process() {
+        // Set in every process of the test runner, on every OS.
+        let process = std::env::var("PATH").unwrap();
+        let only_dotenv = "GLEON_TEST_MERGED_ENV_DOTENV_ONLY";
+        let env = MergedEnv::new(HashMap::from([
+            ("PATH".to_owned(), "from .env".to_owned()),
+            (only_dotenv.to_owned(), "from .env".to_owned()),
+        ]));
+
+        assert_eq!(env.get_var("PATH"), Some(process));
+        assert!(env.has_var("PATH"));
+        assert_eq!(env.get_var(only_dotenv).as_deref(), Some("from .env"));
+        assert!(env.has_var(only_dotenv));
+        assert_eq!(env.get_var("GLEON_TEST_MERGED_ENV_UNSET"), None);
+        assert!(!env.has_var("GLEON_TEST_MERGED_ENV_UNSET"));
     }
 
     /// `--config` of a nested workspace reads the `.env` of that workspace, not the one of the

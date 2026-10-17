@@ -550,6 +550,11 @@ screenshots:
         let mut read_only = orig_perms.clone();
         read_only.set_mode(0o555);
         std::fs::set_permissions(&locked_dir, read_only).unwrap();
+        // A privileged process (root, `CAP_DAC_OVERRIDE`) deletes it anyway: nothing to test.
+        if std::fs::remove_file(&locked_file).is_ok() {
+            std::fs::set_permissions(&locked_dir, orig_perms).unwrap();
+            return;
+        }
 
         let ctx =
             ResolvedContext::from_options(&crate::context::ContextOptions::default(), base_path)

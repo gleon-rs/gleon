@@ -248,6 +248,11 @@ screenshots:
         std::fs::write(base_path.join("b.png"), b"image").unwrap();
         let permissions = std::fs::metadata(&locked).unwrap().permissions();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // A privileged process (root, `CAP_DAC_OVERRIDE`) deletes it anyway: nothing to test.
+        if std::fs::remove_file(locked.join("a.png")).is_ok() {
+            std::fs::set_permissions(&locked, permissions).unwrap();
+            return;
+        }
 
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
         let exit_code = run_clean(
