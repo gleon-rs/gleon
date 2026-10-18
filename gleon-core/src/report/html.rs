@@ -6,7 +6,7 @@ use gleon_model::{
     case::{CaseErrorKind, CaseReport, Metrics, text},
     platform::PlatformKey,
 };
-use minijinja::context;
+use minijinja::{context, value::Serde};
 use serde::Serialize;
 
 use super::{
@@ -122,7 +122,7 @@ impl super::ReportGenerator {
         let ctx = context! {
             total_tests => total_tests,
             failed_tests => failed_tests,
-            failures => failures,
+            failures => Serde(failures),
         };
 
         tmpl.render(ctx).map(Some).map_err(|e| ReportError::Render {

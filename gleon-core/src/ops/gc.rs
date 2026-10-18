@@ -389,7 +389,8 @@ pub fn collect_all_referenced_hashes(
         return Ok(referenced_hashes);
     };
 
-    let is_shallow = repo.shallow_file().exists();
+    // An unreadable shallow-file config counts as shallow: refusing is the safe default.
+    let is_shallow = repo.is_shallow().unwrap_or(true);
     if is_shallow {
         if !options.force && !options.dry_run {
             return Err(GcError::ShallowClone);
