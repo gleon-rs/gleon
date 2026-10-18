@@ -288,10 +288,8 @@ impl GitResolver {
     pub fn resolve_merge_base(base_dir: &Path, target_branch: &str) -> Result<String, GitError> {
         let repo = gix::discover(base_dir).map_err(|e| GitError::Discover(e.to_string()))?;
 
-        let is_shallow = repo.is_shallow().map_err(|e| {
-            GitError::MergeBaseFailed(format!("Failed to check for a shallow clone: {e}"))
-        })?;
-        if is_shallow {
+        // An unreadable shallow-file config counts as shallow: the history cannot be trusted.
+        if repo.is_shallow().unwrap_or(true) {
             return Err(GitError::ShallowClone(
                 "Shallow clone detected (.git/shallow exists)".to_string(),
             ));
@@ -1179,6 +1177,73 @@ mod tests {
         // This failure does NOT cause a panic. The test should succeed and return false.
         let result = GitResolver::verify_ignored_impl(&paths, dir.path()).unwrap();
         assert!(!result);
+    }
+
+    /// Inits a repository with a committer identity and one commit on HEAD.
+    fn init_repo_with_commit(path: &Path) -> (gix::Repository, gix::ObjectId) {
+        gix::init(path).unwrap();
+        std::fs::write(
+            path.join(".git/config"),
+            "[user]\n\tname = gleon Author\n\temail = author@gleon.rs\n",
+        )
+        .unwrap();
+        let repo = gix::open(path).unwrap();
+        let tree = repo.empty_tree().id;
+        let root = repo
+            .commit("HEAD", "root", tree, gix::commit::NO_PARENT_IDS)
+            .unwrap()
+            .detach();
+        (repo, root)
+    }
+
+    #[test]
+    fn test_resolve_merge_base_success() {
+        let dir = tempdir().unwrap();
+        let (repo, root) = init_repo_with_commit(dir.path());
+        repo.reference(
+            "refs/heads/target",
+            root,
+            gix::refs::transaction::PreviousValue::Any,
+            "branch off root",
+        )
+        .unwrap();
+        repo.commit("HEAD", "ahead", repo.empty_tree().id, [root])
+            .unwrap();
+
+        let base = GitResolver::resolve_merge_base(dir.path(), "target").unwrap();
+        assert_eq!(base, root.to_string());
+    }
+
+    #[test]
+    fn test_resolve_merge_base_no_common_ancestor() {
+        let dir = tempdir().unwrap();
+        let (repo, _) = init_repo_with_commit(dir.path());
+        repo.commit(
+            "refs/heads/orphan",
+            "unrelated root",
+            repo.empty_tree().id,
+            gix::commit::NO_PARENT_IDS,
+        )
+        .unwrap();
+
+        let err = GitResolver::resolve_merge_base(dir.path(), "orphan").unwrap_err();
+        assert!(
+            matches!(&err, GitError::MergeBaseFailed(msg) if msg.contains("No common ancestor")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_merge_base_target_not_a_commit() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path());
+
+        let err = GitResolver::resolve_merge_base(dir.path(), "HEAD^{tree}").unwrap_err();
+        assert!(
+            matches!(&err, GitError::MergeBaseFailed(msg)
+                if !msg.contains("No common ancestor") && !msg.starts_with("Failed to resolve")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
