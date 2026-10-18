@@ -15,6 +15,7 @@ use gleon_model::{
     case::{CaseErrorKind, CaseOutcome, CaseReport, Metrics, RunId, text},
     platform::{PlatformError, PlatformKey},
 };
+use minijinja::value::Serde;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use tracing::instrument;
@@ -437,7 +438,9 @@ impl DashboardCompiler {
             .get_template("dashboard.html")
             .map_err(DashboardError::Render)?;
 
-        let html = template.render(&view).map_err(DashboardError::Render)?;
+        let html = template
+            .render(Serde(&view))
+            .map_err(DashboardError::Render)?;
         Ok(html)
     }
 

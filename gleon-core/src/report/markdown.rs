@@ -1,7 +1,7 @@
 //! Markdown report/PR-comment generation.
 
 use gleon_model::{case::CaseReport, platform::PlatformKey};
-use minijinja::context;
+use minijinja::{context, value::Serde};
 use serde::Serialize;
 
 use super::{
@@ -171,7 +171,7 @@ impl super::ReportGenerator {
         let ctx = context! {
             total_failed => total_failed,
             has_baselines => has_baselines,
-            rows => rows,
+            rows => Serde(rows),
             remaining => remaining,
             html_artifact_url => options.html_artifact_url,
             footer => footer,

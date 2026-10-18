@@ -288,8 +288,10 @@ impl GitResolver {
     pub fn resolve_merge_base(base_dir: &Path, target_branch: &str) -> Result<String, GitError> {
         let repo = gix::discover(base_dir).map_err(|e| GitError::Discover(e.to_string()))?;
 
-        // Check if the repository is a shallow clone by checking for the existence of .git/shallow
-        if repo.shallow_file().exists() {
+        let is_shallow = repo.is_shallow().map_err(|e| {
+            GitError::MergeBaseFailed(format!("Failed to check for a shallow clone: {e}"))
+        })?;
+        if is_shallow {
             return Err(GitError::ShallowClone(
                 "Shallow clone detected (.git/shallow exists)".to_string(),
             ));
@@ -307,8 +309,13 @@ impl GitResolver {
         })?;
 
         repo.merge_base(head_id, target_id)
+            .map_err(|e| GitError::MergeBaseFailed(e.to_string()))?
             .map(|base_id| base_id.to_string())
-            .map_err(|e| GitError::MergeBaseFailed(e.to_string()))
+            .ok_or_else(|| {
+                GitError::MergeBaseFailed(format!(
+                    "No common ancestor between HEAD and '{target_branch}'"
+                ))
+            })
     }
 
     /// Gets the author name and email of the given commit, defaulting to "unknown".
