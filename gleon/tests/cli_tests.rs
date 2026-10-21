@@ -1875,8 +1875,10 @@ fn test_commands_in_a_goldens_workspace() {
     assert!(!dir.path().join(".gleon/runs").exists());
 }
 
-/// On GitHub Actions the PR comment links the golden of an integration in the repository at the
-/// tested commit, below the directory of the workspace in the checkout.
+/// On GitHub Actions the PR comment links the golden of an integration in the repository below
+/// the directory of the workspace in the checkout: at the head of a pull request (its event), at
+/// `GITHUB_SHA` for any other event. The events name a public repository, as the license check
+/// on GitHub Actions reads them too.
 #[test]
 fn test_cli_report_links_goldens_of_integrations_on_github_actions() {
     let checkout = tempfile::tempdir().unwrap();
@@ -1884,17 +1886,32 @@ fn test_cli_report_links_goldens_of_integrations_on_github_actions() {
     std::fs::create_dir_all(&package).unwrap();
     gleon().current_dir(&package).arg("init").assert().success();
     write_cases(&package, &[mismatch("test/goldens/a", 5)]);
+    let head = "a".repeat(40);
+    let event = checkout.path().join("event.json");
 
-    gleon()
-        .current_dir(&package)
-        .env("GITHUB_SERVER_URL", "https://github.com")
-        .env("GITHUB_REPOSITORY", "o/r")
-        .env("GITHUB_SHA", "abc123")
-        .env("GITHUB_WORKSPACE", checkout.path())
-        .args(["report", "markdown"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "| `test/goldens/a` | [Image](https://github.com/o/r/blob/abc123/packages/app/test/goldens/a.png) |",
-        ));
+    for (payload, commit) in [
+        (
+            serde_json::json!({"repository": {"private": false}, "pull_request": {"head": {"sha": head}}}),
+            head.as_str(),
+        ),
+        (
+            serde_json::json!({"repository": {"private": false}}),
+            "abc123",
+        ),
+    ] {
+        std::fs::write(&event, payload.to_string()).unwrap();
+        gleon()
+            .current_dir(&package)
+            .env("GITHUB_SERVER_URL", "https://github.com")
+            .env("GITHUB_REPOSITORY", "o/r")
+            .env("GITHUB_SHA", "abc123")
+            .env("GITHUB_WORKSPACE", checkout.path())
+            .env("GITHUB_EVENT_PATH", &event)
+            .args(["report", "markdown"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "| `test/goldens/a` | [Image](https://github.com/o/r/blob/{commit}/packages/app/test/goldens/a.png) |"
+            )));
+    }
 }
