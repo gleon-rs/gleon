@@ -14,13 +14,17 @@ pub fn copy_config(root: &Path, fixture: &str) {
         .unwrap_or_else(|error| panic!("copying {}: {error}", fixture.display()));
 }
 
-/// Variables of the environment that select runs, outputs, storage or the platform; CI exports
-/// some job-wide (`GLEON_RUN_ID`). Tests remove them so each sees only what it sets.
+/// Variables of the environment that select runs, outputs, storage, the platform or the commit
+/// of golden links; CI exports some job-wide (`GLEON_RUN_ID`). Tests remove them so each sees
+/// only what it sets.
 #[allow(
     dead_code,
     reason = "each integration test binary uses its own subset of the helpers"
 )]
-pub const GLEON_ENV: [&str; 9] = [
+pub const GLEON_ENV: [&str; 10] = [
+    // A GitHub Actions job's event payload: a pull request's head would replace `GITHUB_SHA`
+    // in the golden links of a PR comment.
+    "GITHUB_EVENT_PATH",
     "GLEON_RUN_ID",
     "GLEON_ARTIFACTS_DIR",
     "GLEON_METRICS",

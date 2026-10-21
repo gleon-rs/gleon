@@ -227,8 +227,8 @@ pub struct GleonConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>")]
     pub required_version: Option<semver::VersionReq>,
-    /// Where the baselines of the workspace live: `manifests` (the default) for the CLI's own
-    /// manifests and blobs, `goldens` for the golden files an integration (the Flutter package)
+    /// Where the baselines of the workspace live: `manifests` (the default) for the manifests and
+    /// blobs of the CLI, `goldens` for the golden files an integration (the Flutter package)
     /// commits next to its tests and compares itself.
     ///
     /// In a `goldens` workspace the CLI never scans, stages or diffs files by the `screenshots`

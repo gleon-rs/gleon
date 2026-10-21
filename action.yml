@@ -160,7 +160,8 @@ runs:
         echo "${{ steps.resolve.outputs.setup_dir }}" >> $GITHUB_PATH
 
     # `args` and `test-command`, each whitespace-separated or a JSON array of strings, as
-    # NUL-separated files the later steps read into bash arrays (no word splitting or globbing).
+    # NUL-separated files the later steps read into bash arrays (no word splitting or pattern
+    # expansion).
     - name: Parse Arguments
       id: parse
       shell: bash
@@ -191,6 +192,13 @@ runs:
         "
         echo "args_file=$ARGS_FILE" >> "$GITHUB_OUTPUT"
         echo "test_command_file=$TEST_COMMAND_FILE" >> "$GITHUB_OUTPUT"
+        # Whether a test command remains after parsing (a blank input or `[]` is none): the
+        # verify steps choose between `gleon test` and `gleon pull` + `gleon diff` by it.
+        if [ -s "$TEST_COMMAND_FILE" ]; then
+          echo "has_test_command=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_test_command=false" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Execute Single Command
       if: inputs.command != 'verify'
@@ -244,7 +252,7 @@ runs:
         gleon "$GLEON_COMMAND" "${args[@]}"
 
     - name: Verify - Pull Baselines
-      if: inputs.command == 'verify' && inputs.test-command == ''
+      if: inputs.command == 'verify' && steps.parse.outputs.has_test_command != 'true'
       shell: bash
       env:
         GLEON_LICENSE_KEY: ${{ inputs.license-key }}

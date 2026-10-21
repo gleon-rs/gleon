@@ -106,6 +106,8 @@ jobs:
             git archive "$HEAD_SHA" "$WORKING_DIRECTORY/.gleon/manifests" | tar -x -C .
             echo "Restored existing manifests from PR branch $HEAD_SHA."
           fi
+          # The PR's config, or none when the PR removed it (never the base branch's).
+          rm -f "$WORKING_DIRECTORY/.gleon/gleon.yaml"
           if git cat-file -e "$HEAD_SHA:${WORKING_DIRECTORY#./}/.gleon/gleon.yaml" 2>/dev/null; then
             mkdir -p "$WORKING_DIRECTORY/.gleon"
             git show "$HEAD_SHA:${WORKING_DIRECTORY#./}/.gleon/gleon.yaml" > "$WORKING_DIRECTORY/.gleon/gleon.yaml"

@@ -1876,7 +1876,7 @@ fn test_commands_in_a_goldens_workspace() {
 }
 
 /// On GitHub Actions the PR comment links the golden of an integration in the repository at the
-/// tested commit, below the workspace's directory in the checkout.
+/// tested commit, below the directory of the workspace in the checkout.
 #[test]
 fn test_cli_report_links_goldens_of_integrations_on_github_actions() {
     let checkout = tempfile::tempdir().unwrap();

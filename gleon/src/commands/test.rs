@@ -204,6 +204,10 @@ enum Outcome {
     /// incomplete.
     Interrupted(i32),
     /// A signal ended it: `128 + signal`, like a shell.
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "only Unix ends a process by a signal")
+    )]
     Signaled(i32),
 }
 
@@ -268,10 +272,11 @@ impl Signals {
         }
     }
 
-    /// Waits for `child`. `SIGINT` marks the run as interrupted; it is passed on unless gleon's
-    /// process group is the foreground group of its terminal, whose Ctrl-C reaches the command
-    /// directly (passing it on too would interrupt the command twice, which ends `flutter test`
-    /// without its cleanup). `SIGTERM` and `SIGHUP`, usually sent to gleon alone, are passed on.
+    /// Waits for `child`. `SIGINT` marks the run as interrupted; it is passed on unless the
+    /// process group of gleon is the foreground group of its terminal, whose Ctrl-C reaches the
+    /// command directly (passing it on too would interrupt the command twice, which ends
+    /// `flutter test` without its cleanup). `SIGTERM` and `SIGHUP`, usually sent to gleon alone,
+    /// are passed on.
     #[cfg(unix)]
     async fn wait(mut self, child: &mut tokio::process::Child) -> io::Result<Outcome> {
         // The command is not reaped before `wait` returns, so its id stays its own meanwhile.
@@ -324,10 +329,10 @@ impl Signals {
     }
 }
 
-/// Whether gleon's process group is the foreground process group of its controlling terminal,
-/// so a Ctrl-C there reaches the test command (in the same group) without gleon. False without a
-/// controlling terminal (CI) and in a background or separate process group (`timeout` puts its
-/// command in one).
+/// Whether the process group of gleon is the foreground process group of its controlling
+/// terminal, so a Ctrl-C there reaches the test command (in the same group) without gleon. False
+/// without a controlling terminal (CI) and in a background or separate process group (`timeout`
+/// puts its command in one).
 #[cfg(unix)]
 fn is_terminal_foreground() -> bool {
     use std::os::fd::AsRawFd as _;
@@ -357,7 +362,7 @@ fn forward(pid: Option<u32>, signal: libc::c_int) {
     // or writes no memory of this process.
     #[expect(
         unsafe_code,
-        reason = "`libc::kill` on the unreaped child passes a signal on (see SAFETY comment)"
+        reason = "`libc::kill` on the child not yet reaped passes a signal on (see SAFETY comment)"
     )]
     let sent = unsafe { libc::kill(pid, signal) };
     if sent != 0 {
@@ -776,7 +781,7 @@ mod tests {
     }
 
     /// Goldens of nested workspaces report there: the totals add up, and the hint names the
-    /// nested workspace's config.
+    /// config of the nested workspace.
     #[test]
     fn test_summary_adds_up_nested_workspaces() {
         let runs = [

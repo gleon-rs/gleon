@@ -16,7 +16,7 @@
       ]
     },
     "baselines": {
-      "description": "Where the baselines of the workspace live: `manifests` (the default) for the CLI's own\nmanifests and blobs, `goldens` for the golden files an integration (the Flutter package)\ncommits next to its tests and compares itself.\n\nIn a `goldens` workspace the CLI never scans, stages or diffs files by the `screenshots`\nrules: it reads the case reports of the integration's runs (`gleon test`, `gleon report`,\n`gleon dashboard`) and writes approved candidates over the golden files\n(`gleon approve`). Integrations read the rules either way.",
+      "description": "Where the baselines of the workspace live: `manifests` (the default) for the manifests and\nblobs of the CLI, `goldens` for the golden files an integration (the Flutter package)\ncommits next to its tests and compares itself.\n\nIn a `goldens` workspace the CLI never scans, stages or diffs files by the `screenshots`\nrules: it reads the case reports of the integration's runs (`gleon test`, `gleon report`,\n`gleon dashboard`) and writes approved candidates over the golden files\n(`gleon approve`). Integrations read the rules either way.",
       "$ref": "#/$defs/Baselines"
     },
     "exclude": {

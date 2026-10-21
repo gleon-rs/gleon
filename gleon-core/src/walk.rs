@@ -58,7 +58,7 @@ const PRUNED_FOR_WORKSPACES: &[&str] = &["Pods"];
 /// Integrations record each golden in the workspace nearest above it, so one test run from a
 /// workspace (`gleon test`) may report into nested ones too (the packages of a monorepo with
 /// their own `.gleon/`). The walk stays in the repository of `root`: a directory with a
-/// repository marker of its own (a submodule's `.git` file, a nested `.git`, `.hg`, `.jj` or
+/// repository marker of its own (the `.git` file of a submodule, a nested `.git`, `.hg`, `.jj` or
 /// `.sl`) is another repository and not entered. Hidden directories,
 /// [`DEFAULT_PRUNED_DIRECTORIES`] and `Pods/` are not entered either, symbolic links are not
 /// followed, and an unreadable directory is skipped (logged at debug).
@@ -94,8 +94,8 @@ pub fn workspaces_below(root: &Path) -> Vec<std::path::PathBuf> {
     roots
 }
 
-/// Whether `dir` holds a repository marker (`.git` as a directory or a submodule's file, `.hg`,
-/// `.jj`, `.sl`).
+/// Whether `dir` holds a repository marker (`.git` as a directory or as the file of a
+/// submodule, `.hg`, `.jj`, `.sl`).
 fn is_repository_root(dir: &Path) -> bool {
     gleon_model::workspace::REPOSITORY_MARKERS
         .iter()
