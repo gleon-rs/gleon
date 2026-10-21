@@ -24,23 +24,10 @@ use predicates::prelude::*;
 
 mod common;
 
-/// Variables of the environment that select platforms, runs or outputs; CI exports some of them
-/// job-wide.
-const GLEON_ENV: [&str; 8] = [
-    "GLEON_RUN_ID",
-    "GLEON_ARTIFACTS_DIR",
-    "GLEON_METRICS",
-    "GLEON_STORAGE_URL",
-    "GLEON_HTML_ARTIFACT_URL",
-    "GLEON_PLATFORM",
-    "GLEON_FALLBACK_PLATFORM",
-    "GLEON_OS",
-];
-
-/// The `gleon` binary in `dir` without [`GLEON_ENV`], its home directory `home`.
+/// The `gleon` binary in `dir` without [`common::GLEON_ENV`], its home directory `home`.
 fn gleon(dir: &Path, home: &Path) -> Command {
     let mut cmd = Command::cargo_bin("gleon").unwrap();
-    for var in GLEON_ENV {
+    for var in common::GLEON_ENV {
         cmd.env_remove(var);
     }
     cmd.current_dir(dir)
@@ -179,29 +166,26 @@ fn test_init_writes_the_flutter_template_next_to_a_pubspec() {
     assert_eq!(
         fs::read_to_string(root.join(".gleon/gleon.yaml")).unwrap(),
         format!(
-            "required_version: '>={}'\nfallback_platform: {}\nscreenshots:\n- include: \
-             '**/test/**/*.png'\n  mode: exact\nexclude: '**/failures/**'\n",
+            "required_version: '>={}'\nbaselines: goldens\nfallback_platform: {}\nscreenshots:\n- \
+             include: '**/test/**/*.png'\n  mode: exact\nexclude: '**/failures/**'\n",
             env!("CARGO_PKG_VERSION"),
             host()
         )
     );
+    // The goldens are the baselines: no blobs, manifests or storage settings (the rule itself is
+    // tested in gleon-model, `test_flutter_template`).
+    assert!(root.join(".gleon/runs/latest").is_dir());
+    assert!(!root.join(".gleon/blobs").exists());
+    assert!(!root.join(".gleon/manifests").exists());
+    assert!(!root.join(".gleon/.env.template").exists());
 
-    // A package of a pub workspace and the root, but not the images of failures.
+    // The commands that scan screenshots point to `gleon test` instead of listing the goldens.
     write_golden(&root.join("test/goldens/a.png"));
-    write_golden(&root.join("packages/app/test/goldens/b.png"));
-    write_golden(&root.join("test/failures/a_masterImage.png"));
-    write_golden(&root.join("packages/app/test/failures/b_isolatedDiff.png"));
-    let status = gleon(&root, &home)
+    gleon(&root, &home)
         .args(["status", "--json"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(status.stdout).unwrap();
-    assert!(stdout.contains("\"test/goldens/a.png\""), "{stdout}");
-    assert!(
-        stdout.contains("\"packages/app/test/goldens/b.png\""),
-        "{stdout}"
-    );
-    assert!(!stdout.contains("failures"), "{stdout}");
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("gleon test --"));
 }
 
 /// `--generic` writes the generic template next to a `pubspec.yaml`, with the tolerance of its
@@ -313,10 +297,7 @@ fn test_the_flutter_template_names_the_platform_of_the_run() {
             config.contains(&format!("fallback_platform: {expected}\n")),
             "{flags:?}: {config}"
         );
-        assert!(
-            dir.join(".gleon/manifests").join(expected).is_dir(),
-            "{flags:?}"
-        );
+        assert!(!dir.join(".gleon/manifests").exists(), "{flags:?}");
     }
 
     let custom = root.join("custom");

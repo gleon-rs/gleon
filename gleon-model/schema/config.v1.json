@@ -15,6 +15,10 @@
         }
       ]
     },
+    "baselines": {
+      "description": "Where the baselines of the workspace live: `manifests` (the default) for the CLI's own\nmanifests and blobs, `goldens` for the golden files an integration (the Flutter package)\ncommits next to its tests and compares itself.\n\nIn a `goldens` workspace the CLI never scans, stages or diffs files by the `screenshots`\nrules: it reads the case reports of the integration's runs (`gleon test`, `gleon report`,\n`gleon dashboard`) and writes approved candidates over the golden files\n(`gleon approve`). Integrations read the rules either way.",
+      "$ref": "#/$defs/Baselines"
+    },
     "exclude": {
       "description": "Globs of paths to exclude from testing.",
       "$ref": "#/$defs/OneOrMany"
@@ -67,6 +71,21 @@
       "description": "`.gleon/runs/latest/artifacts` or a directory under `.gleon/runs/` outside `latest/`: `/`-separated names of ASCII letters, digits, `.`, `_` and `-`, without `.` or `..`.",
       "type": "string",
       "pattern": "^\\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*)$"
+    },
+    "Baselines": {
+      "description": "Where the baselines of a workspace live ([`GleonConfig::baselines`]).",
+      "oneOf": [
+        {
+          "description": "Manifests in `.gleon/manifests/<platform>/` and blobs: `gleon stage` records the\nscreenshots the rules match, `gleon diff` compares them.",
+          "type": "string",
+          "const": "manifests"
+        },
+        {
+          "description": "The golden files of an integration (the Flutter package), committed next to its tests and\ncompared by its test runner: `gleon test`, `gleon report` and `gleon approve`.",
+          "type": "string",
+          "const": "goldens"
+        }
+      ]
     },
     "DiffConfig": {
       "description": "Configuration parameters for the diff engine.",

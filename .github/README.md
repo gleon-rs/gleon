@@ -106,6 +106,80 @@ gleon dashboard
 
 ---
 
+## 🐦 Flutter: Goldens in Git
+
+The [gleon Flutter package](https://github.com/gleon-rs/flutter) compares goldens inside
+`flutter test` and keeps them where Flutter does: PNG files next to the tests, committed to Git.
+The CLI adds what one test process cannot do: a summary of the whole run, an HTML report with
+each golden, candidate and diff, a PR comment, history, and `/gleon approve`, which commits the
+new goldens for you. Requires the Flutter package 0.6.0 or newer (older ones reject the
+`baselines` key below).
+
+```bash
+gleon init                       # next to pubspec.yaml: the Flutter template
+gleon test -- flutter test       # one run with metrics, summed up at the end
+gleon report html --out .gleon/runs/latest/report.html
+gleon approve                    # writes the failed candidates over their goldens
+```
+
+`gleon init` next to a `pubspec.yaml` writes `baselines: goldens` into `.gleon/gleon.yaml`: the
+goldens are the baselines, so the workspace gets no manifests, blobs or storage settings. Its rule
+compares the goldens under every `test/` exactly; the package reads the same file (tolerances,
+masks, the `fallback_platform` whose goldens compare text).
+
+`gleon test` ends with the totals of the run and one line per failure with its case report:
+
+```text
+Run run-20261020T101500Z-1a2b3c4d: 128 case(s): 125 passed, 3 failed (2 mismatch, 1 missing)
+  test/goldens/counter_3: Mismatch: 0.0167% (1 of 6000px) differ (.gleon/runs/latest/cases/macos-aarch64/test/goldens/counter_3.json)
+Next: `gleon report html --out .gleon/runs/latest/report.html` shows each failure with its golden, candidate and diff; `gleon approve` accepts the candidates
+```
+
+Its exit code is always that of the tests; an interrupted run (Ctrl-C, `SIGTERM`, `SIGHUP`, all passed on to the tests) is not summed up. A package with a workspace of its own (`gleon init` in `packages/app/` of a monorepo) records its goldens there: `gleon test` at the root records the run in every workspace below it and sums them all up, and its hint names the package's config (`gleon --config packages/app/.gleon/gleon.yaml report html …`). `gleon dashboard` keeps the history of the runs.
+
+In a goldens workspace the commands that work with manifests do not apply:
+
+| Command | In a goldens workspace |
+| :--- | :--- |
+| `gleon status`, `stage`, `diff`, `clean --screenshots` | Refused: they would take every golden for an unrecorded screenshot. |
+| `gleon pull`, `push`, `gc`, `lint`, `resolve` | Nothing to do (success), so shared CI steps pass. |
+| `gleon clean` | Removes `.gleon/runs/` as usual. |
+
+In CI, the [Action](#-cicd-integration-github-actions) runs the tests with `test-command`, posts
+the failures as a PR comment (each golden linked at the PR's head commit) and uploads the run for
+`/gleon approve` ([its workflow](#enabling-gleon-approve-comments)), which needs no storage
+secrets in a goldens workspace. The comment needs `pull-requests: write`:
+
+```yaml
+name: Goldens
+
+on:
+  pull_request:
+
+jobs:
+  goldens:
+    runs-on: macos-26 # the `fallback_platform` of .gleon/gleon.yaml compares text
+    permissions:
+      contents: read
+      pull-requests: write # the PR comment
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Set up Flutter here (e.g. subosito/flutter-action, pinned to a commit SHA).
+      - uses: gleon-rs/gleon@main
+        with:
+          command: verify
+          test-command: flutter test
+          artifact-name: gleon-artifacts-${{ github.event.pull_request.number }}-${{ runner.os }}
+```
+
+The Action reports and uploads the workspace of its `working-directory`; for packages with
+workspaces of their own, use one step (and one `artifact-name`) per package.
+
+Public repositories and local runs need no license; private repositories need one in CI (see
+[License](#-license)).
+
+---
+
 ## 🛠️ CLI Command Reference
 
 | Command                    | Description                                                                                 | Example                                                                         |
@@ -114,12 +188,12 @@ gleon dashboard
 | `gleon stage [PATHS...]`   | Records matching screenshots as official baseline manifests for the current platform.       | `gleon stage`<br>`gleon stage test/goldens/login.png`                           |
 | `gleon status`             | Reports the status (`Clean`, `Added`, `Modified`, `Deleted`) of all discovered screenshots. | `gleon status`<br>`gleon status --json`                                         |
 | `gleon diff`               | Runs visual comparison between actual screenshots and committed baselines.                  | `gleon diff`<br>`gleon diff --artifacts .gleon/runs/ci`                         |
-| `gleon test -- <COMMAND>`  | Runs a test command (e.g. `flutter test`) as one run with metrics on.                       | `gleon test -- flutter test`<br>`gleon test -- npm test`                        |
+| `gleon test -- <COMMAND>`  | Runs a test command (e.g. `flutter test`) as one run with metrics on, then sums it up.      | `gleon test -- flutter test`<br>`gleon test -- npm test`                        |
 | `gleon report <FORMAT>`    | Renders the case reports of the latest run (`html`, `markdown`, `junit`, `json`).           | `gleon report html --out report.html`<br>`gleon report markdown --pr-number 42` |
 | `gleon dashboard`          | Adds the latest run to `history.json` and compiles the static history dashboard.            | `gleon dashboard`<br>`gleon dashboard --push`                                   |
 | `gleon approve [NAMES...]` | Accepts the candidates of failed cases as new baselines.                                    | `gleon approve`<br>`gleon approve auth/login`                                   |
-| `gleon pull`               | Downloads missing baseline blobs from remote object storage to local storage.               | `gleon pull`<br>`gleon pull --all`                                              |
-| `gleon push`               | Uploads locally staged baseline blobs to remote object storage.                             | `gleon push`                                                                    |
+| `gleon pull`               | Downloads missing baseline blobs from remote object storage (`--require-storage` or `GLEON_REQUIRE_STORAGE=1`: fail without one). | `gleon pull`<br>`gleon pull --all`                                     |
+| `gleon push`               | Uploads locally staged baseline blobs to remote object storage (`--require-storage` likewise). | `gleon push`                                                                 |
 | `gleon clean`              | Removes `.gleon/runs/`; `--screenshots` also deletes, untracks and ignores screenshots.     | `gleon clean`<br>`gleon clean --screenshots --dry-run`                          |
 | `gleon lint`               | Verifies integrity and schema compliance of all manifests and configs.                      | `gleon lint`                                                                    |
 | `gleon resolve`            | Interactively or automatically resolves Git merge conflicts in baseline manifests.          | `gleon resolve`                                                                 |
@@ -146,6 +220,13 @@ Below is a complete, annotated `.gleon/gleon.yaml` reference. Unknown keys are r
 # Optional: enforce a minimum CLI version across the team and CI (`gleon init` writes its own).
 # A workspace of an integration alone needs none.
 required_version: ">=0.1.0"
+
+# Optional: where the baselines live. `manifests` (the default): `.gleon/manifests/` and blobs,
+# recorded by `gleon stage` and compared by `gleon diff`. `goldens`: the golden files an
+# integration (the Flutter package) commits next to its tests and compares itself; the CLI then
+# reads their case reports (`gleon test`, `report`, `approve`) and refuses `status`, `stage`,
+# `diff` and `clean --screenshots`. `gleon init` writes `goldens` next to a `pubspec.yaml`.
+baselines: manifests
 
 # Rules for discovering and comparing screenshots (optional: a workspace may name only its
 # `fallback_platform`). A file is excluded if it matches `exclude`;
@@ -237,7 +318,7 @@ Reports and images are kept per platform: `.gleon/runs/latest/cases/<platform>/<
 
 #### Integrations in CI (e.g. Flutter)
 
-Tests of an integration write their case reports themselves, so there is no `gleon diff` step: give the job a run id, run the tests through `gleon test`, then report that run and upload `.gleon/runs/` for `/gleon approve` (the artifact name must start with `gleon-artifacts-<PR number>-`):
+Tests of an integration write their case reports themselves, so there is no `gleon diff` step: the Action's `verify` with `test-command` does it all (see [Flutter: Goldens in Git](#-flutter-goldens-in-git)), or by hand: give the job a run id, run the tests through `gleon test`, then report that run and upload `.gleon/runs/` for `/gleon approve` (the artifact name must start with `gleon-artifacts-<PR number>-`):
 
 ```yaml
 env:
@@ -370,6 +451,7 @@ jobs:
 | `target-branch`     | Target branch for baseline comparison                                                                 | PR base ref or default branch |
 | `working-directory` | Working directory to run gleon from (useful for monorepos)                                            | `'.'`                         |
 | `args`              | Additional flags for the selected command                                                             | `''`                          |
+| `test-command`      | For `verify`: the tests of an integration (`flutter test`), run as `gleon test -- <command>` instead of `pull` + `diff` | `''`         |
 | `license-key`       | Commercial BSL license key for private enterprise repositories                                        | `''`                          |
 | `strict`            | Fail build immediately on license violation (`'true'` / `'false'`)                                    | `'false'`                     |
 
@@ -396,7 +478,7 @@ To accept the new visual changes as the updated baseline:
 
 ### Enabling `/gleon approve` Comments
 
-To enable comment-based approvals, add `.github/workflows/gleon-approve.yml` referencing the reusable workflow:
+To enable comment-based approvals, add `.github/workflows/gleon-approve.yml` referencing the reusable workflow. It approves the cases of the PR head's latest runs and commits the new baselines to the PR branch: golden PNGs in a goldens workspace (no storage secrets needed), manifests otherwise (their blobs need the `GLEON_STORAGE_URL` secret and the provider credentials; without them it fails). It runs gleon from the default branch with the PR's own `.gleon/gleon.yaml` and manifests (never the PR's code), so a PR that adds `.gleon/` or switches to `baselines: goldens` is approved as it will be merged. A CI job that failed before comparing any golden uploads an empty run, which is read as one:
 
 ```yaml
 name: Gleon Approve

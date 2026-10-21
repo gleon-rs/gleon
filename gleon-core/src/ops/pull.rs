@@ -100,8 +100,11 @@ pub async fn pull_blobs(
     storage_config: Option<&StorageConfig>,
     all_platforms: bool,
     platform_override: Option<&str>,
+    require_storage: bool,
 ) -> Result<PullResult, PullError> {
     let paths = ensure_initialized(&context.base_dir)?;
+    crate::ops::common::refuse_goldens(context)?;
+    crate::ops::common::require_storage(storage_config, require_storage)?;
 
     let Some(storage_cfg) = active_storage_config(storage_config) else {
         return Ok(PullResult {
@@ -266,7 +269,7 @@ mod tests {
         let cfg = StorageConfig::new("memory://");
 
         // Invalid platform override segment
-        let res = pull_blobs(&ctx, Some(&cfg), false, Some("../invalid")).await;
+        let res = pull_blobs(&ctx, Some(&cfg), false, Some("../invalid"), false).await;
         assert!(matches!(
             res,
             Err(PullError::Core(CoreError::Context(ContextError::Platform(
@@ -275,7 +278,7 @@ mod tests {
         ));
 
         // Empty manifest directory for valid platform override -> 0 blobs
-        let res = pull_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"))
+        let res = pull_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"), false)
             .await
             .unwrap();
         assert_eq!(res.total_manifest_blobs, 0);
@@ -307,7 +310,7 @@ mod tests {
             ..ResolvedContext::default()
         };
         let cfg = StorageConfig::new("memory://");
-        let res = pull_blobs(&ctx, Some(&cfg), true, None).await;
+        let res = pull_blobs(&ctx, Some(&cfg), true, None, false).await;
 
         perms.set_mode(0o755);
         let _ = std::fs::set_permissions(&manifests_dir, perms);
@@ -326,7 +329,7 @@ mod tests {
         ctx.base_dir = temp.path().to_path_buf();
 
         let cfg = StorageConfig::new("memory://");
-        let res = pull_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = pull_blobs(&ctx, Some(&cfg), false, None, false).await;
         assert!(matches!(
             res,
             Err(PullError::Core(CoreError::Context(ContextError::Platform(
@@ -354,7 +357,7 @@ mod tests {
         ctx.base_dir = temp.path().to_path_buf();
 
         let cfg = StorageConfig::new("memory://");
-        let res = pull_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = pull_blobs(&ctx, Some(&cfg), false, None, false).await;
         assert!(res.is_ok());
         assert_eq!(res.unwrap().total_manifest_blobs, 0);
     }
@@ -416,7 +419,7 @@ mod tests {
         perms.set_mode(0o000);
         std::fs::set_permissions(&local_blobs, perms.clone()).unwrap();
 
-        let res = pull_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = pull_blobs(&ctx, Some(&cfg), false, None, false).await;
 
         perms.set_mode(0o755);
         let _ = std::fs::set_permissions(&local_blobs, perms);
@@ -465,7 +468,9 @@ mod tests {
         }
         std::fs::write(&blob_path, "blob content").unwrap();
 
-        let res = pull_blobs(&ctx, Some(&cfg), false, None).await.unwrap();
+        let res = pull_blobs(&ctx, Some(&cfg), false, None, false)
+            .await
+            .unwrap();
 
         assert_eq!(res.total_manifest_blobs, 1);
         assert_eq!(res.skipped_blobs, 1);
@@ -526,7 +531,9 @@ mod tests {
             crate::manifest::SingleTestManifest::new(hash1.clone(), phash.clone(), 10, 10).unwrap();
         m_lin1.save(linux_manifests_dir.join("test1.json")).unwrap();
 
-        let res = pull_blobs(&ctx, Some(&cfg), false, None).await.unwrap();
+        let res = pull_blobs(&ctx, Some(&cfg), false, None, false)
+            .await
+            .unwrap();
 
         assert_eq!(res.total_manifest_blobs, 2);
         assert_eq!(res.downloaded_blobs, 2);
@@ -548,7 +555,7 @@ mod tests {
             ..ResolvedContext::default()
         };
         let cfg = StorageConfig::new("memory://");
-        let res = pull_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = pull_blobs(&ctx, Some(&cfg), false, None, false).await;
         assert!(matches!(
             res,
             Err(PullError::Core(CoreError::NotInitialized))
@@ -567,13 +574,13 @@ mod tests {
             ..ResolvedContext::default()
         };
         // 1. None storage config
-        let res_none = pull_blobs(&ctx, None, false, None).await.unwrap();
+        let res_none = pull_blobs(&ctx, None, false, None, false).await.unwrap();
         assert!(res_none.local_mode);
         assert_eq!(res_none.total_manifest_blobs, 0);
 
         // 2. Empty URL storage config
         let empty_cfg = StorageConfig::new("   ");
-        let res_empty = pull_blobs(&ctx, Some(&empty_cfg), false, None)
+        let res_empty = pull_blobs(&ctx, Some(&empty_cfg), false, None, false)
             .await
             .unwrap();
         assert!(res_empty.local_mode);
@@ -606,7 +613,9 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let res = pull_blobs(&ctx, Some(&cfg), true, None).await.unwrap();
+        let res = pull_blobs(&ctx, Some(&cfg), true, None, false)
+            .await
+            .unwrap();
         assert_eq!(res.total_manifest_blobs, 1);
         assert_eq!(res.downloaded_blobs, 1);
     }
@@ -637,7 +646,7 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let res = pull_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"))
+        let res = pull_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"), false)
             .await
             .unwrap();
         assert_eq!(res.total_manifest_blobs, 1);

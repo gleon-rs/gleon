@@ -13,3 +13,29 @@ pub fn copy_config(root: &Path, fixture: &str) {
     fs::copy(&fixture, gleon_dir.join("gleon.yaml"))
         .unwrap_or_else(|error| panic!("copying {}: {error}", fixture.display()));
 }
+
+/// Variables of the environment that select runs, outputs, storage or the platform; CI exports
+/// some job-wide (`GLEON_RUN_ID`). Tests remove them so each sees only what it sets.
+#[allow(
+    dead_code,
+    reason = "each integration test binary uses its own subset of the helpers"
+)]
+pub const GLEON_ENV: [&str; 9] = [
+    "GLEON_RUN_ID",
+    "GLEON_ARTIFACTS_DIR",
+    "GLEON_METRICS",
+    "GLEON_STORAGE_URL",
+    "GLEON_HTML_ARTIFACT_URL",
+    "GLEON_REQUIRE_STORAGE",
+    "GLEON_PLATFORM",
+    "GLEON_FALLBACK_PLATFORM",
+    "GLEON_OS",
+];
+
+/// The config of a goldens workspace as `gleon init` writes it for Flutter, shared with the
+/// gleon-core tests (a path for [`copy_config`]).
+#[allow(
+    dead_code,
+    reason = "each integration test binary uses its own subset of the helpers"
+)]
+pub const FLUTTER_GOLDENS: &str = "../../../gleon-core/tests/fixtures/config/flutter_goldens";

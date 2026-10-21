@@ -39,6 +39,9 @@ pub async fn run_gc(
     grace_period_hours: u32,
     force: bool,
 ) -> ExitCode {
+    if let Some(code) = crate::commands::goldens_nothing_to_do(ctx, "collect") {
+        return code;
+    }
     info!("Running storage garbage collection...");
 
     let options = GcOptions::new(dry_run, grace_period_hours, force);

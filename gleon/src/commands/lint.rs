@@ -10,6 +10,9 @@ use crate::{commands::report_failure, exit_code::ExitCode};
 /// Returns [`ExitCode::Success`] if all manifests are valid and unconflicted, or
 /// [`ExitCode::Failure`] if any file contains conflict markers or schema corruption.
 pub fn run_lint(ctx: &ResolvedContext, platform_filter: Option<&str>) -> ExitCode {
+    if let Some(code) = crate::commands::goldens_nothing_to_do(ctx, "lint") {
+        return code;
+    }
     info!("Running manifest linting...");
 
     let report = match lint_workspace_manifests(ctx, platform_filter) {

@@ -472,6 +472,8 @@ pub async fn garbage_collect(
     storage_config: Option<&StorageConfig>,
     options: &GcOptions,
 ) -> Result<GcResult, GcError> {
+    // A goldens workspace has no manifests: every remote blob would look orphaned.
+    crate::ops::common::refuse_goldens(context)?;
     let Some(storage_cfg) = crate::ops::sync::active_storage_config(storage_config) else {
         return Ok(GcResult {
             mode: GcMode::LocalMode,

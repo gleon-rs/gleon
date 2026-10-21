@@ -105,9 +105,11 @@ impl Cli {
         let is_all = matches!(
             self.command,
             Commands::Pull {
-                all_platforms: true
+                all_platforms: true,
+                ..
             } | Commands::Push {
-                all_platforms: true
+                all_platforms: true,
+                ..
             }
         );
         if is_all && self.platform.is_some() {
@@ -244,12 +246,28 @@ pub enum Commands {
         /// Pull blobs for all platforms under .gleon/manifests/ instead of only the active platform
         #[arg(short = 'a', long = "all", conflicts_with = "platform")]
         all_platforms: bool,
+        /// Fail instead of working in local mode when no remote storage is configured (CI steps
+        /// that must sync blobs, such as the approve workflow, set `GLEON_REQUIRE_STORAGE`)
+        #[arg(
+            long,
+            env = "GLEON_REQUIRE_STORAGE",
+            value_parser = clap::builder::FalseyValueParser::new()
+        )]
+        require_storage: bool,
     },
     /// Push staged changes and report to remote storage
     Push {
         /// Push blobs for all platforms under .gleon/manifests/ instead of only the active platform
         #[arg(short = 'a', long = "all", conflicts_with = "platform")]
         all_platforms: bool,
+        /// Fail instead of working in local mode when no remote storage is configured (CI steps
+        /// that must sync blobs, such as the approve workflow, set `GLEON_REQUIRE_STORAGE`)
+        #[arg(
+            long,
+            env = "GLEON_REQUIRE_STORAGE",
+            value_parser = clap::builder::FalseyValueParser::new()
+        )]
+        require_storage: bool,
     },
     /// Clean up unreferenced baseline blobs from remote storage
     Gc {

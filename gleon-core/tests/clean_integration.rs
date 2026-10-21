@@ -220,3 +220,25 @@ fn test_clean_workspace_untracks_mixed_case_paths() {
         "entry must be gone from the index"
     );
 }
+
+/// `gleon clean` still removes the runs of a goldens workspace; `--screenshots` is refused and
+/// leaves the committed goldens (and the runs) where they are.
+#[test]
+fn test_clean_refuses_screenshots_of_a_goldens_workspace() {
+    let temp = tempdir().unwrap();
+    let (golden, runs) = common::goldens_workspace(temp.path());
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
+
+    let screenshots = CleanOptions {
+        screenshots: true,
+        ..CleanOptions::default()
+    };
+    let err = clean_workspace(&ctx, &screenshots).unwrap_err();
+    assert!(err.to_string().contains("baselines: goldens"), "{err}");
+    assert!(golden.is_file());
+    common::assert_unchanged(&runs);
+
+    clean_workspace(&ctx, &CleanOptions::default()).unwrap();
+    assert!(golden.is_file());
+    assert!(!temp.path().join(".gleon/runs").exists());
+}

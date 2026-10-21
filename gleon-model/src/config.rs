@@ -227,6 +227,16 @@ pub struct GleonConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>")]
     pub required_version: Option<semver::VersionReq>,
+    /// Where the baselines of the workspace live: `manifests` (the default) for the CLI's own
+    /// manifests and blobs, `goldens` for the golden files an integration (the Flutter package)
+    /// commits next to its tests and compares itself.
+    ///
+    /// In a `goldens` workspace the CLI never scans, stages or diffs files by the `screenshots`
+    /// rules: it reads the case reports of the integration's runs (`gleon test`, `gleon report`,
+    /// `gleon dashboard`) and writes approved candidates over the golden files
+    /// (`gleon approve`). Integrations read the rules either way.
+    #[serde(default, skip_serializing_if = "Baselines::is_manifests")]
+    pub baselines: Baselines,
     /// The platform the CLI runs as (e.g. `macos-aarch64`, or `{renderer: impeller}` over the
     /// detected OS and architecture); its flags and `GLEON_PLATFORM` override it.
     ///
@@ -265,6 +275,30 @@ pub struct GleonConfig {
     /// outside `latest/`; `GLEON_ARTIFACTS_DIR` overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<ArtifactsDir>,
+}
+
+/// Where the baselines of a workspace live ([`GleonConfig::baselines`]).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Baselines {
+    /// Manifests in `.gleon/manifests/<platform>/` and blobs: `gleon stage` records the
+    /// screenshots the rules match, `gleon diff` compares them.
+    #[default]
+    Manifests,
+    /// The golden files of an integration (the Flutter package), committed next to its tests and
+    /// compared by its test runner: `gleon test`, `gleon report` and `gleon approve`.
+    Goldens,
+}
+
+impl Baselines {
+    /// Whether these are [`Self::Manifests`], the default (left out when serialized).
+    /// It takes a reference because serde passes one to `skip_serializing_if` functions.
+    #[must_use]
+    pub const fn is_manifests(&self) -> bool {
+        matches!(self, Self::Manifests)
+    }
 }
 
 /// Default [`GleonConfig::artifacts`].
@@ -1089,6 +1123,7 @@ impl Default for GleonConfig {
     fn default() -> Self {
         Self {
             required_version: Some(DEFAULT_VERSION.clone()),
+            baselines: Baselines::Manifests,
             platform: None,
             fallback_platform: None,
             metrics: MetricsConfig::default(),
@@ -1148,6 +1183,7 @@ impl GleonConfig {
         )]
         let glob = |pattern| GlobPattern::new(pattern).expect("the Flutter globs must be valid");
         Self {
+            baselines: Baselines::Goldens,
             fallback_platform: Some(canonical),
             screenshots: vec![ScreenshotRule {
                 include: vec![glob("**/test/**/*.png")],
@@ -1484,7 +1520,9 @@ screenshots:
     fn test_flutter_template() {
         let config = GleonConfig::for_flutter(PlatformConfig::Opaque("macos-aarch64".to_owned()));
         assert!(config.validate().is_ok());
+        assert_eq!(config.baselines, Baselines::Goldens);
         let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("baselines: goldens"), "{yaml}");
         assert!(yaml.contains("fallback_platform: macos-aarch64"), "{yaml}");
         assert!(yaml.contains("include: '**/test/**/*.png'"), "{yaml}");
         assert!(yaml.contains("mode: exact"), "{yaml}");
@@ -1511,6 +1549,36 @@ screenshots:
         let parsed = GleonConfig::from_yaml_str(&yaml).unwrap();
         assert_eq!(parsed, config);
         assert_eq!(parsed.screenshots[0].tolerance, Tolerance::Exact {});
+    }
+
+    /// `baselines` defaults to manifests and is then left out; `goldens` round-trips; any other
+    /// value is a parse error, never a silent default.
+    #[test]
+    fn test_baselines_key() {
+        let config = GleonConfig::from_yaml_str("fallback_platform: macos-aarch64\n").unwrap();
+        assert_eq!(config.baselines, Baselines::Manifests);
+        assert!(
+            !serde_yaml::to_string(&config)
+                .unwrap()
+                .contains("baselines")
+        );
+        assert!(
+            !serde_yaml::to_string(&GleonConfig::default())
+                .unwrap()
+                .contains("baselines")
+        );
+
+        let goldens = GleonConfig::from_yaml_str("baselines: goldens\n").unwrap();
+        assert_eq!(goldens.baselines, Baselines::Goldens);
+        let yaml = serde_yaml::to_string(&goldens).unwrap();
+        assert_eq!(GleonConfig::from_yaml_str(&yaml).unwrap(), goldens);
+
+        let explicit = GleonConfig::from_yaml_str("baselines: manifests\n").unwrap();
+        assert_eq!(explicit.baselines, Baselines::Manifests);
+
+        let err = GleonConfig::from_yaml_str("baselines: blobs\n").unwrap_err();
+        assert!(matches!(err, ConfigError::YamlParse(_)), "{err}");
+        assert!(err.to_string().contains("goldens"), "{err}");
     }
 
     #[test]

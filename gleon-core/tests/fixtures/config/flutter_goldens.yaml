@@ -1,0 +1,8 @@
+# What `gleon init` writes next to a pubspec.yaml: the goldens are the baselines.
+required_version: ">=0.1.0"
+baselines: goldens
+fallback_platform: macos-aarch64
+screenshots:
+  - include: "**/test/**/*.png"
+    mode: exact
+exclude: "**/failures/**"

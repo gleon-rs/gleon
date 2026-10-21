@@ -333,3 +333,14 @@ fn test_status_with_corrupt_image() {
             if err.kind() == std::io::ErrorKind::InvalidData
     ));
 }
+
+#[test]
+fn test_status_refuses_a_goldens_workspace() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    common::goldens_workspace(temp_dir.path());
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp_dir.path()).unwrap();
+    assert!(matches!(
+        check_status(&ctx).unwrap_err(),
+        StatusError::Core(gleon_core::ops::common::CoreError::BaselinesAreGoldens)
+    ));
+}

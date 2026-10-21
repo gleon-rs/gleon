@@ -670,3 +670,28 @@ fn test_diff_keeps_a_diff_of_both_sizes_for_a_dimension_mismatch() {
     assert_eq!(diff.get_pixel(5, 5).0, darkened(golden.get_pixel(5, 5).0));
     assert_eq!(diff.get_pixel(50, 50).0, [255, 0, 255, 255]);
 }
+
+/// A goldens workspace is refused before anything is read or written: the case reports of the
+/// integration's run stay (a `gleon diff` would otherwise replace them with its own `missing`
+/// reports of the same names and later delete them).
+#[test]
+fn test_diff_refuses_a_goldens_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, runs) = common::goldens_workspace(temp.path());
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
+
+    let err = run_diff(&ctx, &DiffOptions::default()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DiffOpError::Core(gleon_core::ops::common::CoreError::BaselinesAreGoldens)
+        ),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("gleon test -- flutter test"),
+        "{err}"
+    );
+    common::assert_unchanged(&runs);
+    assert!(!temp.path().join(".gleon/runs/latest/report.md").exists());
+}

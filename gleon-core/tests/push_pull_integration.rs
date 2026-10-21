@@ -31,11 +31,11 @@ async fn test_push_pull_local_flat_mode() {
     init_workspace(&ctx, None).unwrap();
 
     // Push with no storage config -> local mode
-    let push_res = push_blobs(&ctx, None, false, None).await.unwrap();
+    let push_res = push_blobs(&ctx, None, false, None, false).await.unwrap();
     assert!(push_res.local_mode);
 
     // Pull with no storage config -> local mode
-    let pull_res = pull_blobs(&ctx, None, false, None).await.unwrap();
+    let pull_res = pull_blobs(&ctx, None, false, None, false).await.unwrap();
     assert!(pull_res.local_mode);
 }
 
@@ -85,7 +85,7 @@ async fn test_push_pull_file_scheme_lifecycle() {
     assert!(local_blob_path.is_file());
 
     // 1. Initial Push -> Uploads 1 blob
-    let push1 = push_blobs(&ctx, Some(&storage_config), false, None)
+    let push1 = push_blobs(&ctx, Some(&storage_config), false, None, false)
         .await
         .unwrap();
     assert_eq!(push1.total_manifest_blobs, 1);
@@ -101,7 +101,7 @@ async fn test_push_pull_file_scheme_lifecycle() {
     assert!(remote_blob_path.is_file());
 
     // 2. Idempotent Push -> Uploads 0, skips 1
-    let push2 = push_blobs(&ctx, Some(&storage_config), false, None)
+    let push2 = push_blobs(&ctx, Some(&storage_config), false, None, false)
         .await
         .unwrap();
     assert_eq!(push2.uploaded_blobs, 0);
@@ -112,7 +112,7 @@ async fn test_push_pull_file_scheme_lifecycle() {
     assert!(!local_blob_path.is_file());
 
     // 4. Pull missing blob from remote -> Downloaded 1
-    let pull1 = pull_blobs(&ctx, Some(&storage_config), false, None)
+    let pull1 = pull_blobs(&ctx, Some(&storage_config), false, None, false)
         .await
         .unwrap();
     assert_eq!(pull1.downloaded_blobs, 1);
@@ -121,7 +121,7 @@ async fn test_push_pull_file_scheme_lifecycle() {
     assert_eq!(fs::read(&local_blob_path).unwrap(), fixture_png.to_vec());
 
     // 5. Idempotent Pull -> Downloaded 0, skips 1
-    let pull2 = pull_blobs(&ctx, Some(&storage_config), false, None)
+    let pull2 = pull_blobs(&ctx, Some(&storage_config), false, None, false)
         .await
         .unwrap();
     assert_eq!(pull2.downloaded_blobs, 0);
@@ -161,7 +161,7 @@ async fn test_push_missing_local_blob_fail_fast() {
         .unwrap();
 
     // Local blob file does not exist -> Push fails fast
-    let push_res = push_blobs(&ctx, Some(&storage_config), false, None).await;
+    let push_res = push_blobs(&ctx, Some(&storage_config), false, None, false).await;
     assert!(push_res.is_err());
     let err_msg = push_res.unwrap_err().to_string();
     assert!(err_msg.contains("Missing local blob"));
@@ -201,7 +201,7 @@ async fn test_pull_missing_remote_blob_fail_fast() {
         .unwrap();
 
     // Local blob missing AND remote blob missing -> Pull fails fast with MissingRemoteBlob
-    let pull_res = pull_blobs(&ctx, Some(&storage_config), false, None).await;
+    let pull_res = pull_blobs(&ctx, Some(&storage_config), false, None, false).await;
     assert!(pull_res.is_err());
     let err_msg = pull_res.unwrap_err().to_string();
     assert!(err_msg.contains("Missing remote blob"));
@@ -258,7 +258,7 @@ async fn test_push_pull_all_platforms_option() {
     fs::write(blobs_dir.join(sha2), b"blob2").unwrap();
 
     // Push with all_platforms = true
-    let push_all = push_blobs(&ctx, Some(&storage_config), true, None)
+    let push_all = push_blobs(&ctx, Some(&storage_config), true, None, false)
         .await
         .unwrap();
     assert_eq!(push_all.total_manifest_blobs, 2);
@@ -269,7 +269,7 @@ async fn test_push_pull_all_platforms_option() {
     fs::remove_file(blobs_dir.join(sha2)).unwrap();
 
     // Pull with all_platforms = true
-    let pull_all = pull_blobs(&ctx, Some(&storage_config), true, None)
+    let pull_all = pull_blobs(&ctx, Some(&storage_config), true, None, false)
         .await
         .unwrap();
     assert_eq!(pull_all.total_manifest_blobs, 2);

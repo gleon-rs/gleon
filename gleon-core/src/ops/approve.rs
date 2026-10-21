@@ -24,6 +24,7 @@ use thiserror::Error;
 
 use crate::{
     cases::{Cases, CasesError, check_run_dir},
+    config::Baselines,
     context::ResolvedContext,
     manifest::{ManifestError, SingleTestManifest, WorkspaceIndex},
     ops::{
@@ -155,6 +156,18 @@ fn check<'a>(candidate: &'a Candidate<'a>) -> Result<Approval<'a>, ApproveError>
 /// Errors that can occur during baseline approval.
 #[derive(Debug, Error)]
 pub enum ApproveError {
+    /// A case of `gleon diff` (a manifest baseline) in a workspace whose baselines are golden
+    /// files: approving it would create manifests and blobs there.
+    #[error(
+        "'{name}' is a case of `gleon diff`, whose baselines are manifests, but this workspace \
+         keeps golden files (`baselines: goldens` in .gleon/gleon.yaml): approve it in a \
+         manifest workspace, or remove the report (`gleon clean`)"
+    )]
+    ManifestCaseInGoldensWorkspace {
+        /// The test name of the case.
+        name: String,
+    },
+
     /// No failed case with a candidate image to approve.
     #[error(
         "No failed cases with candidate images{filters} to approve in {paths}: run the tests (or \
@@ -392,10 +405,16 @@ fn is_png_outside_hidden_dirs(path: &Path) -> bool {
 /// Where the candidate of `report`, which ran on the platform keyed `platform_key`, goes.
 fn target(
     base_dir: &Path,
+    baselines: Baselines,
     report: &CaseReport,
     platform_key: &PlatformKey,
 ) -> Result<Target, ApproveError> {
     if report.source.tool == CLI_TOOL {
+        if baselines == Baselines::Goldens {
+            return Err(ApproveError::ManifestCaseInGoldensWorkspace {
+                name: report.name.clone(),
+            });
+        }
         return Ok(Target::Manifest {
             platform_key: platform_key.clone(),
             name: report.name.clone(),
@@ -427,6 +446,7 @@ fn is_canonical(report: &CaseReport, tracking: Option<&PlatformConfig>) -> bool 
 /// golden too: passed, it is canonical; failed, its own candidate replaces it.
 fn candidates_of<'a>(
     base_dir: &Path,
+    baselines: Baselines,
     filters: &[PathBuf],
     loaded: &'a [(&'a Path, Cases)],
     tracking: Option<&PlatformConfig>,
@@ -469,7 +489,7 @@ fn candidates_of<'a>(
                 platform_key: platform_key.clone(),
                 sha256,
                 file,
-                target: target(base_dir, report, platform_key)?,
+                target: target(base_dir, baselines, report, platform_key)?,
             };
             if report.source.tool != CLI_TOOL
                 && !is_canonical(report, tracking)
@@ -652,7 +672,8 @@ pub fn approve_workspace(
         .config
         .as_ref()
         .and_then(|config| config.fallback_platform.as_ref());
-    let (candidates, skipped) = candidates_of(base_dir, &filters, &loaded, tracking)?;
+    let (candidates, skipped) =
+        candidates_of(base_dir, context.baselines(), &filters, &loaded, tracking)?;
     let skipped = skipped_cases(&skipped);
     if candidates.is_empty() {
         return Err(nothing_to_approve(runs, &filters, skipped));
@@ -960,6 +981,26 @@ mod tests {
         );
     }
 
+    /// A goldens workspace never gets manifests: a case of `gleon diff` there is refused before
+    /// anything is written.
+    #[test]
+    fn test_approve_refuses_manifest_cases_in_a_goldens_workspace() {
+        let (temp, mut ctx) = workspace();
+        ctx.config = Some(GleonConfig {
+            baselines: Baselines::Goldens,
+            ..GleonConfig::default()
+        });
+        let latest = runs_latest(&ctx);
+        failed_case(&latest, "shots/a", CLI_TOOL, CaseOutcome::Mismatch, &png(1));
+        let err = approve_workspace(&ctx, &[], &[], None).unwrap_err();
+        assert!(
+            matches!(err, ApproveError::ManifestCaseInGoldensWorkspace { ref name } if name == "shots/a"),
+            "{err}"
+        );
+        assert!(!temp.path().join(".gleon/manifests").exists());
+        assert!(!temp.path().join(".gleon/blobs").exists());
+    }
+
     /// Paths from the shell (`./shots/a`) filter like their plain form.
     #[test]
     fn test_approve_filters_ignore_a_leading_dot() {
@@ -1118,6 +1159,27 @@ mod tests {
         let sha = |shade| hex::encode(Sha256::digest(png(shade)));
         assert_eq!(manifest_of(&ctx, LINUX, "a").hash.value(), sha(1));
         assert_eq!(manifest_of(&ctx, "macos-aarch64", "a").hash.value(), sha(2));
+    }
+
+    /// One job of a CI matrix failed before comparing any golden: its run holds only the run
+    /// file of `gleon test`. It is an empty run, not a reason to approve nothing.
+    #[test]
+    fn test_approve_reads_an_empty_run_next_to_others() {
+        let (temp, ctx) = workspace();
+        let linux_run = temp.path().join("download/linux/latest");
+        let empty_run = temp.path().join("download/windows/latest");
+        failed_case(&linux_run, "a", CLI_TOOL, CaseOutcome::Mismatch, &png(1));
+        crate::cases::RunInfo {
+            run_id: RunId::new("run-2").unwrap(),
+            platform: windows().key().unwrap(),
+            started_at: chrono::Utc::now(),
+            command: vec!["flutter".to_owned(), "test".to_owned()],
+        }
+        .write(&empty_run)
+        .unwrap();
+
+        let res = approve_workspace(&ctx, &[], &[linux_run, empty_run], None).unwrap();
+        assert_eq!(approved(&res), ["linux-x86_64/a"]);
     }
 
     #[test]

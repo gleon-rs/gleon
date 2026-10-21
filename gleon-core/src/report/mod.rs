@@ -15,6 +15,8 @@ mod xml;
 
 use std::sync::LazyLock;
 
+pub use format::{CaseSummary, case_name};
+
 use crate::{cases::Cases, manifest::ImageHash};
 
 pub(crate) static JINJA_ENV: LazyLock<minijinja::Environment<'static>> = LazyLock::new(|| {
@@ -86,6 +88,11 @@ pub struct MarkdownReportOptions<'a> {
     pub html_artifact_url: Option<&'a str>,
     /// Optional resolver of signed baseline URLs, tried before `base_image_url`.
     pub image_url_resolver: Option<&'a ImageUrlResolver<'a>>,
+    /// URL under which the files of the workspace are seen in its repository at the tested
+    /// commit (`https://github.com/<owner>/<repo>/blob/<sha>[/<workspace dir>]`): the baseline
+    /// link of a case whose golden is a file of the repository (an integration's golden, no
+    /// blob).
+    pub golden_base_url: Option<&'a str>,
     /// Where the comment is being rendered, selecting the footer text.
     pub context: RenderTarget,
 }

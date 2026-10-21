@@ -46,6 +46,26 @@ pub enum CoreError {
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The workspace keeps its baselines as the golden files of an integration
+    /// (`baselines: goldens`), which the CLI never scans as screenshots.
+    #[error(
+        "the baselines of this workspace are golden files (`baselines: goldens` in \
+         .gleon/gleon.yaml), compared by its tests, not manifests and blobs: `gleon status`, \
+         `stage`, `diff` and `clean --screenshots` would take every golden for an unrecorded \
+         screenshot, and `pull`, `push`, `gc` and `lint` have no manifests to work with. Run the \
+         tests with `gleon test -- <command>` (e.g. `gleon test -- flutter test`), then \
+         `gleon report <format>` and `gleon approve`"
+    )]
+    BaselinesAreGoldens,
+
+    /// `--require-storage` was given but no remote storage is configured.
+    #[error(
+        "no remote storage is configured (GLEON_STORAGE_URL), but this run requires one: the \
+         blobs of the manifests must be pulled from and pushed to it (in the approve workflow, \
+         set the GLEON_STORAGE_URL secret)"
+    )]
+    StorageRequired,
 }
 
 impl From<crate::io::IoError> for CoreError {
@@ -198,12 +218,49 @@ pub fn index_keys_missing_from<'a, S: std::hash::BuildHasher>(
 /// Loads the effective `GleonConfig` from `context` (or its default) and scans the workspace
 /// rooted at `context.base_dir` for matching test cases.
 ///
+/// The one place the CLI takes the files its rules match for screenshots: a workspace whose
+/// baselines are the golden files of an integration is refused here, before anything is read or
+/// written (so `gleon diff` never replaces the integration's case reports).
+///
 /// # Errors
-/// Returns [`CoreError::Scanner`] if any include/exclude glob fails to compile or a derived
-/// test name fails validation.
+/// Returns [`CoreError::BaselinesAreGoldens`] for a `baselines: goldens` workspace, or
+/// [`CoreError::Scanner`] if any include/exclude glob fails to compile or a derived test name
+/// fails validation.
 pub fn load_config_and_scan(context: &ResolvedContext) -> Result<Vec<TestCase>, CoreError> {
+    refuse_goldens(context)?;
     let config = context.config.clone().unwrap_or_default();
     FileScanner::scan_workspace(&config, &context.base_dir).map_err(CoreError::Scanner)
+}
+
+/// Fails for a workspace whose baselines are the golden files of an integration.
+///
+/// [`gleon_model::config::Baselines::Goldens`]: the commands that scan screenshots check this
+/// before they create or read anything.
+///
+/// # Errors
+/// Returns [`CoreError::BaselinesAreGoldens`] for such a workspace.
+pub fn refuse_goldens(context: &ResolvedContext) -> Result<(), CoreError> {
+    match context.baselines() {
+        gleon_model::config::Baselines::Goldens => Err(CoreError::BaselinesAreGoldens),
+        gleon_model::config::Baselines::Manifests => Ok(()),
+    }
+}
+
+/// Fails when remote storage is `required` but `storage` names none (missing or blank URL), so
+/// a CI step that must sync blobs never passes in local mode.
+///
+/// # Errors
+/// Returns [`CoreError::StorageRequired`] then.
+pub fn require_storage(
+    storage: Option<&crate::storage::StorageConfig>,
+    required: bool,
+) -> Result<(), CoreError> {
+    let configured = storage.is_some_and(|storage| !storage.url.trim().is_empty());
+    if required && !configured {
+        Err(CoreError::StorageRequired)
+    } else {
+        Ok(())
+    }
 }
 
 /// Decodes raw PNG bytes and computes its SHA-256 digest, perceptual hash, and dimensions.
@@ -357,6 +414,20 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn test_require_storage() {
+        let blank = crate::storage::StorageConfig::new(" ");
+        let memory = crate::storage::StorageConfig::new("memory://");
+        assert!(require_storage(None, false).is_ok());
+        assert!(require_storage(Some(&memory), true).is_ok());
+        for missing in [None, Some(&blank)] {
+            assert!(matches!(
+                require_storage(missing, true),
+                Err(CoreError::StorageRequired)
+            ));
+        }
+    }
 
     #[test]
     fn test_ensure_initialized_missing_and_present() {
