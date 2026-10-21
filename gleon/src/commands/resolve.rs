@@ -68,6 +68,9 @@ pub async fn run_resolve_impl<F>(
 where
     F: FnMut(&ConflictedManifestItem) -> Result<usize, anyhow::Error>,
 {
+    if let Some(code) = crate::commands::goldens_nothing_to_do(ctx, "resolve") {
+        return code;
+    }
     info!("Scanning for conflicted manifest files...");
 
     let mut conflicts = match scan_conflicts(&ctx.base_dir, None) {

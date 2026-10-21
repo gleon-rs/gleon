@@ -88,8 +88,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # Security: Restore existing PR baseline manifests without checking out untrusted branch code
-      - name: Fetch PR Manifests
+      # Security: Restore the PR's workspace config and baseline manifests without checking out
+      # untrusted branch code. The config is data (parsed strictly, it runs nothing; storage
+      # settings come from the secrets only): approving goes by the PR's own config, so a PR that
+      # adds `.gleon/` or switches to `baselines: goldens` is approved as it will be merged.
+      - name: Fetch PR Workspace Config and Manifests
         shell: bash
         env:
           HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
@@ -103,17 +106,18 @@ jobs:
             git archive "$HEAD_SHA" "$WORKING_DIRECTORY/.gleon/manifests" | tar -x -C .
             echo "Restored existing manifests from PR branch $HEAD_SHA."
           fi
-
-      - name: Validate Storage Configuration
-        shell: bash
-        env:
-          STORAGE_URL: ${{ secrets.GLEON_STORAGE_URL }}
-        run: |
-          if [ -z "$STORAGE_URL" ]; then
-            echo "::error::GLEON_STORAGE_URL secret is missing or empty. A valid remote storage URL is required to approve and sync baselines."
-            exit 1
+          # The PR's config, or none when the PR removed it (never the base branch's).
+          rm -f "$WORKING_DIRECTORY/.gleon/gleon.yaml"
+          if git cat-file -e "$HEAD_SHA:${WORKING_DIRECTORY#./}/.gleon/gleon.yaml" 2>/dev/null; then
+            mkdir -p "$WORKING_DIRECTORY/.gleon"
+            git show "$HEAD_SHA:${WORKING_DIRECTORY#./}/.gleon/gleon.yaml" > "$WORKING_DIRECTORY/.gleon/gleon.yaml"
+            echo "Using the workspace config of PR branch $HEAD_SHA."
           fi
 
+      # Manifest workspaces need remote storage for their blobs (GLEON_REQUIRE_STORAGE makes pull
+      # and push fail without GLEON_STORAGE_URL; releases before the variable ignore it); in a
+      # workspace of golden files (`baselines: goldens`, the Flutter template) the baselines are
+      # the PNGs in Git, so pull and push have nothing to do.
       - name: Pull Existing Baseline Blobs
         uses: gleon-rs/gleon@main
         with:
@@ -123,6 +127,7 @@ jobs:
           working-directory: ${{ inputs.working-directory }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
+          GLEON_REQUIRE_STORAGE: "true"
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           GLEON_STORAGE_URL: ${{ secrets.GLEON_STORAGE_URL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -177,8 +182,11 @@ jobs:
             exit 1
           fi
           echo "args=$(jq -cn '$ARGS.positional' --args "${FROM[@]}")" >> "$GITHUB_OUTPUT"
-          # Goldens written after this are the approved ones (see Commit and Push).
+          # Goldens written after this are the approved ones (see Commit and Push). `find -newer`
+          # compares strictly, and file systems keep times as coarse as a second: the pause puts
+          # every write of approve in a later tick than the stamp.
           touch "$RUNNER_TEMP/gleon-approve.stamp"
+          sleep 1
 
       - name: Run Gleon Approve
         uses: gleon-rs/gleon@main
@@ -206,6 +214,7 @@ jobs:
           working-directory: ${{ inputs.working-directory }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
+          GLEON_REQUIRE_STORAGE: "true"
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           GLEON_STORAGE_URL: ${{ secrets.GLEON_STORAGE_URL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

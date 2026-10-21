@@ -38,18 +38,20 @@ getrandom = { workspace = true }
 gleon-core = { path = "../gleon-core" }
 globset = { workspace = true }
 hex = { workspace = true }
+libc = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
-tokio = { workspace = true }
+# `gleon test` supervises the test command and its signals.
+tokio = { workspace = true, features = ["process", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
 gleon-model = { path = "../gleon-model" }
 predicates = { workspace = true }
 tempfile = { workspace = true }
-url = { workspace = true }
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["gleon-core"]

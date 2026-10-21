@@ -30,7 +30,11 @@ inputs:
     required: false
     default: "."
   args:
-    description: "Additional arguments for the selected gleon command: whitespace-separated, or a JSON array of strings (e.g. '[\"--from\", \"dl/linux/latest\"]' for approve)"
+    description: "Additional arguments for the selected gleon command (for 'verify': of `gleon test` or `gleon diff`): whitespace-separated, or a JSON array of strings (e.g. '[\"--from\", \"dl/linux/latest\"]' for approve)"
+    required: false
+    default: ""
+  test-command:
+    description: "For 'verify': the test command of an integration that compares its goldens itself (e.g. 'flutter test' for the gleon Flutter package), whitespace-separated or a JSON array of strings. Verify then runs `gleon test -- <command>` instead of `gleon pull` and `gleon diff`. The report and the uploaded run are those of the workspace in `working-directory`: for workspaces nested below it (packages of a monorepo with their own .gleon/), use one step per workspace"
     required: false
     default: ""
   github-token:
@@ -155,6 +159,47 @@ runs:
         chmod +x "${{ steps.resolve.outputs.setup_dir }}/${{ steps.resolve.outputs.bin_name }}"
         echo "${{ steps.resolve.outputs.setup_dir }}" >> $GITHUB_PATH
 
+    # `args` and `test-command`, each whitespace-separated or a JSON array of strings, as
+    # NUL-separated files the later steps read into bash arrays (no word splitting or pattern
+    # expansion).
+    - name: Parse Arguments
+      id: parse
+      shell: bash
+      env:
+        GLEON_ARGS: ${{ inputs.args }}
+        GLEON_TEST_COMMAND: ${{ inputs.test-command }}
+        ARGS_FILE: ${{ runner.temp }}/gleon-args.nul
+        TEST_COMMAND_FILE: ${{ runner.temp }}/gleon-test-command.nul
+      run: |
+        node -e "
+        const fs = require('fs');
+        const parse = (name) => {
+          const raw = (process.env[name] || '').trim();
+          if (!raw) return [];
+          if (!raw.startsWith('[')) return raw.split(/\s+/).filter(Boolean);
+          let parsed;
+          try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
+          if (!Array.isArray(parsed)) {
+            console.error('::error::' + name + ' is no JSON array of strings');
+            process.exit(1);
+          }
+          return parsed.map(String);
+        };
+        const write = (file, list) =>
+          fs.writeFileSync(file, Buffer.concat(list.map(a => Buffer.concat([Buffer.from(a), Buffer.from([0])]))));
+        write(process.env.ARGS_FILE, parse('GLEON_ARGS'));
+        write(process.env.TEST_COMMAND_FILE, parse('GLEON_TEST_COMMAND'));
+        "
+        echo "args_file=$ARGS_FILE" >> "$GITHUB_OUTPUT"
+        echo "test_command_file=$TEST_COMMAND_FILE" >> "$GITHUB_OUTPUT"
+        # Whether a test command remains after parsing (a blank input or `[]` is none): the
+        # verify steps choose between `gleon test` and `gleon pull` + `gleon diff` by it.
+        if [ -s "$TEST_COMMAND_FILE" ]; then
+          echo "has_test_command=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_test_command=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Execute Single Command
       if: inputs.command != 'verify'
       shell: bash
@@ -164,29 +209,13 @@ runs:
         GLEON_TARGET_BRANCH: ${{ inputs.target-branch }}
         GLEON_COMMAND: ${{ inputs.command }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
-        GLEON_ARGS: ${{ inputs.args }}
+        ARGS_FILE: ${{ steps.parse.outputs.args_file }}
         COMMENT_BODY: ${{ env.COMMENT_BODY }}
       run: |
         args=()
-        if [ -n "$GLEON_ARGS" ]; then
-          ARGS_FILE=$(mktemp)
-          node -e "
-          const fs = require('fs');
-          const raw = (process.env.GLEON_ARGS || '').trim();
-          let args = [];
-          if (raw.startsWith('[')) {
-            try { args = JSON.parse(raw); } catch (e) { process.exit(1); }
-          } else if (raw) {
-            args = raw.split(/\s+/).filter(Boolean);
-          }
-          const buf = Buffer.concat(args.map(a => Buffer.concat([Buffer.from(String(a)), Buffer.from([0])])));
-          fs.writeFileSync(process.argv[1], buf);
-          " "$ARGS_FILE" || exit 1
-          while IFS= read -r -d '' arg; do
-            args+=("$arg")
-          done < "$ARGS_FILE"
-          rm -f "$ARGS_FILE"
-        fi
+        while IFS= read -r -d '' arg; do
+          args+=("$arg")
+        done < "$ARGS_FILE"
 
         # Parse extra filter arguments from PR comment if running approve via comment
         if [ "$GLEON_COMMAND" = "approve" ] && [ -n "$COMMENT_BODY" ]; then
@@ -223,7 +252,7 @@ runs:
         gleon "$GLEON_COMMAND" "${args[@]}"
 
     - name: Verify - Pull Baselines
-      if: inputs.command == 'verify'
+      if: inputs.command == 'verify' && steps.parse.outputs.has_test_command != 'true'
       shell: bash
       env:
         GLEON_LICENSE_KEY: ${{ inputs.license-key }}
@@ -232,7 +261,11 @@ runs:
         cd "$GLEON_WORKING_DIRECTORY"
         gleon pull
 
-    - name: Verify - Run Diff
+    # The tests of an integration (`test-command`) write their own case reports; otherwise
+    # `gleon diff` compares the screenshots with the manifests. The output is kept for the PR
+    # comment when no report can be rendered.
+    - name: Verify - Run Tests or Diff
+      id: verify
       if: inputs.command == 'verify'
       shell: bash
       env:
@@ -240,14 +273,33 @@ runs:
         GLEON_STRICT: ${{ inputs.strict }}
         GLEON_TARGET_BRANCH: ${{ inputs.target-branch }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        TEST_COMMAND_FILE: ${{ steps.parse.outputs.test_command_file }}
+        ARGS_FILE: ${{ steps.parse.outputs.args_file }}
+        VERIFY_LOG: ${{ runner.temp }}/gleon-verify.log
         # Stamps the case reports of this run; the report step reads exactly this run.
         GLEON_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
       run: |
+        set -o pipefail
+        test_command=()
+        while IFS= read -r -d '' arg; do
+          test_command+=("$arg")
+        done < "$TEST_COMMAND_FILE"
+        # `args` go to the gleon command of the mode (e.g. `--platform`, `--artifacts`).
+        args=()
+        while IFS= read -r -d '' arg; do
+          args+=("$arg")
+        done < "$ARGS_FILE"
         cd "$GLEON_WORKING_DIRECTORY"
-        gleon diff
+        if [ "${#test_command[@]}" -gt 0 ]; then
+          gleon test "${args[@]}" -- "${test_command[@]}" 2>&1 | tee "$VERIFY_LOG"
+        else
+          gleon diff "${args[@]}" 2>&1 | tee "$VERIFY_LOG"
+        fi
 
+    # Only when the tests or the diff failed: a failed download, argument parsing or pull ran no
+    # tests, and its own error is in the log.
     - name: Verify - Generate Report & Post Comment
-      if: inputs.command == 'verify' && failure() && github.event_name == 'pull_request'
+      if: inputs.command == 'verify' && failure() && steps.verify.outcome == 'failure' && github.event_name == 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -255,17 +307,26 @@ runs:
         PR_NUMBER: ${{ inputs.pr-number }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         GLEON_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        VERIFY_LOG: ${{ runner.temp }}/gleon-verify.log
       run: |
         cd "$GLEON_WORKING_DIRECTORY"
         if ! gleon report --pr-number "$PR_NUMBER" markdown > gleon-report.md; then
-          echo "::warning::Failed to generate markdown report from the case reports. Outputting minimal fallback."
-          echo "### ⚠️ Gleon Visual Regression Failed" > gleon-report.md
-          echo "The report generator could not read the case reports of this run. Please check the Action logs." >> gleon-report.md
+          # No case reports (the tests failed before comparing, or no screenshots matched): the
+          # end of the run's output, which tells why, goes to the job log, never into the public
+          # comment (it may hold anything the tests printed).
+          echo "::warning::This run recorded no case reports; the end of its output follows."
+          echo "::group::End of the run's output"
+          tail -n 30 "$VERIFY_LOG" 2>/dev/null || echo "(no output recorded)"
+          echo "::endgroup::"
+          {
+            echo "### ⚠️ Gleon Visual Regression Failed"
+            echo "This run recorded no case reports: the tests failed before comparing, or no screenshot matched a rule. See the end of the run's output in the [job log](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+          } > gleon-report.md
         fi
         gh pr comment "$PR_NUMBER" --body-file gleon-report.md || echo "Failed to post PR comment. Does the token have pull-requests: write permission?"
 
     - name: Verify - Upload Artifacts
-      if: inputs.command == 'verify' && failure() && github.event_name == 'pull_request'
+      if: inputs.command == 'verify' && failure() && steps.verify.outcome == 'failure' && github.event_name == 'pull_request'
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ inputs.artifact-name }}

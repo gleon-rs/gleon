@@ -23,6 +23,10 @@ pub enum LintError {
     /// Standard IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Error shared across `ops::*` operations (a goldens workspace has no manifests).
+    #[error(transparent)]
+    Core(#[from] crate::ops::common::CoreError),
 }
 
 /// Summary report returned by manifest linting.
@@ -51,6 +55,7 @@ pub fn lint_workspace_manifests(
     ctx: &ResolvedContext,
     platform_filter: Option<&str>,
 ) -> Result<LintReport, LintError> {
+    crate::ops::common::refuse_goldens(ctx)?;
     let base_dir = ctx.base_dir.as_path();
     let manifests_root = GleonPaths::new(base_dir).manifests_root();
 

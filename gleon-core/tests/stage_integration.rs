@@ -289,3 +289,17 @@ fn test_stage_corrupt_screenshot_returns_error() {
     assert!(result.is_err());
     assert!(matches!(result, Err(StageError::ImageDecode { .. })));
 }
+
+/// A goldens workspace never gets blobs or manifests.
+#[test]
+fn test_stage_refuses_a_goldens_workspace() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    common::goldens_workspace(temp_dir.path());
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp_dir.path()).unwrap();
+    assert!(matches!(
+        stage_workspace(&ctx, None).unwrap_err(),
+        StageError::Core(gleon_core::ops::common::CoreError::BaselinesAreGoldens)
+    ));
+    assert!(!temp_dir.path().join(".gleon/blobs").exists());
+    assert!(!temp_dir.path().join(".gleon/manifests").exists());
+}

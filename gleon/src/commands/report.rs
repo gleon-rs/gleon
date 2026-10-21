@@ -65,6 +65,10 @@ async fn run_report_inner(
         }
     }
 
+    // Only the PR comment links goldens: no event payload or path work for other formats.
+    let golden_base_url = (format == ReportFormat::Markdown)
+        .then(|| golden_base_url(env, source.workspace_root()))
+        .flatten();
     let artifact_env = env.get_var("GLEON_HTML_ARTIFACT_URL");
     let html_artifact_url = artifact_env.as_deref().filter(|s| !s.is_empty());
 
@@ -81,6 +85,7 @@ async fn run_report_inner(
         context,
         base_image_url,
         html_artifact_url,
+        golden_base_url: golden_base_url.as_deref(),
         image_url_resolver: if has_signed_urls {
             Some(&resolver)
         } else {
@@ -126,6 +131,67 @@ async fn run_report_inner(
     }
 
     Ok(())
+}
+
+/// The URL under which the files of the workspace at `workspace_root` are seen in its GitHub
+/// repository, when running on GitHub Actions:
+/// `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/<commit>/<workspace dir in $GITHUB_WORKSPACE>`.
+///
+/// The commit is the head of the pull request ([`pull_request_head`]), which stays in the base
+/// repository for good (forks included); its golden is the one the PR compared, unless the base
+/// branch changed the same golden. Elsewhere it is `GITHUB_SHA`. (`GITHUB_SHA` of a pull request
+/// is its merge commit, made again whenever the base moves, so links to it go stale.) `None`
+/// without the variables, for a run without a workspace (`--from`), or for a workspace outside
+/// the checkout.
+fn golden_base_url(
+    env: &dyn gleon_core::env::EnvProvider,
+    workspace_root: Option<&std::path::Path>,
+) -> Option<String> {
+    let var = |name| env.get_var(name).filter(|value| !value.trim().is_empty());
+    let (server, repository, checkout) = (
+        var("GITHUB_SERVER_URL")?,
+        var("GITHUB_REPOSITORY")?,
+        var("GITHUB_WORKSPACE")?,
+    );
+    let sha = pull_request_head(env).or_else(|| var("GITHUB_SHA"))?;
+    let (owner, repo) = repository
+        .split_once('/')
+        .filter(|(owner, repo)| !owner.is_empty() && !repo.is_empty() && !repo.contains('/'))?;
+    let root = gleon_core::paths::resolved(workspace_root?);
+    let checkout = gleon_core::paths::resolved(std::path::Path::new(&checkout));
+    let dir = root.strip_prefix(&checkout).ok()?;
+    let mut url = url::Url::parse(&server)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "https" | "http"))?;
+    {
+        let mut segments = url.path_segments_mut().ok()?;
+        segments
+            .pop_if_empty()
+            .extend([owner, repo, "blob", sha.as_str()]);
+        for component in dir.components() {
+            let std::path::Component::Normal(name) = component else {
+                return None;
+            };
+            segments.push(name.to_str()?);
+        }
+    }
+    Some(url.into())
+}
+
+/// The head commit of the pull request in the event payload of the job (`GITHUB_EVENT_PATH`):
+/// `pull_request.head.sha` when it is a commit id (hex), else `None` (another event, or a payload
+/// that cannot be read).
+fn pull_request_head(env: &dyn gleon_core::env::EnvProvider) -> Option<String> {
+    let path = env.get_var("GITHUB_EVENT_PATH")?;
+    let payload = std::fs::read(&path)
+        .map_err(|e| tracing::debug!("Cannot read the event payload '{path}': {e}"))
+        .ok()?;
+    let event: serde_json::Value = serde_json::from_slice(&payload)
+        .map_err(|e| tracing::debug!("Cannot parse the event payload '{path}': {e}"))
+        .ok()?;
+    let sha = event.pointer("/pull_request/head/sha")?.as_str()?;
+    let is_commit = matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    is_commit.then(|| sha.to_owned())
 }
 
 #[cfg(all(test, not(miri)))]
@@ -230,6 +296,89 @@ mod tests {
         )
         .await;
         assert_eq!(res, ExitCode::Failure, "PR #0 is rejected");
+    }
+
+    struct MapEnv(std::collections::HashMap<&'static str, String>);
+    impl gleon_core::env::EnvProvider for MapEnv {
+        fn get_var(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+    }
+
+    /// The GitHub Actions variables of a job whose checkout is `checkout`.
+    fn github(checkout: &std::path::Path) -> MapEnv {
+        MapEnv(std::collections::HashMap::from([
+            ("GITHUB_SERVER_URL", "https://github.com".to_owned()),
+            ("GITHUB_REPOSITORY", "o/r".to_owned()),
+            ("GITHUB_SHA", "abc123".to_owned()),
+            ("GITHUB_WORKSPACE", checkout.to_str().unwrap().to_owned()),
+        ]))
+    }
+
+    #[test]
+    fn test_golden_base_url_needs_github_and_a_workspace_inside_the_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("packages/app");
+        std::fs::create_dir_all(&package).unwrap();
+        let env = github(temp.path());
+        assert_eq!(
+            golden_base_url(&env, Some(&package)).as_deref(),
+            Some("https://github.com/o/r/blob/abc123/packages/app")
+        );
+        assert_eq!(
+            golden_base_url(&env, Some(temp.path())).as_deref(),
+            Some("https://github.com/o/r/blob/abc123")
+        );
+        assert_eq!(golden_base_url(&env, None), None, "a copy of a run");
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert_eq!(golden_base_url(&env, Some(elsewhere.path())), None);
+        let mut without_sha = github(temp.path());
+        without_sha.0.insert("GITHUB_SHA", " ".to_owned());
+        assert_eq!(golden_base_url(&without_sha, Some(temp.path())), None);
+        assert_eq!(golden_base_url(&DummyEnv, Some(temp.path())), None);
+        // A repository that is not `owner/name`, or a server that is not a web URL: no link.
+        for (var, value) in [
+            ("GITHUB_REPOSITORY", "o"),
+            ("GITHUB_REPOSITORY", "o/"),
+            ("GITHUB_REPOSITORY", "o/r/x"),
+            ("GITHUB_SERVER_URL", "file:///etc"),
+        ] {
+            let mut odd = github(temp.path());
+            odd.0.insert(var, value.to_owned());
+            assert_eq!(
+                golden_base_url(&odd, Some(temp.path())),
+                None,
+                "{var}={value}"
+            );
+        }
+
+        // In a pull request, its head commit (stable), not the merge commit of `GITHUB_SHA`.
+        let head = "a".repeat(40);
+        let event = temp.path().join("event.json");
+        std::fs::write(
+            &event,
+            serde_json::json!({"pull_request": {"head": {"sha": head}}}).to_string(),
+        )
+        .unwrap();
+        let mut pull_request = github(temp.path());
+        pull_request
+            .0
+            .insert("GITHUB_EVENT_PATH", event.to_str().unwrap().to_owned());
+        assert_eq!(
+            golden_base_url(&pull_request, Some(&package)),
+            Some(format!("https://github.com/o/r/blob/{head}/packages/app"))
+        );
+        // Another event, or a head that is no commit id: `GITHUB_SHA`.
+        for payload in [
+            serde_json::json!({"push": {}}),
+            serde_json::json!({"pull_request": {"head": {"sha": "../main"}}}),
+        ] {
+            std::fs::write(&event, payload.to_string()).unwrap();
+            assert_eq!(
+                golden_base_url(&pull_request, Some(temp.path())).as_deref(),
+                Some("https://github.com/o/r/blob/abc123")
+            );
+        }
     }
 
     #[tokio::test]

@@ -52,11 +52,22 @@ impl std::fmt::Display for CodeSpanEscape<'_> {
     }
 }
 
-/// The image link of a case's baseline: a signed URL from the resolver if available, else the
-/// blob under `base_image_url`. Only baselines are content-addressed and uploaded; candidates and
-/// diffs never leave the machine that ran the tests.
+/// The image link of a case's baseline: for a blob (`gleon diff`), a signed URL from the
+/// resolver if available, else the blob under `base_image_url`; for the golden file of an
+/// integration (no blob), the file in the repository under `golden_base_url`, when it exists
+/// (a `missing` golden has none). Only baselines are linked; candidates and diffs never leave
+/// the machine that ran the tests.
 fn baseline_cell(report: &CaseReport, options: &MarkdownReportOptions) -> Option<String> {
-    let blob = report.golden.blob.as_ref()?;
+    let Some(blob) = report.golden.blob.as_ref() else {
+        report.golden.sha256.as_ref()?;
+        let base = options.golden_base_url?;
+        // Golden paths are portable (`[A-Za-z0-9._-]` segments joined by `/`): URL-safe as is.
+        return Some(format!(
+            "[Image]({}/{})",
+            base.trim_end_matches('/'),
+            report.golden.path
+        ));
+    };
     let url = options
         .image_url_resolver
         .and_then(|resolve| resolve(blob))
@@ -320,6 +331,36 @@ mod tests {
             !comment.contains("runs/latest"),
             "candidates and diffs never leave the runner: {comment}"
         );
+    }
+
+    /// The golden of an integration is a file of the repository: linked at the tested commit;
+    /// a missing golden has nothing to link, and a blob keeps its storage link.
+    #[test]
+    fn test_render_pr_comment_links_goldens_of_integrations_in_the_repository() {
+        let options = MarkdownReportOptions {
+            golden_base_url: Some("https://github.com/o/r/blob/abc123/packages/app/"),
+            ..Default::default()
+        };
+        let mut mismatch = report("test/goldens/a", CaseOutcome::Mismatch);
+        mismatch.golden.path = "test/goldens/a.png".to_owned();
+        let missing = report("test/goldens/new", CaseOutcome::Missing);
+        assert!(missing.golden.sha256.is_none());
+        let cases = Cases::new("runs/latest", vec![mismatch, missing, with_blob("cli")]);
+        let comment = ReportGenerator::render_pr_comment(&cases, &options);
+        assert!(
+            comment.contains(
+                "| `test/goldens/a` | [Image](https://github.com/o/r/blob/abc123/packages/app/test/goldens/a.png) |"
+            ),
+            "{comment}"
+        );
+        assert!(
+            comment.contains("| `test/goldens/new` | N/A |"),
+            "{comment}"
+        );
+        assert!(comment.contains("| `cli` | N/A |"), "no storage: {comment}");
+
+        let without = ReportGenerator::render_pr_comment(&cases, &MarkdownReportOptions::default());
+        assert!(!without.contains("| Baseline |"), "{without}");
     }
 
     #[test]

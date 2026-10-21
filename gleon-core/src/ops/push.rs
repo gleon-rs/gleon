@@ -62,8 +62,11 @@ pub async fn push_blobs(
     storage_config: Option<&StorageConfig>,
     all_platforms: bool,
     platform_override: Option<&str>,
+    require_storage: bool,
 ) -> Result<PushResult, PushError> {
     let paths = ensure_initialized(&context.base_dir)?;
+    crate::ops::common::refuse_goldens(context)?;
+    crate::ops::common::require_storage(storage_config, require_storage)?;
 
     let Some(storage_cfg) = active_storage_config(storage_config) else {
         return Ok(PushResult {
@@ -224,7 +227,7 @@ mod tests {
         let cfg = StorageConfig::new("memory://");
 
         // Invalid platform override segment
-        let err = push_blobs(&ctx, Some(&cfg), false, Some("../invalid")).await;
+        let err = push_blobs(&ctx, Some(&cfg), false, Some("../invalid"), false).await;
         assert!(matches!(
             err,
             Err(PushError::Core(CoreError::Context(ContextError::Platform(
@@ -233,7 +236,7 @@ mod tests {
         ));
 
         // Empty manifest directory for valid platform override -> 0 blobs
-        let res = push_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"))
+        let res = push_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"), false)
             .await
             .unwrap();
         assert_eq!(res.total_manifest_blobs, 0);
@@ -259,7 +262,7 @@ mod tests {
             ..ResolvedContext::default()
         };
         let cfg = StorageConfig::new("memory://");
-        let res = push_blobs(&ctx, Some(&cfg), true, None).await;
+        let res = push_blobs(&ctx, Some(&cfg), true, None, false).await;
 
         perms.set_mode(0o755);
         std::fs::set_permissions(&manifests, perms).unwrap();
@@ -280,7 +283,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(".gleon").join("manifests")).unwrap();
 
         let cfg = StorageConfig::new("memory://");
-        let res = push_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = push_blobs(&ctx, Some(&cfg), false, None, false).await;
         assert!(matches!(
             res,
             Err(PushError::Core(CoreError::Context(ContextError::Platform(
@@ -304,7 +307,7 @@ mod tests {
         std::fs::write(plat_dir.join("bad.json"), "not json").unwrap();
 
         let cfg = StorageConfig::new("memory://");
-        let res = push_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = push_blobs(&ctx, Some(&cfg), false, None, false).await;
         assert!(matches!(res, Err(PushError::Core(CoreError::Manifest(_)))));
     }
 
@@ -338,7 +341,9 @@ mod tests {
         std::fs::write(blobs_root.join("sha256").join(hash), b"data").unwrap();
 
         let cfg = StorageConfig::new("memory://");
-        let res = push_blobs(&ctx, Some(&cfg), false, None).await.unwrap();
+        let res = push_blobs(&ctx, Some(&cfg), false, None, false)
+            .await
+            .unwrap();
 
         assert_eq!(res.total_manifest_blobs, 1);
         assert_eq!(res.uploaded_blobs, 1);
@@ -376,7 +381,7 @@ mod tests {
         std::os::unix::fs::symlink(&target_file, blobs_root.join("sha256").join(hash)).unwrap();
 
         let cfg = StorageConfig::new("memory://");
-        let res = push_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = push_blobs(&ctx, Some(&cfg), false, None, false).await;
         assert!(matches!(res, Err(PushError::MissingLocalBlob { .. })));
     }
 
@@ -401,7 +406,7 @@ mod tests {
         std::fs::set_permissions(&manifests_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let cfg = StorageConfig::new("memory://");
-        let res = push_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = push_blobs(&ctx, Some(&cfg), false, None, false).await;
 
         let was_permission_denied = std::fs::metadata(&plat_dir).is_err();
         let _ = std::fs::set_permissions(&manifests_dir, original_perms);
@@ -451,7 +456,9 @@ mod tests {
         adapter.upload_blob(&image_hash, &tmp_file).await.unwrap();
 
         // Local blob directory does NOT have the blob
-        let res = push_blobs(&ctx, Some(&cfg), false, None).await.unwrap();
+        let res = push_blobs(&ctx, Some(&cfg), false, None, false)
+            .await
+            .unwrap();
 
         assert_eq!(res.total_manifest_blobs, 1);
         assert_eq!(res.uploaded_blobs, 0);
@@ -483,7 +490,7 @@ mod tests {
         manifest.save(plat_dir.join("test_missing.json")).unwrap();
 
         let cfg = StorageConfig::new("memory://");
-        let res = push_blobs(&ctx, Some(&cfg), false, None).await;
+        let res = push_blobs(&ctx, Some(&cfg), false, None, false).await;
 
         assert!(matches!(res, Err(PushError::MissingLocalBlob { .. })));
     }
@@ -548,7 +555,9 @@ mod tests {
             .await
             .unwrap();
 
-        let res = push_blobs(&ctx, Some(&cfg), false, None).await.unwrap();
+        let res = push_blobs(&ctx, Some(&cfg), false, None, false)
+            .await
+            .unwrap();
 
         assert_eq!(res.total_manifest_blobs, 2);
         assert_eq!(res.uploaded_blobs, 1);

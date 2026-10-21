@@ -69,15 +69,13 @@ pub(super) fn image_link(path: &Path, report_dir: &Path) -> String {
     }
 }
 
-/// The name of a case as the reports show it: its test name, followed by the key of its platform
-/// (`key`) when the run spans several platforms (`test/goldens/a (linux-x86_64)`), so the cases of
-/// one golden on two platforms are told apart. Borrowed (unchanged output) for a run of one
-/// platform.
-pub(super) fn case_name<'a>(
-    cases: &Cases,
-    key: &PlatformKey,
-    report: &'a CaseReport,
-) -> Cow<'a, str> {
+/// The name of a case as the reports show it.
+///
+/// Its test name, followed by the key of its platform (`key`) when the run spans several
+/// platforms (`test/goldens/a (linux-x86_64)`), so the cases of one golden on two platforms are
+/// told apart. Borrowed (unchanged output) for a run of one platform.
+#[must_use]
+pub fn case_name<'a>(cases: &Cases, key: &PlatformKey, report: &'a CaseReport) -> Cow<'a, str> {
     if cases.spans_platforms() {
         Cow::Owned(format!("{} ({key})", report.name))
     } else {
@@ -96,10 +94,12 @@ pub(super) const fn status(outcome: CaseOutcome) -> &'static str {
     }
 }
 
-/// A case in one line, `<status>: <why>`: the message of the case (the texts every writer shares,
-/// `gleon_model::case::text`), else what its metrics or sizes say, e.g.
-/// `Mismatch: 0.0167% (1 of 6000px) differ` or `Error (image): candidate image: …`.
-pub(super) struct CaseSummary<'a>(pub(super) &'a CaseReport);
+/// A case in one line, `<status>: <why>`.
+///
+/// The why is the message of the case (the texts every writer shares, `gleon_model::case::text`),
+/// else what its metrics or sizes say, e.g. `Mismatch: 0.0167% (1 of 6000px) differ` or
+/// `Error (image): candidate image: …`.
+pub struct CaseSummary<'a>(pub &'a CaseReport);
 
 impl std::fmt::Display for CaseSummary<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

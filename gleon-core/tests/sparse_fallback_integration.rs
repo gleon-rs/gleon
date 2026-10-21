@@ -118,7 +118,7 @@ async fn test_sparse_multi_platform_fallback_full_lifecycle() {
     let stage_res = stage_workspace(&macos_ctx, None).unwrap();
     assert_eq!(stage_res.total_screenshots_staged, 3);
 
-    let push_res = push_blobs(&macos_ctx, Some(&storage_cfg), false, None)
+    let push_res = push_blobs(&macos_ctx, Some(&storage_cfg), false, None, false)
         .await
         .unwrap();
     assert_eq!(push_res.uploaded_blobs, 3);
@@ -157,7 +157,7 @@ async fn test_sparse_multi_platform_fallback_full_lifecycle() {
     assert!(!linux_manifests_dir.join("test/goldens/t3.json").exists());
 
     // Push Linux override blob to remote storage
-    let push_res_linux = push_blobs(&linux_ctx, Some(&storage_cfg), false, None)
+    let push_res_linux = push_blobs(&linux_ctx, Some(&storage_cfg), false, None, false)
         .await
         .unwrap();
     assert_eq!(push_res_linux.uploaded_blobs, 1);
@@ -195,7 +195,7 @@ async fn test_sparse_multi_platform_fallback_full_lifecycle() {
     runner_ctx.base_dir = runner_base.to_path_buf();
 
     // Pull blobs on runner
-    let pull_res = pull_blobs(&runner_ctx, Some(&storage_cfg), false, None)
+    let pull_res = pull_blobs(&runner_ctx, Some(&storage_cfg), false, None, false)
         .await
         .unwrap();
     // Must download 3 blobs (1 Linux override + 2 macOS fallbacks)

@@ -104,6 +104,15 @@ impl Default for ResolvedContext {
 }
 
 impl ResolvedContext {
+    /// Where the baselines of the workspace live ([`GleonConfig::baselines`]): manifests without
+    /// a config.
+    #[must_use]
+    pub fn baselines(&self) -> gleon_model::config::Baselines {
+        self.config
+            .as_ref()
+            .map_or_else(Default::default, |config| config.baselines)
+    }
+
     /// Builds a `ResolvedContext` from resolved options, reading configuration from disk
     /// and platform/environment variables from the real OS process environment.
     ///

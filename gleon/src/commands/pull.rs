@@ -5,7 +5,8 @@ use tracing::info;
 
 use crate::{commands::report_failure, exit_code::ExitCode};
 
-/// Runs the `gleon pull` subcommand.
+/// Runs the `gleon pull` subcommand; `require_storage` (`--require-storage`) fails instead of
+/// working in local mode without remote storage.
 ///
 /// Returns [`ExitCode::Success`] on success or local mode, or [`ExitCode::Failure`] on error.
 pub async fn run_pull(
@@ -13,10 +14,22 @@ pub async fn run_pull(
     storage_cfg: Option<&StorageConfig>,
     all_platforms: bool,
     platform_override: Option<&str>,
+    require_storage: bool,
 ) -> ExitCode {
+    if let Some(code) = crate::commands::goldens_nothing_to_do(ctx, "pull") {
+        return code;
+    }
     info!("Running blob pull...");
 
-    let res = match pull_blobs(ctx, storage_cfg, all_platforms, platform_override).await {
+    let res = match pull_blobs(
+        ctx,
+        storage_cfg,
+        all_platforms,
+        platform_override,
+        require_storage,
+    )
+    .await
+    {
         Ok(res) => res,
         Err(e) => return report_failure("Error pulling baseline blobs", &e),
     };
@@ -62,17 +75,27 @@ mod tests {
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
 
         // 1. Uninitialized -> Failure
-        let exit_code_uninit = run_pull(&ctx, None, false, None).await;
+        let exit_code_uninit = run_pull(&ctx, None, false, None, false).await;
         assert_eq!(exit_code_uninit, ExitCode::Failure);
 
         // 2. Initialized + Local Mode -> Success
         gleon_core::ops::init_workspace(&ctx, None).unwrap();
-        let exit_code_local = run_pull(&ctx, None, false, None).await;
+        let exit_code_local = run_pull(&ctx, None, false, None, false).await;
         assert_eq!(exit_code_local, ExitCode::Success);
 
         // 3. Initialized + Storage Configured + 0 manifest blobs -> Success
         let cfg = StorageConfig::new("memory://");
-        let exit_code_zero_blobs = run_pull(&ctx, Some(&cfg), false, None).await;
+        let exit_code_zero_blobs = run_pull(&ctx, Some(&cfg), false, None, false).await;
         assert_eq!(exit_code_zero_blobs, ExitCode::Success);
+
+        // 4. Storage required: missing -> Failure, configured -> Success
+        assert_eq!(
+            run_pull(&ctx, None, false, None, true).await,
+            ExitCode::Failure
+        );
+        assert_eq!(
+            run_pull(&ctx, Some(&cfg), false, None, true).await,
+            ExitCode::Success
+        );
     }
 }

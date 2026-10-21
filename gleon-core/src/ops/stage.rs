@@ -9,6 +9,7 @@ use crate::{
     manifest::{ManifestError, WorkspaceIndex},
     ops::common::{
         CoreError, build_manifest, ensure_initialized, hash_and_measure, index_keys_missing_from,
+        load_config_and_scan,
     },
     scanner::FileScanner,
 };
@@ -100,16 +101,13 @@ pub fn stage_workspace(
 
     let paths = ensure_initialized(&context.base_dir)?;
     let platform_key = crate::ops::common::platform_key(context)?;
+    // Before anything is created: a goldens workspace gets no blobs or manifests.
+    let mut test_cases = load_config_and_scan(context)?;
 
     let blobs_dir = paths.blob_scheme_dir("sha256");
     let manifests_dir = paths.manifests_dir(&platform_key);
     std::fs::create_dir_all(&blobs_dir).map_err(CoreError::Io)?;
     std::fs::create_dir_all(&manifests_dir).map_err(CoreError::Io)?;
-
-    let config = context.config.clone().unwrap_or_default();
-
-    let mut test_cases =
-        FileScanner::scan_workspace(&config, &context.base_dir).map_err(CoreError::Scanner)?;
 
     filter_test_cases(&mut test_cases, filter_paths);
 

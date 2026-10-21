@@ -15,7 +15,23 @@ pub mod stage;
 pub mod status;
 pub mod test;
 
+use gleon_core::{config::Baselines, context::ResolvedContext};
+
 use crate::exit_code::ExitCode;
+
+/// The outcome of a command that works with manifests and blobs (`pull`, `push`, `gc`, `lint`,
+/// `resolve`) in a workspace whose baselines are golden files (`baselines: goldens`): nothing to
+/// do, said once, and a success, so CI steps shared with manifest workspaces (the approve
+/// workflow pulls and pushes) pass. `None` in a manifest workspace.
+pub fn goldens_nothing_to_do(ctx: &ResolvedContext, what: &str) -> Option<ExitCode> {
+    (ctx.baselines() == Baselines::Goldens).then(|| {
+        tracing::info!(
+            "Nothing to {what}: the baselines of this workspace are golden files kept in Git \
+             (`baselines: goldens` in .gleon/gleon.yaml), not manifests and blobs"
+        );
+        ExitCode::Success
+    })
+}
 
 /// Returns `true` if `rendered` is already formatted inside `parent` (e.g. exact match,
 /// `: {rendered}`, or `({rendered})`), avoiding duplicate causes when walking an error chain.
@@ -99,6 +115,16 @@ impl RunSource {
     pub fn dir(&self) -> &std::path::Path {
         match self {
             Self::Own(dir) | Self::Copy(dir) => dir,
+        }
+    }
+
+    /// The root of the workspace the run belongs to (`<root>/.gleon/runs/latest`); `None` for a
+    /// copy, which belongs to no workspace here.
+    #[must_use]
+    pub fn workspace_root(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Own(dir) => gleon_core::cases::workspace_root(dir),
+            Self::Copy(_) => None,
         }
     }
 }

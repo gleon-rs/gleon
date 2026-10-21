@@ -136,7 +136,10 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
             )
             .await
         }
-        Commands::Pull { all_platforms } => {
+        Commands::Pull {
+            all_platforms,
+            require_storage,
+        } => {
             let ctx = resolve_context(cli, current_dir, env)?;
             let storage = get_storage_config(env);
             commands::pull::run_pull(
@@ -144,10 +147,14 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
                 storage.as_ref(),
                 *all_platforms,
                 cli.platform.as_deref(),
+                *require_storage,
             )
             .await
         }
-        Commands::Push { all_platforms } => {
+        Commands::Push {
+            all_platforms,
+            require_storage,
+        } => {
             let ctx = resolve_context(cli, current_dir, env)?;
             let storage = get_storage_config(env);
             commands::push::run_push(
@@ -155,6 +162,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
                 storage.as_ref(),
                 *all_platforms,
                 cli.platform.as_deref(),
+                *require_storage,
             )
             .await
         }
@@ -215,7 +223,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         // The exit code is the test command's, not a gleon outcome.
         Commands::Test { command } => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            return Ok(commands::test::run_test(&ctx, env, command));
+            return Ok(commands::test::run_test(&ctx, env, command, current_dir).await);
         }
         Commands::Gc {
             dry_run,

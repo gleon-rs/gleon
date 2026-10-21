@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::{
-    config::GleonConfig,
+    config::{Baselines, GleonConfig},
     context::ContextError,
     ops::common::{CoreError, append_missing_gitignore_lines, create_new_file_with_content},
     paths::GleonPaths,
@@ -100,29 +100,35 @@ pub fn init_workspace(
         let template = template.unwrap_or_else(|| Template::detect(&context.base_dir));
         Some((template, new_config(context, template)?))
     };
-    let blobs_dir = paths.blob_scheme_dir("sha256");
-    let runs_dir = paths.runs_latest();
-
-    std::fs::create_dir_all(&blobs_dir).map_err(CoreError::Io)?;
-    std::fs::create_dir_all(&runs_dir).map_err(CoreError::Io)?;
-    std::fs::create_dir_all(paths.manifests_dir(&platform_key)).map_err(CoreError::Io)?;
+    // The baselines of the config that will be in force: a goldens workspace (the Flutter
+    // template) keeps them as golden files, so it needs no blobs, manifests or storage settings.
+    let baselines = new_config
+        .as_ref()
+        .map_or_else(|| context.baselines(), |(_, config)| config.baselines);
+    std::fs::create_dir_all(paths.runs_latest()).map_err(CoreError::Io)?;
+    if baselines == Baselines::Manifests {
+        std::fs::create_dir_all(paths.blob_scheme_dir("sha256")).map_err(CoreError::Io)?;
+        std::fs::create_dir_all(paths.manifests_dir(&platform_key)).map_err(CoreError::Io)?;
+    }
 
     // Scaffold .gleon/.gitignore idempotently to prevent committing blobs/ or runs/ artifacts
     append_missing_gitignore_lines(&paths.gitignore(), gleon_model::config::GITIGNORE_LINES)?;
 
     // Scaffold .gleon/.env.template if it does not exist
-    let env_template_content = "# gleon Storage Configuration\n\
-        # Copy this file to .env.local and fill in your credentials\n\
-        GLEON_STORAGE_URL=\n\
-        AWS_ACCESS_KEY_ID=\n\
-        AWS_SECRET_ACCESS_KEY=\n\
-        # For Cloudflare R2:\n\
-        # R2_ACCOUNT_ID=\n";
-    create_new_file_with_content(
-        &gleon_dir.join(".env.template"),
-        env_template_content.as_bytes(),
-        &gleon_dir,
-    )?;
+    if baselines == Baselines::Manifests {
+        let env_template_content = "# gleon Storage Configuration\n\
+            # Copy this file to .env.local and fill in your credentials\n\
+            GLEON_STORAGE_URL=\n\
+            AWS_ACCESS_KEY_ID=\n\
+            AWS_SECRET_ACCESS_KEY=\n\
+            # For Cloudflare R2:\n\
+            # R2_ACCOUNT_ID=\n";
+        create_new_file_with_content(
+            &gleon_dir.join(".env.template"),
+            env_template_content.as_bytes(),
+            &gleon_dir,
+        )?;
+    }
 
     let mut created = None;
     if let Some((template, config)) = new_config {
@@ -335,6 +341,13 @@ mod tests {
             written.contains("fallback_platform: linux-x86_64\n"),
             "{written}"
         );
+        // Goldens are the baselines: no blobs, manifests or storage settings, only the runs.
+        assert!(written.contains("baselines: goldens\n"), "{written}");
+        assert!(res.gleon_dir.join("runs/latest").is_dir());
+        assert!(res.gleon_dir.join(".gitignore").is_file());
+        assert!(!res.gleon_dir.join("blobs").exists());
+        assert!(!res.gleon_dir.join("manifests").exists());
+        assert!(!res.gleon_dir.join(".env.template").exists());
 
         let again = init_workspace(&ctx, Some(Template::Generic)).unwrap();
         assert_eq!(again.created, None);

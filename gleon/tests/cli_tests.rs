@@ -17,19 +17,10 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-/// Variables of the environment that select runs or outputs; CI exports `GLEON_RUN_ID` job-wide.
-const GLEON_ENV: [&str; 5] = [
-    "GLEON_RUN_ID",
-    "GLEON_ARTIFACTS_DIR",
-    "GLEON_METRICS",
-    "GLEON_STORAGE_URL",
-    "GLEON_HTML_ARTIFACT_URL",
-];
-
-/// The `gleon` binary without [`GLEON_ENV`], so each test sees only what it sets.
+/// The `gleon` binary without [`common::GLEON_ENV`], so each test sees only what it sets.
 fn gleon() -> Command {
     let mut cmd = Command::cargo_bin("gleon").unwrap();
-    for var in GLEON_ENV {
+    for var in common::GLEON_ENV {
         cmd.env_remove(var);
     }
     cmd
@@ -1322,8 +1313,8 @@ fn test_from_paths_are_relative_to_the_working_directory() {
         .stderr(predicates::str::contains("pass the `latest` directory"));
 }
 
-/// Outside a workspace (a monorepo root) the command runs with its run id, without a run file;
-/// a command killed by a signal ends `gleon test` by the same signal (gleon became the command).
+/// Outside a workspace (a monorepo root) the command runs with its run id, without a run file
+/// or summary; a command killed by a signal ends `gleon test` with `128 + signal`, like a shell.
 #[test]
 fn test_test_outside_a_workspace_and_signals() {
     let dir = tempfile::tempdir().unwrap();
@@ -1340,16 +1331,149 @@ fn test_test_outside_a_workspace_and_signals() {
     assert!(!dir.path().join(".gleon").exists());
 
     #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt as _;
+    gleon()
+        .current_dir(dir.path())
+        .args(["test", "--", "sh", "-c", "kill -TERM $$"])
+        .assert()
+        .code(143);
+}
 
-        let output = gleon()
-            .current_dir(dir.path())
-            .args(["test", "--", "sh", "-c", "kill -TERM $$"])
-            .output()
-            .unwrap();
-        assert_eq!(output.status.signal(), Some(15), "{output:?}");
-    }
+/// Ctrl-C reaches the tests from the terminal; gleon, which gets it too, waits for them, ends with
+/// their code and sums up no interrupted run. `SIGINT` and `SIGTERM` sent to gleon alone reach
+/// the tests.
+#[cfg(unix)]
+#[test]
+fn test_test_waits_for_the_tests_on_interrupts() {
+    let dir = init_temp_dir();
+    // gleon in a process group of its own, like a job of a shell.
+    let in_own_group = |script: &str| {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("gleon"));
+        {
+            use std::os::unix::process::CommandExt as _;
+            cmd.process_group(0);
+        }
+        cmd.current_dir(dir.path())
+            .args(["test", "--", "sh", "-c", script]);
+        for var in common::GLEON_ENV {
+            cmd.env_remove(var);
+        }
+        Command::from_std(cmd)
+    };
+
+    // Ctrl-C signals the whole process group: the tests (which ignore it here) and gleon, which
+    // waits for them, ends with their code and sums up nothing.
+    in_own_group("trap '' INT; kill -INT 0; sleep 1; exit 7")
+        .assert()
+        .code(7)
+        .stderr(predicate::str::contains("case(s)").not())
+        .stderr(predicate::str::contains("no case reports").not());
+
+    // SIGINT sent to gleon alone (in a process group of its own, as `timeout` does) reaches the
+    // tests: they trap it and say so.
+    in_own_group(
+        "trap 'echo forwarded; exit 5' INT; kill -INT $PPID; \
+         i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; exit 3",
+    )
+    .assert()
+    .code(5)
+    .stdout(predicate::str::contains("forwarded"))
+    .stderr(predicate::str::contains("case(s)").not());
+
+    // The tests trap SIGTERM and say so: only a forwarded signal gets there. They clean up and
+    // exit 0, but the run was cut short: no summary.
+    gleon()
+        .current_dir(dir.path())
+        .args([
+            "test",
+            "--",
+            "sh",
+            "-c",
+            "trap 'echo forwarded; exit 0' TERM; kill -TERM $PPID; \
+             i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; exit 3",
+        ])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("forwarded"))
+        .stderr(predicate::str::contains("case(s)").not())
+        .stderr(predicate::str::contains("no case reports").not());
+}
+
+/// A monorepo whose package has a workspace of its own: a run from the root records itself in
+/// the package too and sums up its cases; the package's `gleon report` (without
+/// `GLEON_RUN_ID`) reads that run, not an older report left there; the hint names the package's
+/// config, and approving through it makes the next run pass.
+#[test]
+fn test_test_in_a_monorepo_with_a_nested_workspace() {
+    let dir = init_temp_dir();
+    let root = dir.path();
+    let package = root.join("packages/app");
+    let gleon_bin = assert_cmd::cargo::cargo_bin("gleon");
+    common::copy_config(&package, "config/shots-exact");
+    copy_fixture("baseline_100x100.png", &package.join("shots/changed.png"));
+    gleon()
+        .current_dir(&package)
+        .arg("stage")
+        .assert()
+        .success();
+    copy_fixture(
+        "diff_16px_corners_100x100.png",
+        &package.join("shots/changed.png"),
+    );
+    // A report of an earlier run of this platform, left in the package.
+    let mut stale = mismatch("test/goldens/old", 5);
+    stale["platform"] =
+        serde_json::json!({"os": std::env::consts::OS, "arch": std::env::consts::ARCH});
+    stale["run_id"] = "run-old".into();
+    write_cases(&package, &[stale]);
+
+    let config = std::path::Path::new("packages/app/.gleon/gleon.yaml");
+    let run = || {
+        let mut test = gleon();
+        test.current_dir(root)
+            .args(["test", "--"])
+            .arg(&gleon_bin)
+            .arg("--config")
+            .arg(config)
+            .arg("diff");
+        test
+    };
+    let report_html = std::path::Path::new("packages/app/.gleon/runs/latest/report.html");
+    run()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "1 case(s): 0 passed, 1 failed (1 mismatch)",
+        ))
+        .stderr(predicate::str::contains(format!(
+            "`gleon --config {} report html --out {}`",
+            config.display(),
+            report_html.display()
+        )));
+
+    gleon()
+        .current_dir(root)
+        .arg("--config")
+        .arg(config)
+        .args(["report", "junit", "--out", "out/junit.xml"])
+        .assert()
+        .success();
+    let junit = std::fs::read_to_string(root.join("out/junit.xml")).unwrap();
+    assert!(
+        junit.contains(r#"tests="1" failures="1" errors="0""#),
+        "the package's run, without the older report: {junit}"
+    );
+
+    gleon()
+        .current_dir(root)
+        .arg("--config")
+        .arg(config)
+        .arg("approve")
+        .assert()
+        .success();
+    run()
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("1 case(s): 1 passed, 0 failed"));
 }
 
 /// A PNG fixture of gleon-core (`tests/fixtures/<name>`).
@@ -1432,7 +1556,23 @@ fn test_test_report_approve_end_to_end() {
         test
     };
 
-    run().assert().code(1);
+    // The summary: the totals, each failure with its case report, what to run next.
+    let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    run()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "2 case(s): 0 passed, 2 failed (1 mismatch, 1 missing)",
+        ))
+        .stderr(predicate::str::contains("shots/changed: Mismatch"))
+        .stderr(predicate::str::contains(
+            std::path::Path::new(".gleon/runs/latest/cases")
+                .join(&host)
+                .join("shots/new.json")
+                .display()
+                .to_string(),
+        ))
+        .stderr(predicate::str::contains("gleon report html"));
     let out = root.join("out");
     gleon()
         .current_dir(root)
@@ -1476,7 +1616,10 @@ fn test_test_report_approve_end_to_end() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Approved 2 screenshot(s)"));
-    run().assert().success();
+    run()
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("2 case(s): 2 passed, 0 failed"));
 }
 
 /// `gleon approve` takes `<platform>/<test name>` filters, and a bare platform key approves every
@@ -1629,4 +1772,146 @@ fn test_diff_and_report_of_a_labeled_platform() {
         dir.path().join(&src).is_file(),
         "relative to the page: {src}"
     );
+}
+
+/// A manifest workspace fails `pull` and `push --require-storage` (or `GLEON_REQUIRE_STORAGE`,
+/// which the approve workflow sets) without storage instead of passing in local mode; an
+/// uninitialized directory says that first.
+#[test]
+fn test_pull_and_push_require_storage() {
+    let dir = init_temp_dir();
+    let outside = tempfile::tempdir().unwrap();
+    for command in ["pull", "push"] {
+        gleon()
+            .current_dir(dir.path())
+            .args([command, "--require-storage"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("no remote storage is configured"));
+        gleon()
+            .current_dir(dir.path())
+            .env("GLEON_REQUIRE_STORAGE", "true")
+            .arg(command)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("no remote storage is configured"));
+        gleon()
+            .current_dir(dir.path())
+            .env("GLEON_REQUIRE_STORAGE", "false")
+            .arg(command)
+            .assert()
+            .success();
+        gleon()
+            .current_dir(dir.path())
+            .env("GLEON_STORAGE_URL", "memory://")
+            .args([command, "--require-storage"])
+            .assert()
+            .success();
+        gleon()
+            .current_dir(outside.path())
+            .args([command, "--require-storage"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("gleon init"))
+            .stderr(predicate::str::contains("no remote storage").not());
+    }
+}
+
+/// In a workspace whose baselines are golden files (what `gleon init` writes for Flutter), the
+/// commands that scan screenshots refuse and point to `gleon test`, the manifest and blob
+/// commands have nothing to do, `gleon clean` still removes the runs, and the goldens stay.
+#[test]
+fn test_commands_in_a_goldens_workspace() {
+    let dir = init_with_config(common::FLUTTER_GOLDENS);
+    let golden = dir.path().join("test/goldens/a.png");
+    copy_fixture("baseline_100x100.png", &golden);
+
+    for command in [
+        &["status"][..],
+        &["stage"],
+        &["diff"],
+        &["clean", "--screenshots"],
+    ] {
+        gleon()
+            .current_dir(dir.path())
+            .args(command)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("baselines: goldens"))
+            .stderr(predicate::str::contains("gleon test -- flutter test"));
+    }
+    for command in [
+        &["pull"][..],
+        &["push"],
+        &["gc", "--force"],
+        &["lint"],
+        &["resolve"],
+    ] {
+        gleon()
+            .current_dir(dir.path())
+            .env("GLEON_STORAGE_URL", "memory://")
+            .args(command)
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Nothing to"));
+    }
+    // The approve workflow pulls and pushes with `GLEON_REQUIRE_STORAGE` in any workspace.
+    for command in ["pull", "push"] {
+        gleon()
+            .current_dir(dir.path())
+            .env("GLEON_REQUIRE_STORAGE", "true")
+            .arg(command)
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Nothing to"));
+    }
+    assert!(golden.is_file());
+    gleon()
+        .current_dir(dir.path())
+        .arg("clean")
+        .assert()
+        .success();
+    assert!(golden.is_file());
+    assert!(!dir.path().join(".gleon/runs").exists());
+}
+
+/// On GitHub Actions the PR comment links the golden of an integration in the repository below
+/// the directory of the workspace in the checkout: at the head of a pull request (its event), at
+/// `GITHUB_SHA` for any other event. The events name a public repository, as the license check
+/// on GitHub Actions reads them too.
+#[test]
+fn test_cli_report_links_goldens_of_integrations_on_github_actions() {
+    let checkout = tempfile::tempdir().unwrap();
+    let package = checkout.path().join("packages/app");
+    std::fs::create_dir_all(&package).unwrap();
+    gleon().current_dir(&package).arg("init").assert().success();
+    write_cases(&package, &[mismatch("test/goldens/a", 5)]);
+    let head = "a".repeat(40);
+    let event = checkout.path().join("event.json");
+
+    for (payload, commit) in [
+        (
+            serde_json::json!({"repository": {"private": false}, "pull_request": {"head": {"sha": head}}}),
+            head.as_str(),
+        ),
+        (
+            serde_json::json!({"repository": {"private": false}}),
+            "abc123",
+        ),
+    ] {
+        std::fs::write(&event, payload.to_string()).unwrap();
+        gleon()
+            .current_dir(&package)
+            .env("GITHUB_SERVER_URL", "https://github.com")
+            .env("GITHUB_REPOSITORY", "o/r")
+            .env("GITHUB_SHA", "abc123")
+            .env("GITHUB_WORKSPACE", checkout.path())
+            .env("GITHUB_EVENT_PATH", &event)
+            .args(["report", "markdown"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "| `test/goldens/a` | [Image](https://github.com/o/r/blob/{commit}/packages/app/test/goldens/a.png) |"
+            )));
+    }
 }

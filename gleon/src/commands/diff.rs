@@ -41,7 +41,7 @@ pub async fn run_diff(
         Err(e) => return report_failure("Error running visual diff", &*e),
     };
     if auto_pull {
-        let pull_code = pull::run_pull(ctx, storage_cfg.as_ref(), false, None).await;
+        let pull_code = pull::run_pull(ctx, storage_cfg.as_ref(), false, None, false).await;
         if pull_code != ExitCode::Success {
             return pull_code;
         }

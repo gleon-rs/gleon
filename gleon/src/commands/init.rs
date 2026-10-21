@@ -28,9 +28,11 @@ pub fn run_init(ctx: &ResolvedContext, dir: &Path, template: Option<Template>) -
     let config = res.config_path.display();
     match res.created {
         Some(Template::Flutter) => info!(
-            "Created {config} for a Flutter package (pubspec.yaml found): goldens under every \
-             test/ compared exactly, their text on this platform; `gleon init --generic` writes \
-             the generic template instead"
+            "Created {config} for a Flutter package (pubspec.yaml found): the goldens under \
+             every test/ are the baselines (`baselines: goldens`), compared exactly, their text \
+             on this platform; `gleon init --generic` writes the generic template instead. \
+             Next: `gleon test -- flutter test`, then `gleon report html --out \
+             .gleon/runs/latest/report.html` and `gleon approve`"
         ),
         Some(Template::Generic) => info!("Created default configuration file at {config}"),
         // The flags choose the template of a new config only: say so rather than ignore them.

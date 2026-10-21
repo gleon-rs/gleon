@@ -70,7 +70,7 @@ pub enum CasesError {
     },
     /// A directory given as a run has no case reports directory.
     #[error(
-        "'{path}' is no run: it has no `cases/` directory (pass the `latest` directory of a \
+        "'{path}' is no run: it has no `cases/` directory or run file (pass the `latest` directory of a \
          `.gleon/runs`, e.g. of a downloaded CI artifact)"
     )]
     NotARun {
@@ -401,6 +401,23 @@ impl Cases {
         failures
     }
 
+    /// How many reports ended in each outcome.
+    #[must_use]
+    pub fn totals(&self) -> RunTotals {
+        let mut totals = RunTotals::default();
+        for report in &self.reports {
+            let count = match report.outcome {
+                CaseOutcome::Identical | CaseOutcome::Match => &mut totals.passed,
+                CaseOutcome::Updated => &mut totals.updated,
+                CaseOutcome::Mismatch | CaseOutcome::DimensionMismatch => &mut totals.mismatch,
+                CaseOutcome::Missing => &mut totals.missing,
+                CaseOutcome::Error => &mut totals.error,
+            };
+            *count += 1;
+        }
+        totals
+    }
+
     /// When the newest report was recorded.
     #[must_use]
     pub fn recorded_at(&self) -> Option<DateTime<Utc>> {
@@ -413,6 +430,70 @@ impl Cases {
     #[must_use]
     pub fn artifact_path(&self, path: &str) -> Option<PathBuf> {
         artifact_path(&self.runs_latest, path)
+    }
+}
+
+/// The outcomes of the reports of a run ([`Cases::totals`]); shown as
+/// `5 case(s): 2 passed, 1 updated, 2 failed (1 mismatch, 1 missing)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunTotals {
+    /// Identical or within the tolerance.
+    pub passed: usize,
+    /// Rewritten from the candidate (update mode).
+    pub updated: usize,
+    /// Beyond the tolerance, or of another size.
+    pub mismatch: usize,
+    /// Without a golden yet.
+    pub missing: usize,
+    /// Not compared: invalid input or config, an I/O, image or internal error.
+    pub error: usize,
+}
+
+impl RunTotals {
+    /// Every report.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.passed + self.updated + self.failed()
+    }
+
+    /// The reports whose outcome fails their test.
+    #[must_use]
+    pub const fn failed(&self) -> usize {
+        self.mismatch + self.missing + self.error
+    }
+}
+
+impl std::ops::AddAssign for RunTotals {
+    fn add_assign(&mut self, other: Self) {
+        self.passed += other.passed;
+        self.updated += other.updated;
+        self.mismatch += other.mismatch;
+        self.missing += other.missing;
+        self.error += other.error;
+    }
+}
+
+impl std::fmt::Display for RunTotals {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} case(s): {} passed", self.total(), self.passed)?;
+        if self.updated > 0 {
+            write!(f, ", {} updated", self.updated)?;
+        }
+        write!(f, ", {} failed", self.failed())?;
+        let kinds = [
+            (self.mismatch, "mismatch"),
+            (self.missing, "missing"),
+            (self.error, "error"),
+        ];
+        let mut separator = " (";
+        for (count, kind) in kinds.into_iter().filter(|(count, _)| *count > 0) {
+            write!(f, "{separator}{count} {kind}")?;
+            separator = ", ";
+        }
+        if separator == ", " {
+            f.write_str(")")?;
+        }
+        Ok(())
     }
 }
 
@@ -452,13 +533,16 @@ fn select_runs(
         .collect()
 }
 
-/// Checks that `dir`, given as a copy of `.gleon/runs/latest`, is one: it has `cases/`. A typo, or
-/// the root of a downloaded artifact (which holds `latest/`), is no run read as an empty one.
+/// Checks that `dir`, given as a copy of `.gleon/runs/latest`, is one.
+///
+/// A run has `cases/`, or the run file of `gleon test` (a run whose tests failed before
+/// comparing any golden, such as one job of a CI matrix: an empty run). A typo, or the root of a
+/// downloaded artifact (which holds `latest/`), is no run read as an empty one.
 ///
 /// # Errors
 /// Returns [`CasesError::NotARun`] otherwise.
 pub fn check_run_dir(dir: &Path) -> Result<(), CasesError> {
-    if dir.join(CASES_SUBDIR).is_dir() {
+    if dir.join(CASES_SUBDIR).is_dir() || dir.join(RUN_FILE).is_file() {
         Ok(())
     } else {
         Err(CasesError::NotARun {
@@ -468,7 +552,8 @@ pub fn check_run_dir(dir: &Path) -> Result<(), CasesError> {
 }
 
 /// The workspace root of `runs_latest` when it is the `.gleon/runs/latest` of a workspace.
-fn workspace_root(runs_latest: &Path) -> Option<&Path> {
+#[must_use]
+pub fn workspace_root(runs_latest: &Path) -> Option<&Path> {
     let runs = runs_latest.parent()?;
     let gleon = runs.parent()?;
     let is_workspace = runs_latest.file_name()? == "latest"
@@ -995,6 +1080,12 @@ mod tests {
         ));
         std::fs::create_dir_all(runs_latest.join("cases")).unwrap();
         check_run_dir(&runs_latest).unwrap();
+        // A run of `gleon test` that compared nothing: its run file, no `cases/`.
+        let empty = temp.path().join("empty/latest");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(check_run_dir(&empty).is_err());
+        std::fs::write(empty.join(RUN_FILE), "{}").unwrap();
+        check_run_dir(&empty).unwrap();
         let err = check_run_dir(&temp.path().join(".gleon/runs")).unwrap_err();
         assert!(err.to_string().contains("`latest`"), "{err}");
     }
@@ -1353,6 +1444,38 @@ mod tests {
             Some(Path::new("/w"))
         );
         assert_eq!(workspace_root(Path::new("/downloads/latest")), None);
+    }
+
+    #[test]
+    fn test_totals_count_every_outcome() {
+        let totals = Cases::new("runs/latest", fixtures::every_outcome()).totals();
+        assert_eq!(
+            totals,
+            RunTotals {
+                passed: 2,
+                updated: 1,
+                mismatch: 2,
+                missing: 1,
+                error: 1,
+            }
+        );
+        assert_eq!((totals.total(), totals.failed()), (7, 4));
+        let mut twice = totals;
+        twice += totals;
+        assert_eq!((twice.total(), twice.mismatch, twice.passed), (14, 4, 4));
+        assert_eq!(
+            totals.to_string(),
+            "7 case(s): 2 passed, 1 updated, 4 failed (2 mismatch, 1 missing, 1 error)"
+        );
+        let passing = Cases::new("runs/latest", vec![report("a", CaseOutcome::Match)]);
+        assert_eq!(
+            passing.totals().to_string(),
+            "1 case(s): 1 passed, 0 failed"
+        );
+        assert_eq!(
+            Cases::new("runs/latest", vec![]).totals().to_string(),
+            "0 case(s): 0 passed, 0 failed"
+        );
     }
 
     #[test]

@@ -797,6 +797,25 @@ metrics:
         assert!(plan.in_workspace().is_some(), "the rule applies");
     }
 
+    /// `baselines: goldens` (what `gleon init` writes for Flutter) tells the CLI not to scan the
+    /// goldens; integrations plan them by the rules either way.
+    #[test]
+    fn test_integrations_plan_the_rules_of_a_goldens_workspace() {
+        let yaml = format!("baselines: goldens\n{YAML}");
+        let (_dir, root) = workspace(&yaml, "Clock.png");
+        let plan = session(None)
+            .plan(&root.join("test/goldens/Clock.png"), None, vec![], None)
+            .unwrap();
+        assert_eq!(
+            plan.tolerance,
+            Tolerance::Ssim {
+                min_similarity: 0.6,
+                color_tolerance: 64.0
+            }
+        );
+        assert_eq!(matched(plan).name, "test/goldens/clock");
+    }
+
     #[test]
     fn test_metrics_env_overrides_the_config() {
         let (_dir, root) = workspace(YAML, "a.png");
