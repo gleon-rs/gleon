@@ -66,11 +66,9 @@ const PRUNED_FOR_WORKSPACES: &[&str] = &["Pods"];
 pub fn workspaces_below(root: &Path) -> Vec<std::path::PathBuf> {
     let mut builder = WalkBuilder::new(root);
     builder.standard_filters(false).filter_entry(|entry| {
+        // Never asked about `root` itself: the walk always yields it.
         if !entry.file_type().is_some_and(|ft| ft.is_dir()) {
             return false;
-        }
-        if entry.depth() == 0 {
-            return true;
         }
         let is_pruned = matches!(
             entry.file_name().to_str(),
@@ -193,6 +191,29 @@ mod tests {
             workspaces_below(&root.join("third_party/sub")),
             [root.join("third_party/sub")]
         );
+    }
+
+    /// A directory that cannot be read is skipped; the rest is still found.
+    #[cfg(unix)]
+    #[test]
+    fn test_workspaces_below_skips_unreadable_directories() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        for dir in ["", "locked/inner"] {
+            let gleon = root.join(dir).join(".gleon");
+            std::fs::create_dir_all(&gleon).unwrap();
+            std::fs::write(gleon.join("gleon.yaml"), "").unwrap();
+        }
+        let locked = root.join("locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged process (root in a container) reads it anyway.
+        let is_readable = std::fs::read_dir(&locked).is_ok();
+        let found = workspaces_below(root);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(is_readable || found == [root.to_path_buf()], "{found:?}");
     }
 
     #[test]

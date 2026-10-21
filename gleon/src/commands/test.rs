@@ -68,10 +68,8 @@ async fn run_test_inner(
         Ok(child) => child,
         Err(error) => return not_started(error, program),
     };
-    let outcome = signals
-        .wait(&mut child)
-        .await
-        .with_context(|| format!("Failed to wait for `{program}`"))?;
+    let waited = signals.wait(&mut child).await;
+    let outcome = waited.context(format!("Failed to wait for `{program}`"))?;
     if let (Outcome::Exited(_), Some(started)) = (outcome, &started) {
         summarize(started, &gleon_core::paths::resolved(current_dir));
     }
@@ -161,15 +159,14 @@ fn prepare<'a>(
     });
 
     info!("Run {}: {}", run_id.as_str(), command.join(" "));
-    let resolved = cfg!(windows)
-        .then(|| {
-            program_path(
-                program,
-                std::env::var_os("PATH").as_deref(),
-                std::env::var("PATHEXT").ok().as_deref(),
-            )
-        })
-        .flatten();
+    #[cfg(windows)]
+    let resolved = program_path(
+        program,
+        std::env::var_os("PATH").as_deref(),
+        std::env::var("PATHEXT").ok().as_deref(),
+    );
+    #[cfg(not(windows))]
+    let resolved = None::<PathBuf>;
     let mut child = std::process::Command::new(
         resolved
             .as_deref()
@@ -230,9 +227,9 @@ fn outcome(status: ExitStatus, interrupted: bool) -> Outcome {
             return Outcome::Signaled(128 + signal);
         }
     }
-    let code = status
-        .code()
-        .unwrap_or_else(|| crate::exit_code::ExitCode::Failure.into());
+    // Without a code (a signal, handled above on Unix): a failure.
+    let failure = crate::exit_code::ExitCode::Failure.into();
+    let code = status.code().unwrap_or(failure);
     if interrupted {
         Outcome::Interrupted(code)
     } else {
@@ -296,11 +293,7 @@ impl Signals {
                 status = child.wait() => return Ok(outcome(status?, interrupted)),
                 _ = self.interrupt.recv() => {
                     interrupted = true;
-                    // From the terminal (Ctrl-C) the command has it already; sent to gleon alone
-                    // (`kill -INT`, `timeout -s INT`, a CI runner), it is passed on.
-                    if !is_terminal_foreground() {
-                        forward(pid, libc::SIGINT);
-                    }
+                    forward(interrupt_target(pid, is_terminal_foreground()), libc::SIGINT);
                 }
                 // Whatever the command does with them (a trap may exit 0), the run is cut short.
                 _ = self.terminate.recv() => {
@@ -329,20 +322,30 @@ impl Signals {
     }
 }
 
+/// The process a `SIGINT` gleon got is passed on to: the test command `pid`, unless gleon is the
+/// foreground of its terminal (`is_terminal_foreground`), whose Ctrl-C reaches the command
+/// directly; sent to gleon alone (`kill -INT`, `timeout -s INT`, a CI runner) it is passed on.
+#[cfg(unix)]
+const fn interrupt_target(pid: Option<u32>, is_terminal_foreground: bool) -> Option<u32> {
+    if is_terminal_foreground { None } else { pid }
+}
+
 /// Whether the process group of gleon is the foreground process group of its controlling
 /// terminal, so a Ctrl-C there reaches the test command (in the same group) without gleon. False
 /// without a controlling terminal (CI) and in a background or separate process group (`timeout`
 /// puts its command in one).
 #[cfg(unix)]
 fn is_terminal_foreground() -> bool {
-    use std::os::fd::AsRawFd as _;
+    std::fs::File::open("/dev/tty").is_ok_and(|terminal| is_foreground_of(&terminal))
+}
 
-    let Ok(terminal) = std::fs::File::open("/dev/tty") else {
-        return false;
-    };
+/// Whether the process group of gleon is the foreground process group of the terminal open as
+/// `terminal`; false for anything else (no terminal).
+#[cfg(unix)]
+fn is_foreground_of(terminal: &impl std::os::fd::AsRawFd) -> bool {
     // SAFETY: `tcgetpgrp(3)` reads the foreground group of the terminal behind a descriptor that
-    // stays open for the call (`terminal` lives until the end of the function), and
-    // `getpgrp(2)` reads the process group of this process; neither touches memory of ours.
+    // stays open for the call (borrowed from `terminal`), and `getpgrp(2)` reads the process group
+    // of this process; neither touches memory of ours.
     #[expect(
         unsafe_code,
         reason = "`tcgetpgrp`/`getpgrp` only read process state (see SAFETY comment)"
@@ -351,25 +354,24 @@ fn is_terminal_foreground() -> bool {
     foreground != -1 && foreground == own
 }
 
-/// Sends `signal` to the test command `pid`.
+/// Sends `signal` to the test command `pid` (none: nothing to send).
 #[cfg(unix)]
 fn forward(pid: Option<u32>, signal: libc::c_int) {
-    let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) else {
-        return;
-    };
-    // SAFETY: `kill(2)` only asks the kernel to send `signal` to the process `pid`, the child
-    // gleon started and has not reaped yet (so the id cannot belong to another process); it reads
-    // or writes no memory of this process.
-    #[expect(
-        unsafe_code,
-        reason = "`libc::kill` on the child not yet reaped passes a signal on (see SAFETY comment)"
-    )]
-    let sent = unsafe { libc::kill(pid, signal) };
-    if sent != 0 {
-        warn!(
-            "Could not pass signal {signal} on to the tests: {}",
-            io::Error::last_os_error()
-        );
+    if let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+        // SAFETY: `kill(2)` only asks the kernel to send `signal` to the process `pid`, the child
+        // gleon started and has not reaped yet (so the id cannot belong to another process); it
+        // reads or writes no memory of this process.
+        #[expect(
+            unsafe_code,
+            reason = "`libc::kill` on the child not yet reaped passes a signal on (see SAFETY comment)"
+        )]
+        let sent = unsafe { libc::kill(pid, signal) };
+        if sent != 0 {
+            warn!(
+                "Could not pass signal {signal} on to the tests: {}",
+                io::Error::last_os_error()
+            );
+        }
     }
 }
 
@@ -388,9 +390,19 @@ struct WorkspaceRun {
     cases: Cases,
 }
 
-/// Prints the summary of the run `started` recorded, from the case reports of each of its
-/// workspaces; paths are shown relative to `cwd` (resolved like the workspace roots).
+/// Prints the summary of the run `started` recorded ([`summary_of_run`]).
 fn summarize(started: &Started, cwd: &Path) {
+    for line in summary_of_run(started, cwd) {
+        match line {
+            Line::Info(line) => info!("{line}"),
+            Line::Warn(line) => warn!("{line}"),
+        }
+    }
+}
+
+/// The summary of the run `started` recorded, from the case reports of each of its workspaces;
+/// paths are shown relative to `cwd` (resolved like the workspace roots).
+fn summary_of_run(started: &Started, cwd: &Path) -> Vec<Line> {
     let mut lines = Vec::new();
     let mut runs = Vec::new();
     for root in &started.roots {
@@ -415,12 +427,7 @@ fn summarize(started: &Started, cwd: &Path) {
         cwd,
         unreadable,
     ));
-    for line in lines {
-        match line {
-            Line::Info(line) => info!("{line}"),
-            Line::Warn(line) => warn!("{line}"),
-        }
-    }
+    lines
 }
 
 /// `path` relative to `cwd` when below it, else as it is.
@@ -509,6 +516,10 @@ fn summary(
 /// extensions found on `PATH` for a bare name (`flutter` → `flutter.bat`), or next to a path
 /// (`bin\flutter` → `bin\flutter.bat`), which `std::process::Command` does not look up (it only
 /// appends `.exe`). `None` for names with an extension or when nothing is found.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "only Windows looks programs up by `PATHEXT`")
+)]
 fn program_path(program: &str, path: Option<&OsStr>, pathext: Option<&str>) -> Option<PathBuf> {
     let name = Path::new(program);
     if name.extension().is_some() {
@@ -879,6 +890,173 @@ mod tests {
             &format!("... and {MAX_LISTED_FAILURES} more")
         ));
         assert_eq!(lines.len(), 1 + MAX_LISTED_FAILURES + 1 + 2);
+    }
+
+    /// The warnings of the selection of reports come first.
+    #[test]
+    fn test_summary_starts_with_the_warnings_of_the_reports() {
+        let runs = [WorkspaceRun {
+            root: PathBuf::from("/w"),
+            cases: Cases::new("/w/.gleon/runs/latest", vec![report("a", "match")])
+                .with_warnings(vec!["mixed runs".to_owned()]),
+        }];
+        let lines = summary(
+            &run_id(),
+            &runs,
+            Some(Path::new("/w")),
+            Path::new("/w"),
+            false,
+        );
+        assert_eq!(lines[0], Line::Warn("mixed runs".to_owned()));
+        assert_eq!(
+            lines[1],
+            Line::Info("Run run-1: 1 case(s): 1 passed, 0 failed".to_owned())
+        );
+    }
+
+    /// A `.gleon/` without its config (removed by hand) still records the run.
+    #[test]
+    fn test_a_workspace_without_its_config_records_the_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = ResolvedContext::default();
+        ctx.base_dir = temp.path().to_path_buf();
+        gleon_core::ops::init_workspace(&ctx, None).unwrap();
+        std::fs::remove_file(temp.path().join(".gleon/gleon.yaml")).unwrap();
+
+        let (_, _, started) = prepare(&ctx, &Env, &["true".to_owned()]).unwrap();
+        assert_eq!(started.unwrap().roots, [temp.path().to_path_buf()]);
+        assert!(temp.path().join(".gleon/runs/latest/run.json").is_file());
+    }
+
+    /// A run file that cannot be written fails before the command starts, naming where.
+    #[test]
+    fn test_prepare_fails_when_the_run_file_cannot_be_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = ResolvedContext::default();
+        ctx.base_dir = temp.path().to_path_buf();
+        gleon_core::ops::init_workspace(&ctx, None).unwrap();
+        let runs = temp.path().join(".gleon/runs");
+        std::fs::remove_dir_all(&runs).unwrap();
+        std::fs::write(&runs, "not a directory").unwrap();
+
+        let err = prepare(&ctx, &Env, &["true".to_owned()]).unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to write the run file"),
+            "{err}"
+        );
+    }
+
+    /// A workspace whose `.gleon/` cannot be looked at is an error, not "no workspace".
+    #[cfg(unix)]
+    #[test]
+    fn test_prepare_fails_on_a_workspace_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let locked = temp.path().join("locked");
+        let base_dir = locked.join("workspace");
+        std::fs::create_dir_all(base_dir.join(".gleon")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged process (root in a container) reads it anyway: nothing to test there.
+        let is_readable = std::fs::metadata(base_dir.join(".gleon")).is_ok();
+        let mut ctx = ResolvedContext::default();
+        ctx.base_dir = base_dir;
+        let prepared = prepare(&ctx, &Env, &["true".to_owned()]).map(|_| ());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(prepared.is_err(), !is_readable, "{prepared:?}");
+    }
+
+    /// Case reports that cannot be read are said once; the run is not then blamed on the rules.
+    #[cfg(unix)]
+    #[test]
+    fn test_summary_of_run_says_which_reports_could_not_be_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let report_file = root.join(".gleon/runs/latest/cases/linux-x86_64/a.json");
+        std::fs::create_dir_all(report_file.parent().unwrap()).unwrap();
+        std::fs::write(&report_file, "{}").unwrap();
+        std::fs::set_permissions(&report_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let is_readable = std::fs::read(&report_file).is_ok();
+        let started = Started {
+            own: Some(root.clone()),
+            roots: vec![root.clone()],
+            run_id: run_id(),
+        };
+        let lines = summary_of_run(&started, &root);
+        std::fs::set_permissions(&report_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let said = texts_contain(&lines, "could not be read");
+        let blamed = texts_contain(&lines, "no case reports");
+        assert!(is_readable || (said && !blamed), "{:?}", texts(&lines));
+    }
+
+    /// A `SIGINT` is passed on to the command unless gleon is the foreground of its terminal.
+    #[cfg(unix)]
+    #[test]
+    fn test_interrupt_target_and_terminal() {
+        assert_eq!(interrupt_target(Some(7), false), Some(7));
+        assert_eq!(interrupt_target(Some(7), true), None);
+        assert_eq!(interrupt_target(None, false), None);
+        // A file is no terminal.
+        let file = tempfile::tempfile().unwrap();
+        assert!(!is_foreground_of(&file));
+    }
+
+    /// A process that is gone (reaped) gets nothing and only draws a warning; signal 0 checks
+    /// the process without sending anything.
+    #[cfg(unix)]
+    #[test]
+    fn test_forward_to_a_process_that_is_gone() {
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let pid = gone.id();
+        gone.wait().unwrap();
+
+        // `&File` is `io::Write`, so a shared file collects the formatted log.
+        let temp = tempfile::tempdir().unwrap();
+        let log_path = temp.path().join("forward.log");
+        let log = std::sync::Arc::new(std::fs::File::create(&log_path).unwrap());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(log)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            forward(Some(pid), 0);
+            // Nothing to send to: no warning.
+            forward(None, 0);
+            forward(Some(u32::MAX), 0);
+        });
+
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("Could not pass signal 0 on to the tests")
+                .count(),
+            1,
+            "{log}"
+        );
+    }
+
+    /// A Ctrl-C that reached gleon before the command existed is passed on when it starts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_an_interrupt_before_the_command_starts_reaches_it() {
+        let signals = Signals::new().unwrap();
+        let sent = std::process::Command::new("kill")
+            .args(["-INT", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        // Lets the signal driver take it in.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+
+        let outcome = signals.wait(&mut child).await.unwrap();
+        assert_eq!(outcome, Outcome::Signaled(128 + libc::SIGINT));
     }
 
     #[test]

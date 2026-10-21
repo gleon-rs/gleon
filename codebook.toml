@@ -188,6 +188,7 @@ words = [
     "getpgrp",
     "tcgetpgrp",
     "PPID",
+    "HUP",
     "endgroup",
     "Ärger",
     "ärger",

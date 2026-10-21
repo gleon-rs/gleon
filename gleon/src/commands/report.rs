@@ -168,11 +168,9 @@ fn golden_base_url(
         segments
             .pop_if_empty()
             .extend([owner, repo, "blob", sha.as_str()]);
+        // Both paths are resolved: only plain names lie between them.
         for component in dir.components() {
-            let std::path::Component::Normal(name) = component else {
-                return None;
-            };
-            segments.push(name.to_str()?);
+            segments.push(component.as_os_str().to_str()?);
         }
     }
     Some(url.into())
@@ -336,6 +334,21 @@ mod tests {
         without_sha.0.insert("GITHUB_SHA", " ".to_owned());
         assert_eq!(golden_base_url(&without_sha, Some(temp.path())), None);
         assert_eq!(golden_base_url(&DummyEnv, Some(temp.path())), None);
+        // An event payload that cannot be read or parsed names no pull request: `GITHUB_SHA`.
+        let broken = temp.path().join("broken.json");
+        std::fs::write(&broken, "{").unwrap();
+        for payload in [temp.path().join("missing.json"), broken] {
+            let mut unread = github(temp.path());
+            unread
+                .0
+                .insert("GITHUB_EVENT_PATH", payload.to_str().unwrap().to_owned());
+            assert_eq!(
+                golden_base_url(&unread, Some(temp.path())).as_deref(),
+                Some("https://github.com/o/r/blob/abc123"),
+                "{}",
+                payload.display()
+            );
+        }
         // A repository that is not `owner/name`, or a server that is not a web URL: no link.
         for (var, value) in [
             ("GITHUB_REPOSITORY", "o"),

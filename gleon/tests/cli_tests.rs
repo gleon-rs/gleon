@@ -1379,23 +1379,27 @@ fn test_test_waits_for_the_tests_on_interrupts() {
     .stdout(predicate::str::contains("forwarded"))
     .stderr(predicate::str::contains("case(s)").not());
 
-    // The tests trap SIGTERM and say so: only a forwarded signal gets there. They clean up and
-    // exit 0, but the run was cut short: no summary.
-    gleon()
-        .current_dir(dir.path())
-        .args([
-            "test",
-            "--",
-            "sh",
-            "-c",
-            "trap 'echo forwarded; exit 0' TERM; kill -TERM $PPID; \
-             i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; exit 3",
-        ])
-        .assert()
-        .code(0)
-        .stdout(predicate::str::contains("forwarded"))
-        .stderr(predicate::str::contains("case(s)").not())
-        .stderr(predicate::str::contains("no case reports").not());
+    // The tests trap SIGTERM (and SIGHUP, a closed terminal) and say so: only a forwarded
+    // signal gets there. They clean up and exit 0, but the run was cut short: no summary.
+    for signal in ["TERM", "HUP"] {
+        gleon()
+            .current_dir(dir.path())
+            .args([
+                "test",
+                "--",
+                "sh",
+                "-c",
+                &format!(
+                    "trap 'echo forwarded; exit 0' {signal}; kill -{signal} $PPID; \
+                     i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; exit 3"
+                ),
+            ])
+            .assert()
+            .code(0)
+            .stdout(predicate::str::contains("forwarded"))
+            .stderr(predicate::str::contains("case(s)").not())
+            .stderr(predicate::str::contains("no case reports").not());
+    }
 }
 
 /// A monorepo whose package has a workspace of its own: a run from the root records itself in
