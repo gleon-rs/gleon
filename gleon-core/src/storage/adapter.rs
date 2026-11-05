@@ -412,6 +412,17 @@ impl ObjectStoreAdapter {
         )]
         let mut bytes = Vec::with_capacity(len as usize);
         tokio::io::AsyncReadExt::read_to_end(&mut file, &mut bytes).await?;
+        // Checked like a download (`write_verified`): other schemes cannot be checked there
+        // either.
+        if hash.scheme() == "sha256" {
+            let actual = gleon_model::case::Sha256Hex::of(&bytes);
+            if !actual.as_str().eq_ignore_ascii_case(hash.value()) {
+                return Err(StorageError::LocalHashMismatch {
+                    expected: hash.value().to_owned(),
+                    actual: actual.as_str().to_owned(),
+                });
+            }
+        }
 
         let payload_bytes = bytes::Bytes::from(bytes);
 
@@ -1195,7 +1206,8 @@ mod tests {
 
         let hash = crate::manifest::ImageHash::new(
             "sha256",
-            "6666666666666666666666666666666666666666666666666666666666666666",
+            // The content address of the sample: uploads are checked.
+            crate::case::Sha256Hex::of(b"sample_fallback_data").as_str(),
         )
         .unwrap();
 
@@ -1230,7 +1242,8 @@ mod tests {
 
         let hash = crate::manifest::ImageHash::new(
             "sha256",
-            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            // The content address of the sample: uploads are checked.
+            crate::case::Sha256Hex::of(b"data").as_str(),
         )
         .unwrap();
 
@@ -1258,7 +1271,8 @@ mod tests {
 
         let hash = crate::manifest::ImageHash::new(
             "sha256",
-            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            // The content address of the sample: uploads are checked.
+            crate::case::Sha256Hex::of(b"data2").as_str(),
         )
         .unwrap();
 

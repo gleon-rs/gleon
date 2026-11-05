@@ -324,7 +324,9 @@ mod tests {
         let plat_dir = temp.path().join(".gleon").join("manifests").join(&key);
         std::fs::create_dir_all(&plat_dir).unwrap();
 
-        let hash = "1111111111111111111111111111111111111111111111111111111111111111";
+        // The content address of the local blob below: uploads are checked.
+        let sha256 = crate::case::Sha256Hex::of(b"data");
+        let hash = sha256.as_str();
         let manifest = crate::manifest::SingleTestManifest::new(
             crate::manifest::ImageHash::new("sha256", hash).unwrap(),
             crate::manifest::ImageHash::new("dhash", "0000000000000000").unwrap(),
@@ -434,7 +436,9 @@ mod tests {
         let plat_dir = temp.path().join(".gleon").join("manifests").join(&key);
         std::fs::create_dir_all(&plat_dir).unwrap();
 
-        let hash_str = "3333333333333333333333333333333333333333333333333333333333333333";
+        // The content address of the remote blob below: uploads are checked.
+        let remote_sha256 = crate::case::Sha256Hex::of(b"remote blob data");
+        let hash_str = remote_sha256.as_str();
         let image_hash = crate::manifest::ImageHash::new("sha256", hash_str).unwrap();
         let manifest = crate::manifest::SingleTestManifest::new(
             image_hash.clone(),
@@ -511,7 +515,9 @@ mod tests {
         std::fs::create_dir_all(&plat_dir).unwrap();
 
         // 1. Blob that exists remotely (should be skipped)
-        let hash_remote_str = "1111111111111111111111111111111111111111111111111111111111111111";
+        // The content addresses of the blobs below: uploads are checked.
+        let remote_sha256 = crate::case::Sha256Hex::of(b"remote blob data");
+        let hash_remote_str = remote_sha256.as_str();
         let image_hash_remote = crate::manifest::ImageHash::new("sha256", hash_remote_str).unwrap();
         let manifest_remote = crate::manifest::SingleTestManifest::new(
             image_hash_remote.clone(),
@@ -525,7 +531,8 @@ mod tests {
             .unwrap();
 
         // 2. Blob that is missing remotely but exists locally (should be uploaded)
-        let hash_local_str = "2222222222222222222222222222222222222222222222222222222222222222";
+        let local_sha256 = crate::case::Sha256Hex::of(b"local blob data");
+        let hash_local_str = local_sha256.as_str();
         let image_hash_local = crate::manifest::ImageHash::new("sha256", hash_local_str).unwrap();
         let manifest_local = crate::manifest::SingleTestManifest::new(
             image_hash_local.clone(),

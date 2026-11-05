@@ -160,6 +160,19 @@ fn test_gc_options_constructors() {
     assert_eq!(custom.grace_period, Duration::hours(48));
 }
 
+/// Puts the bytes of `file` into the remote store under `hash`, unchecked: garbage collection
+/// works on whatever a bucket holds (`upload_blob` would refuse bytes its hash does not name).
+async fn seed_blob(adapter: &ObjectStoreAdapter, hash: &ImageHash, file: &Path) {
+    adapter
+        .put_object(
+            &format!("blobs/{}/{}", hash.scheme(), hash.value()),
+            fs::read(file).unwrap().into(),
+            None,
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn test_gc_local_mode_when_no_storage_url() {
     let temp = tempdir().unwrap();
@@ -212,8 +225,8 @@ async fn test_gc_full_lifecycle_with_storage() {
     let fixture_png = include_bytes!("fixtures/baseline_100x100.png");
     fs::write(&temp_blob_file, fixture_png).unwrap();
 
-    adapter.upload_blob(&h1, &temp_blob_file).await.unwrap();
-    adapter.upload_blob(&h2, &temp_blob_file).await.unwrap();
+    seed_blob(&adapter, &h1, &temp_blob_file).await;
+    seed_blob(&adapter, &h2, &temp_blob_file).await;
 
     assert!(adapter.blob_exists(&h1).await.unwrap());
     assert!(adapter.blob_exists(&h2).await.unwrap());
@@ -334,9 +347,9 @@ async fn test_gc_integration_real_data_mtime() {
     let fixture_png = include_bytes!("fixtures/baseline_100x100.png");
     fs::write(&temp_png, fixture_png).unwrap();
 
-    adapter.upload_blob(&h_ref, &temp_png).await.unwrap();
-    adapter.upload_blob(&h_recent, &temp_png).await.unwrap();
-    adapter.upload_blob(&h_old, &temp_png).await.unwrap();
+    seed_blob(&adapter, &h_ref, &temp_png).await;
+    seed_blob(&adapter, &h_recent, &temp_png).await;
+    seed_blob(&adapter, &h_old, &temp_png).await;
 
     assert!(adapter.blob_exists(&h_ref).await.unwrap());
     assert!(adapter.blob_exists(&h_recent).await.unwrap());
@@ -882,8 +895,8 @@ async fn test_gc_s3_prefix_isolation() {
     let dummy_file = root.join("dummy.png");
     fs::write(&dummy_file, include_bytes!("fixtures/baseline_100x100.png")).unwrap();
 
-    adapter_a.upload_blob(&h_a, &dummy_file).await.unwrap();
-    adapter_b.upload_blob(&h_b, &dummy_file).await.unwrap();
+    seed_blob(&adapter_a, &h_a, &dummy_file).await;
+    seed_blob(&adapter_b, &h_b, &dummy_file).await;
 
     // Both blobs exist in their respective adapters
     assert!(adapter_a.blob_exists(&h_a).await.unwrap());
@@ -914,7 +927,7 @@ async fn test_delete_blobs_batch_with_not_found() {
 
     let dummy_file = temp.path().join("dummy.png");
     fs::write(&dummy_file, include_bytes!("fixtures/baseline_100x100.png")).unwrap();
-    adapter.upload_blob(&h1, &dummy_file).await.unwrap();
+    seed_blob(&adapter, &h1, &dummy_file).await;
 
     // h1 exists, h2 does not exist (NotFound)
     let summary = adapter

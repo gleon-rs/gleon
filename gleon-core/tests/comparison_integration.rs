@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use gleon_engine::{
-    ComparisonResult, Measurement, PixelRegions, compare_images,
+    ComparisonResult, Measurement, PixelRegions, compare_images, compare_images_as,
     config::{DiffConfig, Mode},
 };
 use image::{Rgba, RgbaImage};
@@ -190,4 +190,77 @@ fn test_integration_ssim_large_diff() {
         ),
         "Expected SSIM mismatch, got: {result:?}"
     );
+}
+
+/// On real renders, a comparison that keeps no diff (`gleon status`) decides and measures like
+/// one that renders it (`gleon diff`): pixel and SSIM failures and passes, and another size.
+#[test]
+fn test_integration_without_diff_decides_like_with_diff() {
+    let config = DiffConfig::default();
+    for (baseline, actual, mode, expected) in [
+        (
+            "dashboard_baseline.png",
+            "dashboard_actual.png",
+            Mode::Ssim,
+            "mismatch",
+        ),
+        (
+            "dashboard_baseline.png",
+            "dashboard_actual.png",
+            Mode::Pixel,
+            "mismatch",
+        ),
+        (
+            "aa_edge_baseline_10x10.png",
+            "aa_edge_actual_10x10.png",
+            Mode::Ssim,
+            "match",
+        ),
+        (
+            "baseline_gradient_100x100.png",
+            "diff_1px_black_center_100x100.png",
+            Mode::Pixel,
+            "match",
+        ),
+        ("baseline_100x100.png", "200x100.png", Mode::Pixel, "size"),
+    ] {
+        let (baseline, actual) = (load_fixture(baseline), load_fixture(actual));
+        let rendered = compare_images(&baseline, &actual, mode, &config, &PixelRegions::NONE);
+        let skipped: ComparisonResult<()> =
+            compare_images_as(&baseline, &actual, mode, &config, &PixelRegions::NONE);
+        let decided = match (&rendered, &skipped) {
+            (
+                ComparisonResult::Match { measurement: a },
+                ComparisonResult::Match { measurement: b },
+            ) => {
+                assert_eq!(a, b);
+                "match"
+            }
+            (
+                ComparisonResult::Mismatch {
+                    measurement: a,
+                    diff_image,
+                },
+                ComparisonResult::Mismatch {
+                    measurement: b,
+                    diff_image: (),
+                },
+            ) => {
+                assert_eq!(a, b);
+                assert_eq!(diff_image.dimensions(), baseline.dimensions());
+                "mismatch"
+            }
+            (
+                ComparisonResult::DimensionMismatch {
+                    diff_image: Some(_),
+                    ..
+                },
+                ComparisonResult::DimensionMismatch {
+                    diff_image: None, ..
+                },
+            ) => "size",
+            other => panic!("{mode:?} decided apart: {other:?}"),
+        };
+        assert_eq!(decided, expected, "{mode:?}");
+    }
 }

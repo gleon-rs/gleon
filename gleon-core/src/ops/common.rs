@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use gleon_engine::phash::compute_phash;
+use gleon_model::case::{CaseErrorKind, Sha256Hex};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -191,13 +192,124 @@ pub fn resolve_platform_filter_dir<'a>(
     }
 }
 
-/// Returns `true` if `hash`'s scheme is `sha256` and its hex value matches the SHA-256 digest.
+/// What a tracked screenshot is compared with, decided from its manifest and the local blob
+/// before any decoding ([`baseline_of`]): one decision for `gleon diff` and `gleon status`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Baseline {
+    /// The screenshot's bytes are the baseline's: the manifest's sha256 names them (decided
+    /// without the blob), or the blob of another hash scheme holds them.
+    Identical {
+        /// Whether the local blob was read (and so is usable): `false` when the manifest's
+        /// sha256 decided alone, so the blob may still be missing or broken in the local cache.
+        blob_read: bool,
+    },
+    /// The baseline's bytes, to compare the screenshot with under its rule.
+    Golden {
+        /// The PNG bytes of the blob.
+        png: Vec<u8>,
+        /// Their SHA-256 (verified against the manifest for a sha256 blob).
+        sha256: Sha256Hex,
+    },
+    /// No comparison is possible: the identical screenshot is no valid image, or the blob is
+    /// missing, no regular file, or unreadable. Never a pass.
+    Unavailable {
+        /// The class of the failure in a case report.
+        kind: CaseErrorKind,
+        /// What went wrong, for the user.
+        message: String,
+    },
+}
+
+/// The [`Baseline`] of the screenshot `candidate` (PNG bytes, `candidate_sha256` their SHA-256)
+/// tracked by `manifest`, whose blob lies under `blobs_root`.
 ///
-/// Always `false` for any other scheme — callers fall back to their own scheme-specific
-/// comparison (e.g. reading and byte-comparing the local blob) in that case.
+/// A blob counts only as a regular file ([`crate::storage::is_usable_blob_metadata`], like for
+/// `gleon pull` and `gleon push`): a symbolic link or a directory there is unavailable, never
+/// followed. A sha256 blob must hold the bytes its name says: a changed cache never decides a
+/// comparison.
 #[must_use]
-pub fn sha256_hex_matches(hash: &ImageHash, bytes: &[u8]) -> bool {
-    hash.scheme() == "sha256" && hex::encode(Sha256::digest(bytes)) == hash.value()
+pub fn baseline_of(
+    manifest: &SingleTestManifest,
+    candidate: &[u8],
+    candidate_sha256: &Sha256Hex,
+    blobs_root: &Path,
+) -> Baseline {
+    let identical = |blob_read| match SingleTestManifest::validate_image_bytes(candidate) {
+        Ok(()) => Baseline::Identical { blob_read },
+        Err(e) => Baseline::Unavailable {
+            kind: CaseErrorKind::Image,
+            message: format!("candidate image: {e}"),
+        },
+    };
+    let is_sha256 = manifest.hash.scheme() == "sha256";
+    if is_sha256 && candidate_sha256.as_str() == manifest.hash.value() {
+        return identical(false);
+    }
+    let unavailable = |message| Baseline::Unavailable {
+        kind: CaseErrorKind::Io,
+        message,
+    };
+    match local_blob_state(blobs_root, &manifest.hash) {
+        BlobState::Usable => {}
+        BlobState::Missing => {
+            return unavailable(format!(
+                "the baseline blob {} is not in .gleon/blobs: run `gleon pull` (or `gleon diff \
+                 --auto-pull`)",
+                manifest.hash
+            ));
+        }
+        BlobState::Unusable(reason) => return unavailable(reason),
+    }
+    let png = match std::fs::read(crate::storage::local_blob_path(blobs_root, &manifest.hash)) {
+        Ok(png) => png,
+        Err(e) => return unavailable(cannot_read_blob(&manifest.hash, &e)),
+    };
+    let sha256 = Sha256Hex::of(&png);
+    if is_sha256 && sha256.as_str() != manifest.hash.value() {
+        return unavailable(format!(
+            "the baseline blob {} in .gleon/blobs does not match its hash: remove it and run \
+             `gleon pull`",
+            manifest.hash
+        ));
+    }
+    // A verified sha256 blob never holds the candidate's bytes (they hash differently, see
+    // above): only a blob of another scheme can.
+    if !is_sha256 && png == candidate {
+        return identical(true);
+    }
+    Baseline::Golden { png, sha256 }
+}
+
+/// The state of the local blob of `hash` under `blobs_root`, from one `lstat`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BlobState {
+    /// A regular file ([`crate::storage::is_usable_blob_metadata`]).
+    Usable,
+    /// Not there: `gleon pull` fetches it.
+    Missing,
+    /// There but no regular file (a directory, a symbolic link), or its metadata cannot be read:
+    /// the reason, for the user.
+    Unusable(String),
+}
+
+/// The [`BlobState`] of the local blob of `hash` under `blobs_root`: one decision, one wording
+/// for `gleon diff` and `gleon status`.
+#[must_use]
+pub fn local_blob_state(blobs_root: &Path, hash: &ImageHash) -> BlobState {
+    match std::fs::symlink_metadata(crate::storage::local_blob_path(blobs_root, hash)) {
+        Ok(meta) if crate::storage::is_usable_blob_metadata(&meta) => BlobState::Usable,
+        Ok(_) => BlobState::Unusable(format!(
+            "the baseline blob {hash} in .gleon/blobs is no regular file: remove it and run \
+             `gleon pull`"
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BlobState::Missing,
+        Err(e) => BlobState::Unusable(cannot_read_blob(hash, &e)),
+    }
+}
+
+/// Why the blob of `hash` cannot be read.
+fn cannot_read_blob(hash: &ImageHash, e: &std::io::Error) -> String {
+    format!("cannot read the baseline blob {hash}: {e}")
 }
 
 /// Returns `index`'s keys with no matching entry in `present` (by exact string match).
@@ -415,6 +527,205 @@ mod tests {
 
     use super::*;
 
+    /// The bytes of the PNG fixture `name` and their SHA-256.
+    fn fixture(name: &str) -> (Vec<u8>, Sha256Hex) {
+        let png = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name),
+        )
+        .unwrap();
+        let sha256 = Sha256Hex::of(&png);
+        (png, sha256)
+    }
+
+    fn manifest(scheme: &str, value: &str) -> SingleTestManifest {
+        SingleTestManifest {
+            schema_version: 1,
+            hash: ImageHash::new(scheme, value).unwrap(),
+            phash: ImageHash::new("dhash", "0000000000000000").unwrap(),
+            width: 100,
+            height: 100,
+        }
+    }
+
+    /// Asserts that `baseline` is unavailable of `kind`, its message containing `needle`.
+    fn assert_unavailable(baseline: &Baseline, kind: CaseErrorKind, needle: &str) {
+        assert!(
+            matches!(
+                baseline,
+                Baseline::Unavailable { kind: found, message }
+                    if *found == kind && message.contains(needle)
+            ),
+            "{baseline:?} should be {kind:?} with {needle:?}"
+        );
+    }
+
+    /// The one baseline decision of `gleon diff` and `gleon status`, on real fixtures.
+    #[test]
+    fn test_baseline_of() {
+        let blobs = tempdir().unwrap();
+        let (png, sha256) = fixture("baseline_gradient_100x100.png");
+        let (other, other_sha256) = fixture("diff_1px_black_center_100x100.png");
+        let blob_dir = blobs.path().join("sha256");
+        std::fs::create_dir_all(&blob_dir).unwrap();
+
+        // The manifest's sha256 names the bytes: identical without any blob, which is not read.
+        let tracked = manifest("sha256", sha256.as_str());
+        assert_eq!(
+            baseline_of(&tracked, &png, &sha256, blobs.path()),
+            Baseline::Identical { blob_read: false }
+        );
+        // ... but bytes that are no valid image are never a pass.
+        let (corrupt, corrupt_sha256) = fixture("corrupt.png");
+        assert_unavailable(
+            &baseline_of(
+                &manifest("sha256", corrupt_sha256.as_str()),
+                &corrupt,
+                &corrupt_sha256,
+                blobs.path(),
+            ),
+            CaseErrorKind::Image,
+            "candidate image",
+        );
+
+        // Other bytes: the blob, if it is there.
+        let blob = blob_dir.join(sha256.as_str());
+        assert_unavailable(
+            &baseline_of(&tracked, &other, &other_sha256, blobs.path()),
+            CaseErrorKind::Io,
+            "run `gleon pull`",
+        );
+        std::fs::create_dir(&blob).unwrap();
+        assert_unavailable(
+            &baseline_of(&tracked, &other, &other_sha256, blobs.path()),
+            CaseErrorKind::Io,
+            "no regular file",
+        );
+        std::fs::remove_dir(&blob).unwrap();
+        std::fs::write(&blob, &png).unwrap();
+        assert_eq!(
+            baseline_of(&tracked, &other, &other_sha256, blobs.path()),
+            Baseline::Golden {
+                png: png.clone(),
+                sha256: sha256.clone(),
+            }
+        );
+
+        // A blob that does not hold the bytes its name says is no baseline: here it holds the
+        // candidate itself, which would compare as equal.
+        std::fs::write(&blob, &other).unwrap();
+        assert_unavailable(
+            &baseline_of(&tracked, &other, &other_sha256, blobs.path()),
+            CaseErrorKind::Io,
+            "does not match its hash",
+        );
+
+        // Another hash scheme: the blob's bytes decide identity, other bytes are compared.
+        let sha512 = hex::encode(sha2::Sha512::digest(&png));
+        std::fs::create_dir_all(blobs.path().join("sha512")).unwrap();
+        std::fs::write(blobs.path().join("sha512").join(&sha512), &png).unwrap();
+        let tracked_sha512 = manifest("sha512", &sha512);
+        assert_eq!(
+            baseline_of(&tracked_sha512, &png, &sha256, blobs.path()),
+            Baseline::Identical { blob_read: true }
+        );
+        assert_eq!(
+            baseline_of(&tracked_sha512, &other, &other_sha256, blobs.path()),
+            Baseline::Golden {
+                sha256: Sha256Hex::of(&png),
+                png,
+            }
+        );
+    }
+
+    /// One `lstat` tells a usable blob from a missing one and from one that is there but unusable.
+    #[test]
+    fn test_local_blob_state() {
+        let blobs = tempdir().unwrap();
+        let (png, sha256) = fixture("baseline_gradient_100x100.png");
+        let hash = ImageHash::new("sha256", sha256.as_str()).unwrap();
+        let blob = blobs.path().join("sha256").join(sha256.as_str());
+        assert_eq!(local_blob_state(blobs.path(), &hash), BlobState::Missing);
+        std::fs::create_dir_all(&blob).unwrap();
+        assert!(matches!(
+            local_blob_state(blobs.path(), &hash),
+            BlobState::Unusable(reason) if reason.contains("is no regular file")
+        ));
+        std::fs::remove_dir(&blob).unwrap();
+        std::fs::write(&blob, &png).unwrap();
+        assert_eq!(local_blob_state(blobs.path(), &hash), BlobState::Usable);
+    }
+
+    /// A blob that is a symbolic link is never followed, like `gleon pull` and `gleon push` never
+    /// take it for a blob.
+    #[cfg(unix)]
+    #[test]
+    fn test_baseline_of_never_follows_a_symlinked_blob() {
+        let blobs = tempdir().unwrap();
+        let (png, sha256) = fixture("baseline_gradient_100x100.png");
+        let (other, other_sha256) = fixture("diff_1px_black_center_100x100.png");
+        let blob_dir = blobs.path().join("sha256");
+        std::fs::create_dir_all(&blob_dir).unwrap();
+        let elsewhere = blobs.path().join("elsewhere.png");
+        std::fs::write(&elsewhere, &png).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, blob_dir.join(sha256.as_str())).unwrap();
+
+        assert_unavailable(
+            &baseline_of(
+                &manifest("sha256", sha256.as_str()),
+                &other,
+                &other_sha256,
+                blobs.path(),
+            ),
+            CaseErrorKind::Io,
+            "no regular file",
+        );
+    }
+
+    /// A blob that cannot be read, or whose metadata cannot be, is unavailable with the reason.
+    #[cfg(unix)]
+    #[test]
+    fn test_baseline_of_names_why_a_blob_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let blobs = tempdir().unwrap();
+        let (png, sha256) = fixture("baseline_gradient_100x100.png");
+        let (other, other_sha256) = fixture("diff_1px_black_center_100x100.png");
+        let blob_dir = blobs.path().join("sha256");
+        std::fs::create_dir_all(&blob_dir).unwrap();
+        let blob = blob_dir.join(sha256.as_str());
+        std::fs::write(&blob, &png).unwrap();
+        let tracked = manifest("sha256", sha256.as_str());
+        let mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        // A regular file without read permission: its metadata is fine, reading fails.
+        mode(&blob, 0o000);
+        let is_root = std::fs::read(&blob).is_ok();
+        let unreadable_file = baseline_of(&tracked, &other, &other_sha256, blobs.path());
+        // A directory without permission: not even the blob's metadata can be read.
+        mode(&blob_dir, 0o000);
+        let unreadable_dir = baseline_of(&tracked, &other, &other_sha256, blobs.path());
+        mode(&blob_dir, 0o755);
+        mode(&blob, 0o644);
+
+        if is_root {
+            return; // Permissions bind no superuser: nothing to observe.
+        }
+        assert_unavailable(
+            &unreadable_file,
+            CaseErrorKind::Io,
+            "cannot read the baseline blob",
+        );
+        assert_unavailable(
+            &unreadable_dir,
+            CaseErrorKind::Io,
+            "cannot read the baseline blob",
+        );
+    }
+
     #[test]
     fn test_require_storage() {
         let blank = crate::storage::StorageConfig::new(" ");
@@ -506,20 +817,6 @@ mod tests {
                 "filter {bad:?} must be rejected"
             );
         }
-    }
-
-    #[test]
-    fn test_sha256_hex_matches_only_for_matching_sha256() {
-        let bytes = b"hello gleon";
-        let digest = hex::encode(Sha256::digest(bytes));
-
-        let sha = ImageHash::new("sha256", &digest).unwrap();
-        assert!(sha256_hex_matches(&sha, bytes));
-        assert!(!sha256_hex_matches(&sha, b"different bytes"));
-
-        // A non-sha256 scheme never claims a match, even for the identical digest text.
-        let dhash = ImageHash::new("dhash", "0123456789abcdef").unwrap();
-        assert!(!sha256_hex_matches(&dhash, bytes));
     }
 
     #[test]

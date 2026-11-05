@@ -103,6 +103,16 @@ fn test_diff_full_flow_with_real_fixtures() {
     let report_mismatch = run_diff(&ctx, &DiffOptions::default()).expect("run_diff should succeed");
     assert_ne!(report_mismatch.failed_tests, 0);
     assert_eq!(report_mismatch.failed_tests, 1);
+    // The case report names the compared golden by the hash of the blob's verified bytes.
+    let mismatch = case_report(base_path, "billing/form");
+    assert_eq!(
+        mismatch.golden.sha256,
+        Some(gleon_core::case::Sha256Hex::of(&baseline_png_bytes))
+    );
+    assert_eq!(
+        mismatch.candidate.sha256,
+        Some(gleon_core::case::Sha256Hex::of(&modified_png_bytes))
+    );
 
     // 7. Verify generated report artifacts on disk
     let runs_dir = base_path.join(".gleon/runs/latest");
@@ -276,7 +286,7 @@ fn test_diff_missing_blob_file_and_corrupt_images() {
     assert_eq!(missing_blob.error_kind, Some(CaseErrorKind::Io));
     assert!(missing_blob.message.unwrap().contains("gleon pull"));
 
-    // 2. Write corrupt baseline blob file back
+    // 2. Write a corrupt file under the blob's name: it does not hold the bytes its name says
     let mut blob_digest = String::new();
     for entry in fs::read_dir(base_path.join(".gleon/manifests")).unwrap() {
         // Find platform dir
@@ -288,7 +298,11 @@ fn test_diff_missing_blob_file_and_corrupt_images() {
                 if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_json) {
                     let hash_str = manifest["hash"].as_str().unwrap();
                     blob_digest = hash_str.split_once(':').unwrap().1.to_string();
-                    fs::write(blobs_dir.join(&blob_digest), b"not a png").unwrap();
+                    fs::copy(
+                        fixtures_dir.join("corrupt.png"),
+                        blobs_dir.join(&blob_digest),
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -297,8 +311,14 @@ fn test_diff_missing_blob_file_and_corrupt_images() {
     let report_corrupt_blob = run_diff(&ctx, &DiffOptions::default()).unwrap();
     assert_ne!(report_corrupt_blob.failed_tests, 0);
     let corrupt_blob = case_report(base_path, "billing/form");
-    assert_eq!(corrupt_blob.error_kind, Some(CaseErrorKind::Image));
-    assert!(corrupt_blob.message.unwrap().starts_with("golden image"));
+    assert_eq!(corrupt_blob.error_kind, Some(CaseErrorKind::Io));
+    assert!(
+        corrupt_blob
+            .message
+            .unwrap()
+            .contains("does not match its hash"),
+        "a changed cache never decides a comparison"
+    );
 
     // Restore valid baseline blob so run_diff decodes the baseline and tests corrupt actual screenshot
     fs::write(blobs_dir.join(&blob_digest), &baseline_png_bytes).unwrap();

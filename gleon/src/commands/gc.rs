@@ -171,9 +171,10 @@ mod tests {
         let dummy_src = temp.path().join("dummy.png");
         std::fs::write(&dummy_src, b"fake png").unwrap();
 
+        // The content address of the dummy blob: uploads are checked.
         let h_orphan = gleon_core::manifest::ImageHash::new(
             "sha256",
-            "9999999999999999999999999999999999999999999999999999999999999999",
+            gleon_core::case::Sha256Hex::of(b"fake png").as_str(),
         )
         .unwrap();
         adapter.upload_blob(&h_orphan, &dummy_src).await.unwrap();
@@ -182,7 +183,7 @@ mod tests {
         let blob_path = remote_store_path
             .join("blobs")
             .join("sha256")
-            .join("9999999999999999999999999999999999999999999999999999999999999999");
+            .join(h_orphan.value());
         let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
         let times = std::fs::FileTimes::new().set_modified(old_time);
         let f = std::fs::File::options()
@@ -204,16 +205,19 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            // Another blob, under the SHA-256 of its bytes: uploads are checked.
+            let fail_src = temp.path().join("fail.png");
+            std::fs::write(&fail_src, b"another fake png").unwrap();
             let h_fail = gleon_core::manifest::ImageHash::new(
                 "sha256",
-                "8888888888888888888888888888888888888888888888888888888888888888",
+                gleon_core::case::Sha256Hex::of(b"another fake png").as_str(),
             )
             .unwrap();
-            adapter.upload_blob(&h_fail, &dummy_src).await.unwrap();
+            adapter.upload_blob(&h_fail, &fail_src).await.unwrap();
             let fail_path = remote_store_path
                 .join("blobs")
                 .join("sha256")
-                .join("8888888888888888888888888888888888888888888888888888888888888888");
+                .join(h_fail.value());
             let f = std::fs::File::options()
                 .write(true)
                 .open(&fail_path)

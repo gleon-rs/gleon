@@ -15,8 +15,8 @@ use gleon_engine::config::Zone;
 use gleon_model::{
     case::{
         self, ArtifactImages, CASE_SCHEMA_VERSION, CandidateImage, CaseErrorKind, CaseOutcome,
-        CaseReport, CaseTimings, Comparison, GoldenImage, Metrics, RegionMetrics, RunId, Source,
-        text,
+        CaseReport, CaseTimings, Comparison, GoldenImage, Metrics, RegionMetrics, RunId, Sha256Hex,
+        Source, text,
     },
     compare::{self, Compared},
     config::ArtifactsDir,
@@ -30,8 +30,8 @@ use crate::{
     context::ResolvedContext,
     manifest::{SingleTestManifest, WorkspaceIndex},
     ops::common::{
-        CoreError, ensure_initialized, load_config_and_scan, load_merged_index_with_fallback,
-        platform_key,
+        Baseline, CoreError, baseline_of, ensure_initialized, load_config_and_scan,
+        load_merged_index_with_fallback, platform_key,
     },
     report::{ReportError, ReportGenerator},
     scanner::TestCase,
@@ -120,8 +120,8 @@ struct Judged {
     metrics: Option<Metrics>,
     /// The compared regions of a match or mismatch.
     regions: Vec<RegionMetrics>,
-    /// The baseline's bytes, when they were read.
-    golden: Option<Vec<u8>>,
+    /// The baseline's bytes and their SHA-256, when they were read.
+    golden: Option<(Vec<u8>, Sha256Hex)>,
     /// The PNG-encoded diff of a mismatch.
     diff: Option<Vec<u8>>,
 }
@@ -147,9 +147,9 @@ impl Judged {
         }
     }
 
-    fn with_golden(self, golden: Vec<u8>) -> Self {
+    fn with_golden(self, png: Vec<u8>, sha256: Sha256Hex) -> Self {
         Self {
-            golden: Some(golden),
+            golden: Some((png, sha256)),
             ..self
         }
     }
@@ -183,11 +183,12 @@ impl DiffRun<'_> {
                 path: golden_path.clone(),
                 source,
             })?;
-        let candidate_image = CandidateImage::of(&candidate);
+        let candidate_sha256 = Sha256Hex::of(&candidate);
+        let candidate_image = CandidateImage::hashed(&candidate, candidate_sha256.clone());
         let tolerance = case.rule.tolerance;
         let masks = case.rule.matched_mask_zones(&case.image.relative_path);
         let manifest = self.index.get(&case.name);
-        let judged = self.judge(manifest, &candidate, &candidate_image, &tolerance, &masks);
+        let judged = self.judge(manifest, &candidate, &candidate_sha256, &tolerance, &masks);
         let total = started.elapsed();
 
         let record_error = |source| DiffOpError::Record {
@@ -196,7 +197,7 @@ impl DiffRun<'_> {
         };
         let images = match judged.outcome {
             CaseOutcome::Mismatch | CaseOutcome::DimensionMismatch => ArtifactImages {
-                golden: judged.golden.as_deref(),
+                golden: judged.golden.as_ref().map(|(png, _)| png.as_slice()),
                 candidate: Some(&candidate),
                 diff: judged.diff.as_deref(),
             },
@@ -215,11 +216,12 @@ impl DiffRun<'_> {
             images,
         )
         .map_err(record_error)?;
-        let mut golden = GoldenImage::of(
-            golden_path,
-            judged.golden.as_deref(),
-            manifest.map(|manifest| manifest.hash.clone()),
-        );
+        let blob = manifest.map(|manifest| manifest.hash.clone());
+        let mut golden = match &judged.golden {
+            // Hashed once, when the blob was verified.
+            Some((png, sha256)) => GoldenImage::hashed(golden_path, png, sha256.clone(), blob),
+            None => GoldenImage::of(golden_path, None, blob),
+        };
         if judged.outcome == CaseOutcome::Identical {
             // Identical bytes are the baseline's bytes, already hashed.
             golden.sha256.clone_from(&candidate_image.sha256);
@@ -263,7 +265,7 @@ impl DiffRun<'_> {
         &self,
         manifest: Option<&SingleTestManifest>,
         candidate: &[u8],
-        candidate_image: &CandidateImage,
+        candidate_sha256: &Sha256Hex,
         tolerance: &Tolerance,
         masks: &[Zone],
     ) -> Judged {
@@ -272,38 +274,12 @@ impl DiffRun<'_> {
             missing.message = Some("no baseline is staged for this screenshot".to_owned());
             return missing;
         };
-        // The manifest names its bytes: equal bytes are the baseline, decided without the blob.
-        let is_identical = manifest.hash.scheme() == "sha256"
-            && candidate_image
-                .sha256
-                .as_ref()
-                .is_some_and(|sha256| manifest.hash.value() == sha256.as_str());
-        if is_identical {
-            return match SingleTestManifest::validate_image_bytes(candidate) {
-                Ok(()) => Judged::new(CaseOutcome::Identical),
-                Err(e) => Judged::error(CaseErrorKind::Image, format!("candidate image: {e}")),
+        let (golden, golden_sha256) =
+            match baseline_of(manifest, candidate, candidate_sha256, &self.blobs_root) {
+                Baseline::Identical { .. } => return Judged::new(CaseOutcome::Identical),
+                Baseline::Unavailable { kind, message } => return Judged::error(kind, message),
+                Baseline::Golden { png, sha256 } => (png, sha256),
             };
-        }
-        let blob_path = crate::storage::local_blob_path(&self.blobs_root, &manifest.hash);
-        let golden = match std::fs::read(&blob_path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Judged::error(
-                    CaseErrorKind::Io,
-                    format!(
-                        "the baseline blob {} is not in .gleon/blobs: run `gleon pull` (or `gleon \
-                         diff --auto-pull`)",
-                        manifest.hash
-                    ),
-                );
-            }
-            Err(e) => {
-                return Judged::error(
-                    CaseErrorKind::Io,
-                    format!("cannot read the baseline blob {}: {e}", manifest.hash),
-                );
-            }
-        };
         let candidate = compare::Candidate::Png(candidate);
         let judged = match compare::compare(&golden, candidate, tolerance, masks, None) {
             Ok(compare::Comparison { compared, .. }) => match compared {
@@ -336,7 +312,7 @@ impl DiffRun<'_> {
             },
             Err(e) => Judged::error(e.kind(), e.to_string()),
         };
-        judged.with_golden(golden)
+        judged.with_golden(golden, golden_sha256)
     }
 }
 
@@ -1166,18 +1142,24 @@ mod tests {
             .unwrap()
             .path();
 
+        // A blob that does not hold the bytes its name says is never taken for the baseline.
         std::fs::write(&blob, b"not a png").unwrap();
         image::RgbaImage::new(4, 4)
             .save(root.join("shots/a.png"))
             .unwrap();
         run_diff(&ctx, &DiffOptions::default()).unwrap();
-        let corrupt = case_report(root, "shots/a");
+        let tampered = case_report(root, "shots/a");
         assert_eq!(
-            (corrupt.outcome, corrupt.error_kind),
-            (CaseOutcome::Error, Some(CaseErrorKind::Image))
+            (tampered.outcome, tampered.error_kind),
+            (CaseOutcome::Error, Some(CaseErrorKind::Io))
         );
-        assert!(corrupt.message.unwrap().starts_with("golden image: "));
-        assert!(corrupt.golden.sha256.is_some(), "the blob was read");
+        assert!(
+            tampered
+                .message
+                .unwrap()
+                .contains("does not match its hash")
+        );
+        assert!(tampered.golden.sha256.is_none(), "the blob is no baseline");
 
         std::fs::remove_file(&blob).unwrap();
         run_diff(&ctx, &DiffOptions::default()).unwrap();

@@ -1,0 +1,11 @@
+# A mask that reaches beyond the 200x100 fixture's right edge.
+required_version: ">=0.1.0"
+screenshots:
+  - include: "billing/**/*.png"
+    mode: pixel
+    diff:
+      threshold: 0.01
+    masks:
+      - path: "**/*.png"
+        zones:
+          - { x: 150, y: 0, width: 100, height: 10 }

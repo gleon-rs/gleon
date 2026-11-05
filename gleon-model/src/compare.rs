@@ -5,10 +5,10 @@
 //! pair of images gets one verdict and one message wherever it is compared.
 
 use gleon_engine::{
-    ComparisonResult, PixelRegions, Pixels, Region, compare_images,
+    ComparisonResult, DiffImage, PixelRegions, Pixels, Region, compare_images_as,
     config::Zone,
     decode::{DecodeError, decode_rgba, fits_budget},
-    masking::{apply_masks, resolve_zones},
+    masking::{resolve_zones, resolve_zones_quietly},
 };
 use image::{
     ExtendedColorType, ImageEncoder, RgbaImage,
@@ -199,51 +199,24 @@ impl CompareError {
     }
 }
 
-/// Two decoded images with the masks applied.
-#[derive(Debug)]
-pub struct Decoded {
-    /// The golden.
-    pub golden: RgbaImage,
-    /// The candidate.
-    pub candidate: RgbaImage,
-    /// Masks that reached beyond the images and were clipped.
-    pub clamped_masks: usize,
-}
-
-/// Decodes the PNGs `golden` and `candidate` with the engine's resource limits and masks both.
-///
-/// The masks apply only to images of the same size: images of different sizes are never alike,
-/// and a mask means the same pixels only on the same size.
-///
-/// # Errors
-/// Returns [`CompareError::Golden`] or [`CompareError::Candidate`] for an image that cannot be
-/// decoded within the budget.
-pub fn decode_masked(
-    golden: &[u8],
-    candidate: &[u8],
-    masks: &[Zone],
-) -> Result<Decoded, CompareError> {
-    let mut golden = decode_rgba(golden).map_err(CompareError::Golden)?;
-    let mut candidate = decode_rgba(candidate).map_err(CompareError::Candidate)?;
-    let clamped_masks = if !masks.is_empty() && golden.dimensions() == candidate.dimensions() {
-        apply_masks(&mut candidate, masks);
-        apply_masks(&mut golden, masks)
-    } else {
-        0
-    };
-    Ok(Decoded {
-        golden,
-        candidate,
-        clamped_masks,
-    })
+/// What comparing a golden with a candidate decided, without metrics or diff: [`verdict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Within the tolerance.
+    Match,
+    /// Beyond the tolerance.
+    Mismatch,
+    /// Different image sizes.
+    DimensionMismatch,
 }
 
 /// Compares the PNG `golden` with `candidate` under `tolerance`, with `masks` and `text`.
 ///
-/// Masks apply to images of the same size (like [`decode_masked`]): in pixel and exact mode their
-/// pixels are neither compared nor counted, in SSIM mode the candidate takes the golden's pixels
-/// there. Text regions are judged by their tiles under their tolerance, masks winning (in SSIM
-/// mode left out of both gates the same way).
+/// Masks apply to images of the same size only (images of different sizes are never alike, and
+/// a mask means the same pixels only on the same size): in pixel and exact mode their pixels are
+/// neither compared nor counted, in SSIM mode the candidate takes the golden's pixels there. Text
+/// regions are judged by their tiles under their tolerance, masks winning (in SSIM mode left out
+/// of both gates the same way).
 ///
 /// # Errors
 /// Returns [`CompareError`] for an image that cannot be decoded, raw pixels of the wrong length,
@@ -256,6 +229,112 @@ pub fn compare(
     masks: &[Zone],
     text: Option<Text<'_>>,
 ) -> Result<Comparison, CompareError> {
+    let (compared, clamped_masks) = run::<RgbaImage, _>(
+        golden,
+        candidate,
+        tolerance,
+        masks,
+        text,
+        |result, text_tolerance| {
+            let measured = |measurement| {
+                Metrics::from_measurement(&measurement, tolerance, text_tolerance.as_ref())
+                    .map(|metrics| {
+                        let regions = RegionMetrics::of(
+                            metrics,
+                            &measurement,
+                            tolerance,
+                            text_tolerance.as_ref(),
+                        );
+                        (metrics, regions)
+                    })
+                    .ok_or(CompareError::Internal)
+            };
+            Ok(match result {
+                ComparisonResult::Match { measurement } => {
+                    let (metrics, regions) = measured(measurement)?;
+                    Compared::Match { metrics, regions }
+                }
+                ComparisonResult::Mismatch {
+                    measurement,
+                    diff_image,
+                } => {
+                    let (metrics, regions) = measured(measurement)?;
+                    Compared::Mismatch {
+                        metrics,
+                        regions,
+                        diff_png: encode_png(&diff_image).map_err(CompareError::Diff)?,
+                    }
+                }
+                ComparisonResult::DimensionMismatch {
+                    baseline_size,
+                    actual_size,
+                    diff_image,
+                } => Compared::DimensionMismatch {
+                    golden: baseline_size,
+                    candidate: actual_size,
+                    diff_png: diff_image
+                        .map(|diff| encode_png(&diff))
+                        .transpose()
+                        .map_err(CompareError::Diff)?,
+                },
+                ComparisonResult::TooLarge {
+                    size: (width, height),
+                } => return Err(CompareError::TooLarge { width, height }),
+            })
+        },
+    )?;
+    Ok(Comparison {
+        compared,
+        clamped_masks,
+    })
+}
+
+/// The [`Verdict`] of comparing the PNG `golden` with `candidate` under `tolerance` and `masks`.
+///
+/// Decided exactly as [`compare`] decides it (without text), for callers that only need the
+/// verdict (`gleon status`): neither metrics nor a diff are produced, not even the engine's
+/// unencoded diff image ([`compare_images_as`] with `()`).
+///
+/// # Errors
+/// Returns [`CompareError`] for an image that cannot be decoded, raw pixels of the wrong length
+/// or images over the SSIM analysis budget.
+pub fn verdict(
+    golden: &[u8],
+    candidate: Candidate<'_>,
+    tolerance: &Tolerance,
+    masks: &[Zone],
+) -> Result<Verdict, CompareError> {
+    run::<(), _>(
+        golden,
+        candidate,
+        tolerance,
+        masks,
+        None,
+        |result, _| match result {
+            ComparisonResult::Match { .. } => Ok(Verdict::Match),
+            ComparisonResult::Mismatch { .. } => Ok(Verdict::Mismatch),
+            ComparisonResult::DimensionMismatch { .. } => Ok(Verdict::DimensionMismatch),
+            ComparisonResult::TooLarge {
+                size: (width, height),
+            } => Err(CompareError::TooLarge { width, height }),
+        },
+    )
+    .map(|(verdict, _)| verdict)
+}
+
+/// The one pipeline of [`compare`] and [`verdict`].
+///
+/// Decodes `golden` and `candidate`, resolves `masks` and `text` and runs the engine under
+/// `tolerance`, keeping a failure's diff as `D`, then hands its result and the text tolerance to
+/// `finish`; also returns how many masks reached beyond the images.
+fn run<D: DiffImage, T>(
+    golden: &[u8],
+    candidate: Candidate<'_>,
+    tolerance: &Tolerance,
+    masks: &[Zone],
+    text: Option<Text<'_>>,
+    finish: impl FnOnce(ComparisonResult<D>, Option<TextTolerance>) -> Result<T, CompareError>,
+) -> Result<(T, usize), CompareError> {
     let golden = decode_rgba(golden).map_err(CompareError::Golden)?;
     let mut decoded = None;
     let candidate = candidate.pixels(&mut decoded)?;
@@ -263,10 +342,13 @@ pub fn compare(
     let same_size = golden.dimensions() == candidate.dimensions();
     let (masks, clamped_masks) = if same_size {
         resolve_zones(masks, width, height)
-    } else {
+    } else if D::RENDERED {
         // Only for the diff of both sizes (in golden pixels): no warning, the sizes are the
         // finding.
-        (resolve_zones(masks, width, height).0, 0)
+        (resolve_zones_quietly(masks, width, height), 0)
+    } else {
+        // No diff: images of two sizes compare nothing the masks could cover.
+        (Vec::new(), 0)
     };
     let (mode, config) = tolerance.engine_config();
     let text = text.filter(|text| same_size && !text.regions.is_empty());
@@ -281,51 +363,8 @@ pub fn compare(
         text: &text_regions,
         text_tolerance: text_tolerance.map(|text| text.0),
     };
-    let measured = |measurement| {
-        Metrics::from_measurement(&measurement, tolerance, text_tolerance.as_ref())
-            .map(|metrics| {
-                let regions =
-                    RegionMetrics::of(metrics, &measurement, tolerance, text_tolerance.as_ref());
-                (metrics, regions)
-            })
-            .ok_or(CompareError::Internal)
-    };
-    let compared = match compare_images(&golden, candidate, mode, &config, &regions) {
-        ComparisonResult::Match { measurement } => {
-            let (metrics, regions) = measured(measurement)?;
-            Compared::Match { metrics, regions }
-        }
-        ComparisonResult::Mismatch {
-            measurement,
-            diff_image,
-        } => {
-            let (metrics, regions) = measured(measurement)?;
-            Compared::Mismatch {
-                metrics,
-                regions,
-                diff_png: encode_png(&diff_image).map_err(CompareError::Diff)?,
-            }
-        }
-        ComparisonResult::DimensionMismatch {
-            baseline_size,
-            actual_size,
-            diff_image,
-        } => Compared::DimensionMismatch {
-            golden: baseline_size,
-            candidate: actual_size,
-            diff_png: diff_image
-                .map(|diff| encode_png(&diff))
-                .transpose()
-                .map_err(CompareError::Diff)?,
-        },
-        ComparisonResult::TooLarge {
-            size: (width, height),
-        } => return Err(CompareError::TooLarge { width, height }),
-    };
-    Ok(Comparison {
-        compared,
-        clamped_masks,
-    })
+    let result = compare_images_as::<D>(&golden, candidate, mode, &config, &regions);
+    finish(result, text_tolerance).map(|found| (found, clamped_masks))
 }
 
 /// `region` clipped to a `width` x `height` image; `None` if nothing of it is inside.
@@ -668,6 +707,104 @@ mod tests {
         ));
     }
 
+    /// The log `run` writes on this thread, formatted, and what it returns.
+    fn logged<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        // `&File` is `io::Write`, so a shared file collects the formatted log.
+        let writer = std::sync::Arc::new(file.reopen().unwrap());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(writer)
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, run);
+        (value, std::fs::read_to_string(file.path()).unwrap())
+    }
+
+    /// A mask beyond the golden warns when the images share a size; with two sizes the sizes are
+    /// the finding: no warning, and `verdict` does not even resolve the masks.
+    #[test]
+    fn test_masks_of_images_of_two_sizes_warn_nothing() {
+        let golden = png(8, 8, |_, _| RED);
+        let wider = png(9, 8, |_, _| RED);
+        let beyond = [Zone {
+            x: 6,
+            y: 0,
+            width: Dimension::Pixels(4),
+            height: Dimension::Pixels(1),
+        }];
+        let (same, warned) =
+            logged(|| compare(&golden, Candidate::Png(&golden), &EXACT, &beyond, None).unwrap());
+        assert_eq!(same.clamped_masks, 1);
+        assert!(warned.contains("Mask zone extends beyond"), "{warned}");
+
+        let (sizes, quiet) =
+            logged(|| compare(&golden, Candidate::Png(&wider), &EXACT, &beyond, None).unwrap());
+        assert!(matches!(
+            sizes.compared,
+            Compared::DimensionMismatch {
+                diff_png: Some(_),
+                ..
+            }
+        ));
+        assert_eq!((sizes.clamped_masks, quiet.as_str()), (0, ""));
+        let (verdict, quiet) =
+            logged(|| verdict(&golden, Candidate::Png(&wider), &EXACT, &beyond).unwrap());
+        assert_eq!((verdict, quiet.as_str()), (Verdict::DimensionMismatch, ""));
+    }
+
+    /// `verdict` decides like `compare`, under every mode, masks and sizes.
+    #[test]
+    fn test_verdict_decides_like_compare() {
+        let red = png(8, 8, |_, _| RED);
+        let corner = png(8, 8, |x, y| if x == 0 && y == 0 { BLUE } else { RED });
+        let wider = png(9, 8, |_, _| RED);
+        let mask = Zone {
+            x: 0,
+            y: 0,
+            width: Dimension::Pixels(1),
+            height: Dimension::Pixels(1),
+        };
+        for (golden, candidate, tolerance, masks, expected) in [
+            (&red, &red, EXACT, &[][..], Verdict::Match),
+            (&red, &corner, EXACT, &[], Verdict::Mismatch),
+            (
+                &red,
+                &corner,
+                EXACT,
+                std::slice::from_ref(&mask),
+                Verdict::Match,
+            ),
+            (&red, &corner, Tolerance::pixel(0.05), &[], Verdict::Match),
+            (
+                &red,
+                &wider,
+                Tolerance::pixel(0.5),
+                &[],
+                Verdict::DimensionMismatch,
+            ),
+            (&red, &red, SSIM, &[], Verdict::Match),
+        ] {
+            let decided = verdict(golden, Candidate::Png(candidate), &tolerance, masks).unwrap();
+            let compared = compare(golden, Candidate::Png(candidate), &tolerance, masks, None)
+                .unwrap()
+                .compared;
+            let from_compare = match compared {
+                Compared::Match { .. } => Verdict::Match,
+                Compared::Mismatch { .. } => Verdict::Mismatch,
+                Compared::DimensionMismatch { .. } => Verdict::DimensionMismatch,
+            };
+            assert_eq!(
+                (decided, from_compare),
+                (expected, expected),
+                "{tolerance:?}"
+            );
+        }
+        assert!(matches!(
+            verdict(&red, Candidate::Png(b"garbage"), &EXACT, &[]),
+            Err(CompareError::Candidate(_))
+        ));
+    }
+
     #[test]
     fn test_ssim_over_analysis_budget_is_an_error() {
         let big = png(4097, 4096, |_, _| RED);
@@ -694,23 +831,6 @@ mod tests {
             assert_eq!(err.kind(), CaseErrorKind::Image);
             assert!(err.to_string().starts_with(prefix), "{err}");
         }
-        let masked = decode_masked(&a, b"garbage", &[]).unwrap_err();
-        assert!(matches!(masked, CompareError::Candidate(_)));
-    }
-
-    /// Masks mean the same pixels only on images of the same size: others stay unmasked.
-    #[test]
-    fn test_decode_masked_leaves_images_of_other_sizes_alone() {
-        let (a, b) = (png(4, 4, |_, _| RED), png(5, 4, |_, _| RED));
-        let mask = Zone {
-            x: 0,
-            y: 0,
-            width: Dimension::Pixels(10),
-            height: Dimension::Pixels(1),
-        };
-        let decoded = decode_masked(&a, &b, &[mask]).unwrap();
-        assert_eq!(decoded.clamped_masks, 0);
-        assert_eq!(*decoded.golden.get_pixel(0, 0), RED);
     }
 
     #[test]

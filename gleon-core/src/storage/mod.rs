@@ -99,6 +99,20 @@ pub enum StorageError {
         /// The hash of the downloaded content.
         actual: String,
     },
+
+    /// A local blob is not the content its hash names (changed in `.gleon/blobs`): never
+    /// uploaded, since every pull of it would fail.
+    #[error(
+        "the local blob {expected} does not match its hash (got {actual}): remove it from \
+         .gleon/blobs, then run `gleon stage` if this machine holds the screenshot, or push from \
+         the machine that recorded it"
+    )]
+    LocalHashMismatch {
+        /// The blob's hash value.
+        expected: String,
+        /// The hash of the local content.
+        actual: String,
+    },
 }
 
 /// Helper function constructing the remote object path for a CAS blob hash.
@@ -131,7 +145,14 @@ pub fn has_usable_local_blob(
 /// Returns `true` only if `path` is an existing regular file and not a symlink.
 #[must_use]
 pub fn is_usable_blob(path: &std::path::Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_symlink() && meta.is_file())
+    std::fs::symlink_metadata(path).is_ok_and(|meta| is_usable_blob_metadata(&meta))
+}
+
+/// Whether `meta` (of [`std::fs::symlink_metadata`], which never follows a link) is that of a
+/// usable blob: a regular file, not a symlink.
+#[must_use]
+pub fn is_usable_blob_metadata(meta: &std::fs::Metadata) -> bool {
+    !meta.is_symlink() && meta.is_file()
 }
 
 #[cfg(all(test, not(miri)))]
@@ -173,6 +194,24 @@ mod tests {
         let dir_hash = sha256(&"b".repeat(64));
         std::fs::create_dir_all(local_blob_path(root, &dir_hash)).unwrap();
         assert!(!has_usable_local_blob(root, &dir_hash));
+    }
+
+    /// The metadata predicate decides like the path check it backs.
+    #[test]
+    fn test_is_usable_blob_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("blob");
+        std::fs::write(&file, b"png").unwrap();
+        let meta = |path: &std::path::Path| std::fs::symlink_metadata(path).unwrap();
+        assert!(is_usable_blob_metadata(&meta(&file)));
+        assert!(!is_usable_blob_metadata(&meta(temp.path())));
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(!is_usable_blob_metadata(&meta(&link)));
+            assert!(link.is_file(), "the link resolves to a file");
+        }
     }
 
     #[test]

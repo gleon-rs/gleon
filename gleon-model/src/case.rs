@@ -509,14 +509,31 @@ impl GoldenImage {
     /// the platform its gleon chunk names.
     #[must_use]
     pub fn of(path: String, png: Option<&[u8]>, blob: Option<ImageHash>) -> Self {
-        let size = png.and_then(png_size);
+        match png {
+            Some(png) => Self::hashed(path, png, Sha256Hex::of(png), blob),
+            None => Self {
+                path,
+                sha256: None,
+                blob,
+                width: None,
+                height: None,
+                platform: None,
+            },
+        }
+    }
+
+    /// [`Self::of`] an existing golden whose SHA-256 `sha256` the caller already has (a blob it
+    /// verified).
+    #[must_use]
+    pub fn hashed(path: String, png: &[u8], sha256: Sha256Hex, blob: Option<ImageHash>) -> Self {
+        let size = png_size(png);
         Self {
             path,
-            sha256: png.map(Sha256Hex::of),
+            sha256: Some(sha256),
             blob,
             width: size.map(|(width, _)| width),
             height: size.map(|(_, height)| height),
-            platform: png.and_then(crate::origin::read),
+            platform: crate::origin::read(png),
         }
     }
 }
@@ -541,9 +558,15 @@ impl CandidateImage {
     /// The candidate with the PNG bytes `png`.
     #[must_use]
     pub fn of(png: &[u8]) -> Self {
+        Self::hashed(png, Sha256Hex::of(png))
+    }
+
+    /// The candidate with the PNG bytes `png`, whose SHA-256 `sha256` the caller already has.
+    #[must_use]
+    pub fn hashed(png: &[u8], sha256: Sha256Hex) -> Self {
         let size = png_size(png);
         Self {
-            sha256: Some(Sha256Hex::of(png)),
+            sha256: Some(sha256),
             width: size.map(|(width, _)| width),
             height: size.map(|(_, height)| height),
         }
@@ -2235,6 +2258,19 @@ mod tests {
                 platform: None,
             }
         );
+        // A hash the caller already has (a verified blob) is taken as it is.
+        assert_eq!(
+            GoldenImage::hashed(
+                "a.png".to_owned(),
+                &header,
+                Sha256Hex::of(&header),
+                golden.blob.clone()
+            ),
+            golden
+        );
+        let given = GoldenImage::hashed("a.png".to_owned(), &header, Sha256Hex::of(b"given"), None);
+        assert_eq!(given.sha256, Some(Sha256Hex::of(b"given")));
+        assert_eq!((given.width, given.height), (Some(4), Some(3)));
         let missing = GoldenImage::of("a.png".to_owned(), None, None);
         assert_eq!((missing.sha256, missing.width), (None, None));
         // The platform a golden was recorded on comes from its PNG.
@@ -2247,6 +2283,14 @@ mod tests {
         let candidate = CandidateImage::of(b"garbage");
         assert_eq!(candidate.sha256, Some(Sha256Hex::of(b"garbage")));
         assert_eq!((candidate.width, candidate.height), (None, None));
+        // A hash the caller already has is taken as it is, the size still read from the header.
+        assert_eq!(
+            CandidateImage::hashed(&png, Sha256Hex::of(&png)),
+            CandidateImage::of(&png)
+        );
+        let hashed = CandidateImage::hashed(&png, Sha256Hex::of(b"given"));
+        assert_eq!(hashed.sha256, Some(Sha256Hex::of(b"given")));
+        assert_eq!((hashed.width, hashed.height), (Some(2), Some(1)));
     }
 
     #[test]
