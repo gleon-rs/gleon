@@ -47,8 +47,10 @@ jobs:
 
       - name: 🔍 Validate action.yml
         # yq (preinstalled on the runner image) fails on invalid YAML and on metadata that is no
-        # composite action with a name and a description.
-        run: yq --exit-status '.name and .description and .runs.using == "composite"' action.yml
+        # composite action with a string name and a string description.
+        run: >-
+          yq --exit-status '(.name | tag) == "!!str" and (.description | tag) == "!!str"
+          and .runs.using == "composite"' action.yml
 
       - name: 🛑 Run cargo-deny checks
         run: cargo deny check

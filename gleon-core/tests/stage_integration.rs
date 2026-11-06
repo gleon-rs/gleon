@@ -380,11 +380,11 @@ fn test_stage_refuses_a_screenshot_over_the_decoder_budget() {
     );
 }
 
-/// A blob that is a symbolic link is no blob: staging writes the bytes of the screenshot in its
-/// place.
+/// A blob that is a symbolic link, or a file holding other bytes than its name says, is no blob
+/// to keep: staging writes the bytes of the screenshot in its place.
 #[cfg(unix)]
 #[test]
-fn test_stage_replaces_a_linked_blob() {
+fn test_stage_replaces_blobs_it_cannot_trust() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root = temp_dir.path();
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
@@ -405,6 +405,12 @@ fn test_stage_replaces_a_linked_blob() {
     stage_workspace(&ctx, None).unwrap();
     let meta = fs::symlink_metadata(&blob).unwrap();
     assert!(meta.is_file() && !meta.file_type().is_symlink());
+    assert_eq!(fs::read(&blob).unwrap(), png);
+
+    // A changed cache: the blob's name no longer names its bytes. Staging the unchanged
+    // screenshot again writes them back, as `gleon diff` and `gleon push` refuse such a blob.
+    fs::write(&blob, b"not the screenshot").unwrap();
+    stage_workspace(&ctx, None).unwrap();
     assert_eq!(fs::read(&blob).unwrap(), png);
 }
 

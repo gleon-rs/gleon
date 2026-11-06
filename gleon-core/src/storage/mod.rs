@@ -155,6 +155,21 @@ pub fn save_blob(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     })
 }
 
+/// Whether `path` is a usable blob that holds the bytes `sha256` names.
+///
+/// The blob is opened once without following a link ([`open_regular_file`]) and read whole, like
+/// `gleon push` reads it: a missing file, a link, a directory or other bytes (a changed cache)
+/// are all no blob to keep.
+#[must_use]
+pub fn holds_blob(path: &std::path::Path, sha256: &gleon_model::case::Sha256Hex) -> bool {
+    use std::io::Read as _;
+
+    let mut bytes = Vec::new();
+    open_regular_file(path)
+        .and_then(|(mut file, _)| file.read_to_end(&mut bytes))
+        .is_ok_and(|_| gleon_model::case::Sha256Hex::of(&bytes) == *sha256)
+}
+
 /// Returns `true` only if `path` is an existing regular file and not a symlink.
 #[must_use]
 pub fn is_usable_blob(path: &std::path::Path) -> bool {

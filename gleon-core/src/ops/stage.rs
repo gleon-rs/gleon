@@ -104,8 +104,8 @@ pub(crate) fn filter_test_cases(test_cases: &mut Vec<TestCase>, filter_paths: Op
 /// Executes staging pipeline across the workspace.
 ///
 /// Every screenshot is checked before anything is written, so a bad one stages nothing; a blob
-/// already in the cache is not written again, and an unchanged screenshot keeps its manifest
-/// without being decoded.
+/// already in the cache that holds its bytes is not written again, and an unchanged screenshot
+/// keeps its manifest without being decoded.
 ///
 /// # Errors
 ///
@@ -150,21 +150,26 @@ pub fn stage_workspace(
     pb.finish_and_clear();
     let checked = checked?;
 
-    // The blobs not in the cache yet, each content once (cases often share one); a symbolic
-    // link is no blob (`storage::is_usable_blob`) and is replaced.
-    let missing: HashMap<&str, &Checked> = checked
+    // Each content once (cases often share one). A blob of the cache stays when it holds the
+    // bytes its name says (`storage::holds_blob`); a missing one, a symbolic link (replaced,
+    // never written through) or one holding other bytes (a changed cache) is written.
+    let blobs: HashMap<&str, &Checked> = checked
         .iter()
-        .filter(|item| !crate::storage::is_usable_blob(&blobs_dir.join(item.sha256.as_str())))
         .map(|item| (item.sha256.as_str(), item))
         .collect();
-    missing.into_par_iter().try_for_each(|(sha256, item)| {
-        write_blob(
-            &blobs_dir.join(sha256),
-            &item.absolute_path,
-            &item.relative_path,
-            &item.sha256,
-        )
-    })?;
+    blobs
+        .into_par_iter()
+        .filter(|&(sha256, item)| {
+            !crate::storage::holds_blob(&blobs_dir.join(sha256), &item.sha256)
+        })
+        .try_for_each(|(sha256, item)| {
+            write_blob(
+                &blobs_dir.join(sha256),
+                &item.absolute_path,
+                &item.relative_path,
+                &item.sha256,
+            )
+        })?;
 
     // Clean up orphan manifests when performing a full workspace stage (no path filters)
     if filter_paths.is_none() {
