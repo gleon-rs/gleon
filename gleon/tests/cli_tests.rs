@@ -552,6 +552,49 @@ fn test_cli_diff_exit_code_on_match_and_mismatch() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// `gleon stage` refuses a screenshot no comparison under its rule can use and fails, naming the
+/// file and the SSIM budget once: the chained cause is not repeated (real fixture).
+#[test]
+fn test_stage_refuses_an_ssim_screenshot_over_the_analysis_budget()
+-> Result<(), Box<dyn std::error::Error>> {
+    let core_fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("gleon-core/tests/fixtures");
+    // `shots/*.png` under SSIM.
+    let dir = init_with_config("config/shots-ssim");
+    let shots = dir.path().join("shots");
+    std::fs::create_dir_all(&shots)?;
+    std::fs::copy(
+        core_fixtures.join("ssim_budget_4097x4096.png"),
+        shots.join("big.png"),
+    )?;
+
+    let stderr = gleon()
+        .current_dir(dir.path())
+        .arg("stage")
+        .assert()
+        .failure()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr)?;
+    assert!(
+        stderr.contains(
+            "'shots/big.png' cannot be compared under its rule: 4097x4096 exceeds the SSIM \
+             analysis budget of 16777216 pixels"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("exceeds the SSIM analysis budget").count(),
+        1,
+        "{stderr}"
+    );
+    Ok(())
+}
+
 /// `gleon status` lists a change within the rule's threshold apart from modifications and names
 /// why a screenshot cannot be compared, in text and in JSON, without failing (real fixtures).
 #[test]

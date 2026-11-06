@@ -16,8 +16,8 @@ pub use approve::{ApproveError, ApproveResult, ApprovedCase, ListedCases, approv
 pub use clean::{CleanError, CleanOptions, CleanResult, clean_workspace};
 pub use diff::{DiffOpError, DiffReportResult, run_diff};
 pub use gc::{
-    GcError, GcMode, GcOptions, GcResult, collect_all_referenced_hashes, filter_orphans_to_delete,
-    garbage_collect, partition_remote_blobs,
+    GcError, GcMode, GcOptions, GcResult, collect_all_referenced_hashes, garbage_collect,
+    partition_remote_blobs,
 };
 pub use init::{InitError, InitResult, Template, init_workspace};
 pub use lint::{LintError, LintReport, lint_workspace_manifests};

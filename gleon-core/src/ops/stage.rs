@@ -1,17 +1,24 @@
 //! Staging operation for processing, masking, and persisting baseline screenshots.
 
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
+use gleon_model::{
+    case::Sha256Hex,
+    compare::{self, CompareError},
+};
 use thiserror::Error;
 
 use crate::{
     context::ResolvedContext,
-    manifest::{ManifestError, WorkspaceIndex},
+    manifest::{ManifestError, SingleTestManifest, WorkspaceIndex},
     ops::common::{
-        CoreError, build_manifest, ensure_initialized, hash_and_measure, index_keys_missing_from,
-        load_config_and_scan,
+        CoreError, build_manifest, ensure_initialized, index_keys_missing_from,
+        load_config_and_scan, phash_of,
     },
-    scanner::FileScanner,
+    scanner::{FileScanner, TestCase},
 };
 
 /// Errors that can occur during staging.
@@ -25,6 +32,25 @@ pub enum StageError {
         /// The underlying decode error.
         #[source]
         source: image::ImageError,
+    },
+
+    /// A screenshot no comparison under its rule could use as a baseline
+    /// ([`compare::check_size`]: under `mode: ssim` larger than the SSIM analysis budget), which
+    /// `gleon diff` and `gleon status` would fail.
+    #[error("'{path}' cannot be compared under its rule: {source}")]
+    Uncomparable {
+        /// The path to the screenshot.
+        path: PathBuf,
+        /// Why it cannot be compared.
+        #[source]
+        source: CompareError,
+    },
+
+    /// A screenshot changed between its check and the write of its blob.
+    #[error("'{path}' changed while it was staged: stage again")]
+    Changed {
+        /// The path to the screenshot.
+        path: PathBuf,
     },
 
     /// Error shared across `ops::*` operations.
@@ -42,10 +68,7 @@ pub struct StageResult {
 }
 
 /// Applies the given path filters to a list of test cases in-place.
-pub(crate) fn filter_test_cases(
-    test_cases: &mut Vec<crate::scanner::TestCase>,
-    filter_paths: Option<&[PathBuf]>,
-) {
+pub(crate) fn filter_test_cases(test_cases: &mut Vec<TestCase>, filter_paths: Option<&[PathBuf]>) {
     if let Some(filters) = filter_paths {
         // An absolute filter is resolved like the workspace root the cases lie under
         // ([`crate::paths::find_workspace_root`]), so a path through a symbolic link matches.
@@ -80,24 +103,22 @@ pub(crate) fn filter_test_cases(
 
 /// Executes staging pipeline across the workspace.
 ///
+/// Every screenshot is checked before anything is written, so a bad one stages nothing; a blob
+/// already in the cache is not written again, and an unchanged screenshot keeps its manifest
+/// without being decoded.
+///
 /// # Errors
 ///
 /// Returns an error if the workspace is not initialized, if the platform key cannot be
-/// resolved, if screenshots cannot be scanned, if any screenshot fails to decode, or if
-/// reading/writing manifests, blobs, or other filesystem data fails.
+/// resolved, if screenshots cannot be scanned, if any screenshot fails to decode or no comparison
+/// under its rule could use it ([`StageError::Uncomparable`]), if a screenshot changes while it
+/// is staged ([`StageError::Changed`]), or if reading/writing manifests, blobs, or other
+/// filesystem data fails.
 pub fn stage_workspace(
     context: &ResolvedContext,
     filter_paths: Option<&[PathBuf]>,
 ) -> Result<StageResult, StageError> {
     use rayon::prelude::*;
-
-    struct StagedItem {
-        case_name: String,
-        sha256_hex: String,
-        phash_str: String,
-        width: u32,
-        height: u32,
-    }
 
     let paths = ensure_initialized(&context.base_dir)?;
     let platform_key = crate::ops::common::platform_key(context)?;
@@ -116,52 +137,39 @@ pub fn stage_workspace(
 
     let mut workspace_index = WorkspaceIndex::load(&manifests_dir).map_err(CoreError::Manifest)?;
 
-    let processed_results: Result<Vec<StagedItem>, StageError> = test_cases
+    // Checked in parallel, writing nothing: one bad screenshot stages none.
+    let checked: Result<Vec<Checked>, StageError> = test_cases
         .into_par_iter()
         .map(|case| {
-            let png_bytes = std::fs::read(&case.image.absolute_path).map_err(CoreError::Io)?;
-            let (sha256_hex, phash_str, width, height) =
-                hash_and_measure(&png_bytes).map_err(|e| match e {
-                    ManifestError::Image(source) => StageError::ImageDecode {
-                        path: case.image.relative_path.clone(),
-                        source,
-                    },
-                    other => CoreError::Manifest(other).into(),
-                })?;
-
-            // Save blob to .gleon/blobs/sha256/<sha256_hex>
-            let blob_path = blobs_dir.join(&sha256_hex);
-            crate::io::save_file_atomically(&blob_path, &png_bytes).map_err(CoreError::from)?;
-
+            let staged = workspace_index.get(&case.name);
+            let checked = check_screenshot(case, staged);
             pb.inc(1);
-
-            Ok(StagedItem {
-                case_name: case.name,
-                sha256_hex,
-                phash_str,
-                width,
-                height,
-            })
+            checked
         })
         .collect();
+    pb.finish_and_clear();
+    let checked = checked?;
 
-    let processed_results = match processed_results {
-        Ok(res) => {
-            pb.finish_and_clear();
-            res
-        }
-        Err(e) => {
-            pb.finish_and_clear();
-            return Err(e);
-        }
-    };
+    // The blobs not in the cache yet, each content once (cases often share one); a symbolic
+    // link is no blob (`storage::is_usable_blob`) and is replaced.
+    let missing: HashMap<&str, &Checked> = checked
+        .iter()
+        .filter(|item| !crate::storage::is_usable_blob(&blobs_dir.join(item.sha256.as_str())))
+        .map(|item| (item.sha256.as_str(), item))
+        .collect();
+    missing.into_par_iter().try_for_each(|(sha256, item)| {
+        write_blob(
+            &blobs_dir.join(sha256),
+            &item.absolute_path,
+            &item.relative_path,
+            &item.sha256,
+        )
+    })?;
 
     // Clean up orphan manifests when performing a full workspace stage (no path filters)
     if filter_paths.is_none() {
-        let scanned_names: std::collections::HashSet<_> = processed_results
-            .iter()
-            .map(|item| item.case_name.as_str())
-            .collect();
+        let scanned_names: std::collections::HashSet<_> =
+            checked.iter().map(|item| item.case_name.as_str()).collect();
         let orphan_names: Vec<String> = index_keys_missing_from(&workspace_index, &scanned_names)
             .map(String::from)
             .collect();
@@ -175,17 +183,14 @@ pub fn stage_workspace(
     let mut staged_test_cases = Vec::new();
     let mut total_screenshots_staged = 0;
 
-    for item in processed_results {
-        let new_manifest =
-            build_manifest(&item.sha256_hex, &item.phash_str, item.width, item.height)?;
-
+    for item in checked {
         let is_unchanged = workspace_index
             .get(&item.case_name)
-            .is_some_and(|existing| existing == &new_manifest);
+            .is_some_and(|existing| existing == &item.manifest);
 
         if !is_unchanged {
             workspace_index
-                .save_test(&manifests_dir, &item.case_name, &new_manifest)
+                .save_test(&manifests_dir, &item.case_name, &item.manifest)
                 .map_err(CoreError::Manifest)?;
             total_screenshots_staged += 1;
             staged_test_cases.push(item.case_name);
@@ -196,6 +201,74 @@ pub fn stage_workspace(
         staged_test_cases,
         total_screenshots_staged,
     })
+}
+
+/// A screenshot that passed its checks, with the manifest it gets.
+struct Checked {
+    case_name: String,
+    absolute_path: PathBuf,
+    relative_path: PathBuf,
+    sha256: Sha256Hex,
+    manifest: SingleTestManifest,
+}
+
+/// Checks the screenshot of `case`, writing nothing: a decodable image (its size from the
+/// header) that its rule can compare, measured for its manifest. Unchanged bytes keep the manifest
+/// `staged` without being decoded.
+fn check_screenshot(
+    case: TestCase,
+    staged: Option<&SingleTestManifest>,
+) -> Result<Checked, StageError> {
+    let png_bytes = std::fs::read(&case.image.absolute_path).map_err(CoreError::Io)?;
+    let decode_error = |e| match e {
+        ManifestError::Image(source) => StageError::ImageDecode {
+            path: case.image.relative_path.clone(),
+            source,
+        },
+        other => CoreError::Manifest(other).into(),
+    };
+    let (width, height) =
+        SingleTestManifest::validate_image_bytes(&png_bytes).map_err(decode_error)?;
+    // From the header, before the pixels are decoded: no comparison could use it.
+    compare::check_size(&case.rule.tolerance, width, height).map_err(|source| {
+        StageError::Uncomparable {
+            path: case.image.relative_path.clone(),
+            source,
+        }
+    })?;
+    let sha256 = Sha256Hex::of(&png_bytes);
+    let manifest = match staged {
+        Some(staged) if staged.hash.value() == sha256.as_str() => staged.clone(),
+        _ => {
+            let image = SingleTestManifest::decode_validated(&png_bytes).map_err(decode_error)?;
+            build_manifest(sha256.as_str(), &phash_of(image), width, height)?
+        }
+    };
+    Ok(Checked {
+        case_name: case.name,
+        absolute_path: case.image.absolute_path,
+        relative_path: case.image.relative_path,
+        sha256,
+        manifest,
+    })
+}
+
+/// Writes the blob `blob` ([`crate::storage::save_blob`]: durably, never through a link) from the
+/// screenshot at `path` (`relative` for messages), read again: it must still hold the bytes it
+/// was checked with (`sha256`).
+fn write_blob(
+    blob: &Path,
+    path: &Path,
+    relative: &Path,
+    sha256: &Sha256Hex,
+) -> Result<(), StageError> {
+    let png_bytes = std::fs::read(path).map_err(CoreError::Io)?;
+    if Sha256Hex::of(&png_bytes) != *sha256 {
+        return Err(StageError::Changed {
+            path: relative.to_path_buf(),
+        });
+    }
+    crate::storage::save_blob(blob, &png_bytes).map_err(|e| StageError::Core(CoreError::Io(e)))
 }
 
 #[cfg(all(test, not(miri)))]
@@ -210,6 +283,8 @@ pub fn stage_workspace(
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
+    use gleon_model::compare::CompareError;
+
     use super::*;
     use crate::{config::ConfigError, context::ContextError, scanner::ScannerError};
 
@@ -249,8 +324,42 @@ mod tests {
         assert!(err6.to_string().contains("Image decode error"));
         assert!(std::error::Error::source(&err6).is_some());
 
+        let err7 = StageError::Uncomparable {
+            path: PathBuf::from("ssim/big.png"),
+            source: CompareError::TooLarge {
+                width: 4097,
+                height: 4096,
+            },
+        };
+        assert_eq!(
+            err7.to_string(),
+            "'ssim/big.png' cannot be compared under its rule: 4097x4096 exceeds the SSIM \
+             analysis budget of 16777216 pixels; use exact or pixel mode or a smaller capture"
+        );
+        assert!(std::error::Error::source(&err7).is_some());
+
         let err8: StageError = CoreError::Io(std::io::Error::other("io test")).into();
         assert!(err8.to_string().contains("IO error"));
+    }
+
+    /// The blob is written from the screenshot read again: one that changed since its check is
+    /// refused, never stored under the old hash.
+    #[test]
+    fn test_write_blob_refuses_a_changed_screenshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let screenshot = temp.path().join("a.png");
+        std::fs::write(&screenshot, b"now").unwrap();
+        let blob = temp.path().join("blob");
+        let relative = Path::new("shots/a.png");
+
+        let err = write_blob(&blob, &screenshot, relative, &Sha256Hex::of(b"then")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "'shots/a.png' changed while it was staged: stage again"
+        );
+        assert!(!blob.exists());
+        write_blob(&blob, &screenshot, relative, &Sha256Hex::of(b"now")).unwrap();
+        assert_eq!(std::fs::read(&blob).unwrap(), b"now");
     }
 
     #[test]

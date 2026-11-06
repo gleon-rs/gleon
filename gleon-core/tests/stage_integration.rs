@@ -17,8 +17,10 @@ use std::{fs, path::Path};
 
 use gleon_core::{
     context::{ContextOptions, ResolvedContext},
-    ops::{StageError, check_status, init_workspace, stage_workspace},
+    manifest::ManifestError,
+    ops::{StageError, check_status, common::CoreError, init_workspace, stage_workspace},
 };
+use gleon_model::compare::CompareError;
 use sha2::Digest;
 
 #[test]
@@ -38,7 +40,7 @@ fn test_stage_uninitialized_fails() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        StageError::Core(gleon_core::ops::common::CoreError::NotInitialized)
+        StageError::Core(CoreError::NotInitialized)
     ));
 }
 
@@ -290,6 +292,122 @@ fn test_stage_corrupt_screenshot_returns_error() {
     assert!(matches!(result, Err(StageError::ImageDecode { .. })));
 }
 
+/// A screenshot over the SSIM analysis budget can never be compared under `mode: ssim` (`gleon
+/// diff` and `gleon status` fail it), so stage refuses it in the words of the comparison. Exact
+/// and pixel rules have no such budget (`gleon_model::compare::check_size`). Every screenshot is
+/// checked before anything is written: the good one gets no blob either.
+#[test]
+fn test_stage_refuses_an_ssim_screenshot_over_the_analysis_budget() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    init_workspace(&ctx, None).unwrap();
+    // `ssim/*.png` under SSIM, `shots/*.png` under pixel.
+    common::copy_config(root, "ssim_and_exact");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for (file, fixture) in [
+        ("ssim/big.png", "ssim_budget_4097x4096.png"),
+        ("shots/ok.png", "baseline_100x100.png"),
+    ] {
+        fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+        fs::copy(fixtures.join(fixture), root.join(file)).unwrap();
+    }
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+
+    let err = stage_workspace(&ctx, None).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            StageError::Uncomparable {
+                source: CompareError::TooLarge {
+                    width: 4097,
+                    height: 4096,
+                },
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(
+        err.to_string().starts_with(
+            "'ssim/big.png' cannot be compared under its rule: 4097x4096 exceeds the SSIM \
+             analysis budget"
+        ),
+        "{err}"
+    );
+    let manifests = root
+        .join(".gleon/manifests")
+        .join(ctx.platform.key().unwrap());
+    assert!(!manifests.join("ssim/big.json").exists());
+    assert!(!manifests.join("shots/ok.json").exists());
+    assert_eq!(
+        fs::read_dir(root.join(".gleon/blobs/sha256"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+/// A screenshot over the decoder budget (16384x4097, more pixels than allowed although each side
+/// fits) is refused from its header, before it is decoded, naming the limit.
+#[test]
+fn test_stage_refuses_a_screenshot_over_the_decoder_budget() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    init_workspace(&ctx, None).unwrap();
+    common::copy_config(root, "billing");
+    fs::create_dir_all(root.join("billing")).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/decoder_budget_16384x4097.png"),
+        root.join("billing/wide.png"),
+    )
+    .unwrap();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+
+    let err = stage_workspace(&ctx, None).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            StageError::Core(CoreError::Manifest(ManifestError::Validation(_)))
+        ),
+        "{err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("Total pixel count 67125248 (16384x4097) exceeds"),
+        "{err}"
+    );
+}
+
+/// A blob that is a symbolic link is no blob: staging writes the bytes of the screenshot in its
+/// place.
+#[cfg(unix)]
+#[test]
+fn test_stage_replaces_a_linked_blob() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+    init_workspace(&ctx, None).unwrap();
+    common::copy_config(root, "billing");
+    fs::create_dir_all(root.join("billing")).unwrap();
+    let png =
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/200x100.png")).unwrap();
+    fs::write(root.join("billing/form.png"), &png).unwrap();
+    let blobs = root.join(".gleon/blobs/sha256");
+    fs::create_dir_all(&blobs).unwrap();
+    let elsewhere = root.join("elsewhere.png");
+    fs::write(&elsewhere, &png).unwrap();
+    let blob = blobs.join(hex::encode(sha2::Sha256::digest(&png)));
+    std::os::unix::fs::symlink(&elsewhere, &blob).unwrap();
+    let ctx = ResolvedContext::from_options(&ContextOptions::default(), root).unwrap();
+
+    stage_workspace(&ctx, None).unwrap();
+    let meta = fs::symlink_metadata(&blob).unwrap();
+    assert!(meta.is_file() && !meta.file_type().is_symlink());
+    assert_eq!(fs::read(&blob).unwrap(), png);
+}
+
 /// A goldens workspace never gets blobs or manifests.
 #[test]
 fn test_stage_refuses_a_goldens_workspace() {
@@ -298,7 +416,7 @@ fn test_stage_refuses_a_goldens_workspace() {
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp_dir.path()).unwrap();
     assert!(matches!(
         stage_workspace(&ctx, None).unwrap_err(),
-        StageError::Core(gleon_core::ops::common::CoreError::BaselinesAreGoldens)
+        StageError::Core(CoreError::BaselinesAreGoldens)
     ));
     assert!(!temp_dir.path().join(".gleon/blobs").exists());
     assert!(!temp_dir.path().join(".gleon/manifests").exists());

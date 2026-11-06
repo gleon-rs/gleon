@@ -6,8 +6,7 @@ pub use adapter::{
 use object_store::path::Path as ObjPath;
 
 pub use crate::ops::gc::{
-    GcError, GcMode, GcOptions, GcResult, collect_all_referenced_hashes, filter_orphans_to_delete,
-    garbage_collect,
+    GcError, GcMode, GcOptions, GcResult, collect_all_referenced_hashes, garbage_collect,
 };
 
 /// Optional metadata attached to an uploaded blob in cloud storage.
@@ -140,6 +139,20 @@ pub fn has_usable_local_blob(
     hash: &crate::manifest::ImageHash,
 ) -> bool {
     is_usable_blob(&local_blob_path(blobs_root, hash))
+}
+
+/// Writes the blob `path` durably, never through a symbolic link.
+///
+/// Whatever is there (no usable blob, see [`is_usable_blob`]) is removed first, so the bytes land
+/// in the cache and not at the target of a link: `gleon_model::fs::write_atomically` writes
+/// through links, as goldens need.
+///
+/// # Errors
+/// Returns the I/O error of the removal (a directory there is one) or of the write.
+pub fn save_blob(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    gleon_model::fs::remove_if_exists(path).and_then(|()| {
+        gleon_model::fs::write_atomically(path, bytes, gleon_model::fs::Durability::Durable)
+    })
 }
 
 /// Returns `true` only if `path` is an existing regular file and not a symlink.

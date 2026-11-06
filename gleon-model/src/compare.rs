@@ -289,6 +289,27 @@ pub fn compare(
     })
 }
 
+/// Checks, before decoding, that a `width` x `height` image can be compared under `tolerance`.
+///
+/// SSIM analyzes at most [`gleon_engine::ssim::MAX_ANALYSIS_PIXELS`], and [`compare`] and
+/// [`verdict`] fail a larger image with the same error. Writers of baselines check it, so they
+/// never record one no comparison can use.
+///
+/// # Errors
+/// Returns [`CompareError::TooLarge`] for an SSIM tolerance and an image over that budget.
+pub const fn check_size(
+    tolerance: &Tolerance,
+    width: u32,
+    height: u32,
+) -> Result<(), CompareError> {
+    match tolerance {
+        Tolerance::Ssim { .. } if !gleon_engine::ssim::fits_analysis_budget(width, height) => {
+            Err(CompareError::TooLarge { width, height })
+        }
+        Tolerance::Exact {} | Tolerance::Pixel { .. } | Tolerance::Ssim { .. } => Ok(()),
+    }
+}
+
 /// The [`Verdict`] of comparing the PNG `golden` with `candidate` under `tolerance` and `masks`.
 ///
 /// Decided exactly as [`compare`] decides it (without text), for callers that only need the
@@ -804,6 +825,23 @@ mod tests {
         ));
         assert_eq!(err.kind(), CaseErrorKind::Image);
         assert!(err.to_string().contains("SSIM analysis budget"), "{err}");
+    }
+
+    /// The size check of writers of baselines: only SSIM has an analysis budget, and an image
+    /// over it fails as `compare` fails it.
+    #[test]
+    fn test_check_size_bounds_ssim_only() {
+        assert!(check_size(&SSIM, 4096, 4096).is_ok());
+        let err = check_size(&SSIM, 4097, 4096).unwrap_err();
+        assert!(matches!(
+            err,
+            CompareError::TooLarge {
+                width: 4097,
+                height: 4096
+            }
+        ));
+        assert!(check_size(&Tolerance::pixel(0.0), 4097, 4096).is_ok());
+        assert!(check_size(&Tolerance::Exact {}, 4097, 4096).is_ok());
     }
 
     #[test]

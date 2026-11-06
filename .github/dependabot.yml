@@ -1,7 +1,8 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
-    directory: "/"
+    # The fuzz targets are a workspace of their own, with their own lockfile.
+    directories: ["/", "/fuzz"]
     schedule:
       interval: "weekly"
       day: "sunday"

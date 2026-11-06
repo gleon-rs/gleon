@@ -119,42 +119,48 @@ impl Serialize for Dimension {
 }
 
 /// Configuration parameters for the diff engine.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
+// Never parsed itself: `gleon_model` reads the `diff` keys of a `gleon.yaml` rule and checks
+// their ranges (`gleon_model::tolerance::ToleranceError`). The schema attributes describe those
+// keys in the JSON Schema of the config.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(
+    feature = "schemars",
+    derive(schemars::JsonSchema),
+    schemars(deny_unknown_fields)
+)]
 pub struct DiffConfig {
     /// Largest share [0.0, 1.0] of differing pixels in pixel mode: required by `mode: pixel`
     /// (0: every pixel identical, the pixel options aside).
-    #[serde(default = "default_threshold", deserialize_with = "deserialize_ratio")]
     #[cfg_attr(
         feature = "schemars",
-        schemars(range(min = 0.0, max = 1.0), transform = without_default)
+        schemars(
+            default = "default_threshold",
+            range(min = 0.0, max = 1.0),
+            transform = without_default
+        )
     )]
     pub threshold: f64,
     /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).
-    #[serde(
-        default = "default_min_similarity",
-        deserialize_with = "deserialize_ratio"
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(default = "default_min_similarity", range(min = 0.0, max = 1.0))
     )]
-    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 1.0)))]
     pub min_similarity: f64,
     /// Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode).
-    #[serde(
-        default = "default_color_tolerance",
-        deserialize_with = "deserialize_color_tolerance"
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(default = "default_color_tolerance", range(min = 0.0, max = 255.0))
     )]
-    #[cfg_attr(feature = "schemars", schemars(range(min = 0.0, max = 255.0)))]
     pub color_tolerance: f64,
     /// Pixel mode, outside text: a differing pixel counts as equal when none of its RGBA bytes
     /// differs by more than this, `[0, 254]` (default 0: off). For GPU and color-conversion
     /// drift.
-    #[serde(default, deserialize_with = "deserialize_pixel_option")]
-    #[cfg_attr(feature = "schemars", schemars(range(max = 254)))]
+    #[cfg_attr(feature = "schemars", schemars(default, range(max = 254)))]
     pub channel_tolerance: u8,
     /// Pixel mode, outside text: a differing pixel counts as equal when it looks anti-aliased in
     /// either image (the detection of pixelmatch: between a darker and a brighter neighbor that
     /// sit in flat areas of both images). Default off.
-    #[serde(default)]
+    #[cfg_attr(feature = "schemars", schemars(default))]
     pub anti_alias: bool,
     /// Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the
     /// baseline's luma there (8-bit units, unnormalized like Skia Gold's: a sharp step of 16
@@ -162,8 +168,7 @@ pub struct DiffConfig {
     /// moves (Skia Gold's edge mask). Default 0: off. Hides every change that lies on edges too:
     /// on the calibration corpus a missing glyph, a card moved by 1px and, at 64, a missing small
     /// icon pass; the lower the value, the more pixels count as edges.
-    #[serde(default, deserialize_with = "deserialize_pixel_option")]
-    #[cfg_attr(feature = "schemars", schemars(range(max = 254)))]
+    #[cfg_attr(feature = "schemars", schemars(default, range(max = 254)))]
     pub edge_threshold: u8,
 }
 
@@ -171,59 +176,8 @@ pub struct DiffConfig {
 /// hide nothing (gradients are capped at 255), so it is no valid setting.
 pub const MAX_PIXEL_OPTION: u8 = 254;
 
-fn deserialize_pixel_option<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    u8::deserialize(deserializer).and_then(|value| {
-        if value <= MAX_PIXEL_OPTION {
-            Ok(value)
-        } else {
-            Err(serde::de::Error::custom(
-                "pixel options must be between 0 and 254 (0 turns one off)",
-            ))
-        }
-    })
-}
-
 /// The largest `color_tolerance`: a whole 8-bit channel.
 pub const MAX_COLOR_TOLERANCE: f64 = 255.0;
-
-/// Whether `value` is a valid `color_tolerance`: within `[0, 255]` 8-bit channel units.
-#[must_use]
-pub fn is_valid_color_tolerance(value: f64) -> bool {
-    (0.0..=MAX_COLOR_TOLERANCE).contains(&value)
-}
-
-fn deserialize_color_tolerance<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    f64::deserialize(deserializer).and_then(|val| {
-        if is_valid_color_tolerance(val) {
-            Ok(val)
-        } else {
-            Err(serde::de::Error::custom(
-                "color_tolerance must be between 0 and 255 (8-bit channel units)",
-            ))
-        }
-    })
-}
-
-fn deserialize_ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    f64::deserialize(deserializer).and_then(|val| {
-        if (0.0..=1.0).contains(&val) {
-            Ok(val)
-        } else {
-            Err(serde::de::Error::custom(
-                "Value must be between 0.0 and 1.0",
-            ))
-        }
-    })
-}
 
 impl Default for DiffConfig {
     fn default() -> Self {
@@ -343,54 +297,5 @@ mod tests {
             let err = parse(&format!("\"{bad}\"")).unwrap_err().to_string();
             assert!(err.contains("expected a"), "{bad}: {err}");
         }
-    }
-
-    #[test]
-    fn test_diff_config_rejects_out_of_range_values() {
-        let err = |yaml: &str| {
-            serde_yaml::from_str::<DiffConfig>(yaml)
-                .unwrap_err()
-                .to_string()
-        };
-        assert!(err("min_similarity: 1.5").contains("between 0.0 and 1.0"));
-        assert!(err("threshold: -0.1").contains("between 0.0 and 1.0"));
-        assert!(err("color_tolerance: -1").contains("between 0 and 255"));
-        assert!(err("color_tolerance: 256").contains("between 0 and 255"));
-        let defaults: DiffConfig = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(defaults, DiffConfig::default());
-    }
-
-    #[test]
-    fn test_pixel_options_deserialize_and_reject_out_of_range_values() {
-        let config: DiffConfig =
-            serde_yaml::from_str("{channel_tolerance: 4, anti_alias: true, edge_threshold: 64}")
-                .unwrap();
-        assert_eq!(
-            (
-                config.channel_tolerance,
-                config.anti_alias,
-                config.edge_threshold
-            ),
-            (4, true, 64)
-        );
-        for bad in [
-            "channel_tolerance: 256",
-            "channel_tolerance: -1",
-            "edge_threshold: 1.5",
-            "anti_alias: \"yes\"",
-        ] {
-            assert!(serde_yaml::from_str::<DiffConfig>(bad).is_err(), "{bad}");
-        }
-        // 255 would compare nothing (every pixel within 255) or hide nothing (gradients are
-        // capped at 255): a config error, not a silent extreme.
-        let err = |yaml: &str| {
-            serde_yaml::from_str::<DiffConfig>(yaml)
-                .unwrap_err()
-                .to_string()
-        };
-        assert!(err("channel_tolerance: 255").contains("between 0 and 254"));
-        assert!(err("edge_threshold: 255").contains("between 0 and 254"));
-        let edge: DiffConfig = serde_yaml::from_str("edge_threshold: 254").unwrap();
-        assert_eq!(edge.edge_threshold, 254);
     }
 }

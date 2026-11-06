@@ -3,13 +3,13 @@
 
 use std::path::{Path, PathBuf};
 
-use gleon_engine::config::{DiffConfig, Dimension, Zone};
+use gleon_engine::config::{DiffConfig, Zone};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::{
     platform::{PlatformConfig, PlatformError},
-    tolerance::{TextTolerance, Tolerance},
+    tolerance::{TextTolerance, Tolerance, ToleranceError},
 };
 
 /// Errors that can occur during configuration loading or manifest operations.
@@ -669,7 +669,7 @@ fn pixel_needs_threshold(schema: &mut schemars::Schema) {
 }
 
 /// A screenshot rule of `gleon.yaml` spelled wrong.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum RuleError {
     /// No `mode`: there is no default, a rule added for its masks alone would otherwise tolerate
     /// what `pixel` tolerates.
@@ -694,16 +694,10 @@ pub enum RuleError {
         /// The mode it belongs to.
         owner: &'static str,
     },
-    /// A `diff` key outside its range.
-    #[error("diff.{key} must be {range} (got {value})")]
-    OutOfRange {
-        /// The key.
-        key: &'static str,
-        /// Its range, in words.
-        range: &'static str,
-        /// The value written.
-        value: String,
-    },
+    /// A `diff` key (`diff.threshold`) or `text_tolerance` outside its range: the check and the
+    /// message of [`Tolerance::validate`].
+    #[error("{0}")]
+    OutOfRange(ToleranceError),
 }
 
 /// The `diff` keys of a rule as written, each one there or not: a key of another mode is an
@@ -756,65 +750,37 @@ impl DiffFile {
 
     /// The thresholds: each key written, checked against its range, else its default.
     fn config(&self) -> Result<DiffConfig, RuleError> {
-        fn checked<T: Copy + ToString>(
-            key: &'static str,
-            range: &'static str,
-            value: Option<T>,
+        /// The value `written`, if it passes `check`, else `default`.
+        fn checked<T>(
+            written: Option<T>,
             default: T,
-            is_valid: impl Fn(T) -> bool,
+            check: impl FnOnce(T) -> Result<T, ToleranceError>,
         ) -> Result<T, RuleError> {
-            match value {
-                Some(value) if !is_valid(value) => Err(RuleError::OutOfRange {
-                    key,
-                    range,
-                    value: value.to_string(),
-                }),
-                value => Ok(value.unwrap_or(default)),
-            }
+            written.map_or(Ok(default), |value| {
+                check(value).map_err(RuleError::OutOfRange)
+            })
         }
 
-        const RATIO: &str = "between 0.0 and 1.0";
-        const PIXEL_OPTION: &str = "between 0 and 254 (0 turns it off)";
         let defaults = DiffConfig::default();
-        let ratio = |value: f64| (0.0..=1.0).contains(&value);
-        let pixel_option = |value: u8| value <= gleon_engine::config::MAX_PIXEL_OPTION;
         Ok(DiffConfig {
-            threshold: checked(
-                "threshold",
-                RATIO,
-                self.threshold,
-                defaults.threshold,
-                ratio,
-            )?,
-            min_similarity: checked(
-                "min_similarity",
-                RATIO,
-                self.min_similarity,
-                defaults.min_similarity,
-                ratio,
-            )?,
-            color_tolerance: checked(
-                "color_tolerance",
-                "between 0 and 255 (8-bit channel units)",
-                self.color_tolerance,
-                defaults.color_tolerance,
-                gleon_engine::config::is_valid_color_tolerance,
-            )?,
+            threshold: checked(self.threshold, defaults.threshold, |value| {
+                ToleranceError::check_ratio("diff.threshold", value)
+            })?,
+            min_similarity: checked(self.min_similarity, defaults.min_similarity, |value| {
+                ToleranceError::check_ratio("diff.min_similarity", value)
+            })?,
+            color_tolerance: checked(self.color_tolerance, defaults.color_tolerance, |value| {
+                ToleranceError::check_color_tolerance("diff.color_tolerance", value)
+            })?,
             channel_tolerance: checked(
-                "channel_tolerance",
-                PIXEL_OPTION,
                 self.channel_tolerance,
                 defaults.channel_tolerance,
-                pixel_option,
+                |value| ToleranceError::check_pixel_option("diff.channel_tolerance", value),
             )?,
             anti_alias: self.anti_alias.unwrap_or(defaults.anti_alias),
-            edge_threshold: checked(
-                "edge_threshold",
-                PIXEL_OPTION,
-                self.edge_threshold,
-                defaults.edge_threshold,
-                pixel_option,
-            )?,
+            edge_threshold: checked(self.edge_threshold, defaults.edge_threshold, |value| {
+                ToleranceError::check_pixel_option("diff.edge_threshold", value)
+            })?,
         })
     }
 }
@@ -831,11 +797,20 @@ impl TryFrom<RuleFile> for ScreenshotRule {
         if mode == RuleMode::Pixel && diff.threshold.is_none() {
             return Err(RuleError::MissingThreshold);
         }
+        // Checked here like the `diff` keys, so an error names the line of the rule.
+        let text_tolerance = file
+            .text_tolerance
+            .map(|text| {
+                ToleranceError::check_ratio("text_tolerance", text.0)
+                    .map(|share| TextTolerance(share).without_negative_zero())
+            })
+            .transpose()
+            .map_err(RuleError::OutOfRange)?;
         Ok(Self {
             include: file.include,
             tolerance: Tolerance::from_rule(mode, &diff.config()?),
             masks: file.masks,
-            text_tolerance: file.text_tolerance,
+            text_tolerance,
         })
     }
 }
@@ -1071,35 +1046,8 @@ impl GleonConfig {
                     "screenshots[{i}].include must contain at least one glob pattern"
                 )));
             }
-            // A rule read from YAML is checked when parsed; one built in code is checked here.
-            rule.tolerance
-                .validate()
-                .map_err(|e| ConfigError::Validation(format!("screenshots[{i}].diff: {e}")))?;
-            if let Some(text) = &rule.text_tolerance {
-                text.validate().map_err(|e| {
-                    ConfigError::Validation(format!("screenshots[{i}].text_tolerance: {e}"))
-                })?;
-            }
-            for (j, mask) in rule.masks.iter().enumerate() {
-                for (k, zone) in mask.zones.iter().enumerate() {
-                    match zone.width {
-                        Dimension::Percent(pct) if !(0.0..=100.0).contains(&pct) => {
-                            return Err(ConfigError::Validation(format!(
-                                "screenshots[{i}].masks[{j}].zones[{k}].width percentage must be between 0.0 and 100.0 (got {pct}%)"
-                            )));
-                        }
-                        _ => {}
-                    }
-                    match zone.height {
-                        Dimension::Percent(pct) if !(0.0..=100.0).contains(&pct) => {
-                            return Err(ConfigError::Validation(format!(
-                                "screenshots[{i}].masks[{j}].zones[{k}].height percentage must be between 0.0 and 100.0 (got {pct}%)"
-                            )));
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            // Tolerances, text tolerances and mask percentages are checked when a rule is parsed
+            // (`ScreenshotRule`'s `TryFrom<RuleFile>`, `Dimension`'s `Deserialize`).
         }
         Ok(())
     }
@@ -1210,6 +1158,7 @@ impl GleonConfig {
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
+    use gleon_engine::config::Dimension;
     use semver::VersionReq;
     use tempfile::tempdir;
 
@@ -1353,7 +1302,7 @@ screenshots:
     diff:
       threshold: 1.5
 ",
-            "diff.threshold must be between 0.0 and 1.0 (got 1.5)",
+            "`diff.threshold` must be between 0.0 and 1.0 (got 1.5)",
         );
     }
 
@@ -1598,26 +1547,88 @@ screenshots:
         ));
     }
 
+    /// Each `diff` key is checked when parsed, by the check `Tolerance::validate` uses, named by
+    /// its key and line.
     #[test]
-    fn test_validation_invalid_threshold() {
-        let mut config = GleonConfig::default();
-        config.screenshots[0].tolerance = Tolerance::pixel(1.5);
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ConfigError::Validation(msg) if msg.contains("screenshots[0].diff: `max_diff_ratio` must be between 0.0 and 1.0")
-        ));
-        // Read from YAML, the key is checked when parsed, by its name.
-        let err = GleonConfig::from_yaml_str(
-            "screenshots:\n  - include: a.png\n    mode: pixel\n    diff: { threshold: 1.5 }\n",
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("diff.threshold must be between 0.0 and 1.0 (got 1.5) at line 2"),
-            "{err}"
-        );
+    fn test_diff_keys_are_range_checked_when_parsed() {
+        let yaml = |mode: &str, diff: &str| {
+            format!("screenshots:\n  - include: a.png\n    mode: {mode}\n    diff: {diff}\n")
+        };
+        for (mode, diff, message) in [
+            (
+                "pixel",
+                "{ threshold: 1.5 }",
+                "`diff.threshold` must be between 0.0 and 1.0 (got 1.5) at line 2",
+            ),
+            (
+                "ssim",
+                "{ min_similarity: -0.05 }",
+                "`diff.min_similarity` must be between 0.0 and 1.0 (got -0.05) at line 2",
+            ),
+            (
+                "ssim",
+                "{ color_tolerance: 256 }",
+                "`diff.color_tolerance` must be between 0 and 255 (got 256) at line 2",
+            ),
+            (
+                "pixel",
+                "{ threshold: 0, channel_tolerance: 255 }",
+                "`diff.channel_tolerance` must be between 0 and 254 (got 255) at line 2",
+            ),
+            (
+                "pixel",
+                "{ threshold: 0, edge_threshold: 255 }",
+                "`diff.edge_threshold` must be between 0 and 254 (got 255) at line 2",
+            ),
+        ] {
+            let err = GleonConfig::from_yaml_str(&yaml(mode, diff))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(message), "{diff}: {err}");
+        }
+        for (mode, diff) in [
+            (
+                "pixel",
+                "{ threshold: 1, channel_tolerance: 254, edge_threshold: 254 }",
+            ),
+            ("ssim", "{ min_similarity: 0, color_tolerance: 255 }"),
+        ] {
+            assert!(
+                GleonConfig::from_yaml_str(&yaml(mode, diff)).is_ok(),
+                "{diff}"
+            );
+        }
+    }
+
+    /// A `diff` key of the wrong type is an error naming the key and its line, never truncated or
+    /// rounded into range.
+    #[test]
+    fn test_diff_keys_are_type_checked_when_parsed() {
+        let yaml = |diff: &str| {
+            format!("screenshots:\n  - include: a.png\n    mode: pixel\n    diff: {diff}\n")
+        };
+        for (diff, key) in [
+            (
+                "{ threshold: 0, channel_tolerance: 256 }",
+                "channel_tolerance",
+            ),
+            (
+                "{ threshold: 0, channel_tolerance: -1 }",
+                "channel_tolerance",
+            ),
+            ("{ threshold: 0, edge_threshold: 1.5 }", "edge_threshold"),
+            ("{ threshold: 0, anti_alias: 'yes' }", "anti_alias"),
+            ("{ threshold: high }", "threshold"),
+        ] {
+            let err = GleonConfig::from_yaml_str(&yaml(diff))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("screenshots[0].diff.{key}: invalid"))
+                    && err.contains("at line 4"),
+                "{diff}: {err}"
+            );
+        }
     }
 
     /// Pixel options set on an SSIM rule would silently do nothing: a config error naming them.
@@ -1689,7 +1700,8 @@ screenshots:
         }
     }
 
-    /// `text_tolerance` is a share, for pixel and SSIM rules alike.
+    /// `text_tolerance` is a share, for pixel and SSIM rules alike, checked when parsed (with the
+    /// line of its rule) and kept without a negative zero.
     #[test]
     fn test_rule_text_tolerance() {
         let yaml = |mode: &str, text: &str| {
@@ -1707,80 +1719,18 @@ screenshots:
         }
         let err = GleonConfig::from_yaml_str(&yaml(pixel, "2")).unwrap_err();
         assert!(
-            err.to_string().contains(
-                "screenshots[0].text_tolerance: `text_tolerance` must be between 0.0 and 1.0"
-            ),
+            err.to_string()
+                .contains("`text_tolerance` must be between 0.0 and 1.0 (got 2) at line 3"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn test_validation_invalid_color_tolerance() {
-        for bad in [f64::NAN, -1.0, 255.5, f64::INFINITY] {
-            let mut config = GleonConfig::default();
-            config.screenshots[0].tolerance = Tolerance::Ssim {
-                min_similarity: 0.8,
-                color_tolerance: bad,
-            };
-            assert!(matches!(
-                config.validate(),
-                Err(ConfigError::Validation(msg)) if msg.contains("color_tolerance` must be between 0 and 255")
-            ));
-        }
-    }
-
-    #[test]
-    fn test_validation_invalid_min_similarity() {
-        let mut config = GleonConfig::default();
-        config.screenshots[0].tolerance = Tolerance::Ssim {
-            min_similarity: -0.1,
-            color_tolerance: 8.0,
-        };
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ConfigError::Validation(msg) if msg.contains("`min_similarity` must be between 0.0 and 1.0")
-        ));
-    }
-
-    #[test]
-    fn test_validation_invalid_mask_percentages() {
-        // Test invalid width percentage
-        let mut config = GleonConfig::default();
-        config.screenshots[0].masks = vec![MaskRule {
-            path: GlobPattern::new("src/test.png").unwrap(),
-            zones: vec![Zone {
-                x: 0,
-                y: 0,
-                width: Dimension::Percent(150.0),
-                height: Dimension::Pixels(100),
-            }],
-        }];
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ConfigError::Validation(msg) if msg.contains("width percentage must be between 0.0 and 100.0")
-        ));
-
-        // Test invalid height percentage
-        let mut config2 = GleonConfig::default();
-        config2.screenshots[0].masks = vec![MaskRule {
-            path: GlobPattern::new("src/test.png").unwrap(),
-            zones: vec![Zone {
-                x: 0,
-                y: 0,
-                width: Dimension::Pixels(100),
-                height: Dimension::Percent(-10.0),
-            }],
-        }];
-        let result2 = config2.validate();
-        assert!(result2.is_err());
-        assert!(matches!(
-            result2.unwrap_err(),
-            ConfigError::Validation(msg) if msg.contains("height percentage must be between 0.0 and 100.0")
-        ));
+        let zero = GleonConfig::from_yaml_str(&yaml("ssim", "-0.0")).unwrap();
+        assert!(
+            zero.screenshots[0]
+                .text_tolerance
+                .unwrap()
+                .0
+                .is_sign_positive()
+        );
     }
 
     #[test]
@@ -1956,7 +1906,7 @@ screenshots:
     diff:
       threshold: -0.1
 ",
-            "diff.threshold must be between 0.0 and 1.0 (got -0.1)",
+            "`diff.threshold` must be between 0.0 and 1.0 (got -0.1)",
         );
         assert_config_error(
             "
@@ -1967,7 +1917,7 @@ screenshots:
     diff:
       min_similarity: -0.05
 ",
-            "diff.min_similarity must be between 0.0 and 1.0 (got -0.05)",
+            "`diff.min_similarity` must be between 0.0 and 1.0 (got -0.05)",
         );
     }
 

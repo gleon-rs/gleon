@@ -205,6 +205,12 @@ pub fn config_error(config_path: &str, message: &str) -> String {
     format!("gleon: {config_path}: {message}")
 }
 
+/// Update mode did not record the candidate: no comparison could use it as the golden (an image
+/// over the SSIM analysis budget). The golden stays as it was.
+pub fn cannot_record(golden_uri: &str, message: &str) -> String {
+    format!("Golden \"{golden_uri}\": gleon cannot record it: {message}")
+}
+
 /// The golden could not be read or compared (a corrupt PNG, an I/O error); never a pass.
 pub fn could_not_compare(golden_uri: &str, message: &str) -> String {
     format!("Golden \"{golden_uri}\": gleon could not compare: {message}")
