@@ -196,7 +196,7 @@ pub fn resolve_platform_filter_dir<'a>(
 /// before any decoding ([`baseline_of`]): one decision for `gleon diff` and `gleon status`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Baseline {
-    /// The screenshot's bytes are the baseline's: the manifest's sha256 names them (decided
+    /// The screenshot bytes are the baseline bytes: the manifest's sha256 names them (decided
     /// without the blob), or the blob of another hash scheme holds them.
     Identical {
         /// Whether the local blob was read (and so is usable): `false` when the manifest's
@@ -223,10 +223,10 @@ pub enum Baseline {
 /// The [`Baseline`] of the screenshot `candidate` (PNG bytes, `candidate_sha256` their SHA-256)
 /// tracked by `manifest`, whose blob lies under `blobs_root`.
 ///
-/// A blob counts only as a regular file ([`crate::storage::is_usable_blob_metadata`], like for
-/// `gleon pull` and `gleon push`): a symbolic link or a directory there is unavailable, never
-/// followed. A sha256 blob must hold the bytes its name says: a changed cache never decides a
-/// comparison.
+/// A blob counts only as a regular file, opened once without following a link
+/// ([`crate::storage::open_regular_file`], like for `gleon push`): a symbolic link or a directory
+/// there is unavailable. A sha256 blob must hold the bytes its name says: a changed cache never
+/// decides a comparison.
 #[must_use]
 pub fn baseline_of(
     manifest: &SingleTestManifest,
@@ -249,19 +249,27 @@ pub fn baseline_of(
         kind: CaseErrorKind::Io,
         message,
     };
-    match local_blob_state(blobs_root, &manifest.hash) {
-        BlobState::Usable => {}
-        BlobState::Missing => {
+    // One no-follow open of a regular file: the bytes read are those of the file checked.
+    let read = crate::storage::open_regular_file(&crate::storage::local_blob_path(
+        blobs_root,
+        &manifest.hash,
+    ))
+    .and_then(|(mut file, _)| {
+        let mut png = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut png).map(|_| png)
+    });
+    let png = match read {
+        Ok(png) => png,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return unavailable(format!(
                 "the baseline blob {} is not in .gleon/blobs: run `gleon pull` (or `gleon diff \
                  --auto-pull`)",
                 manifest.hash
             ));
         }
-        BlobState::Unusable(reason) => return unavailable(reason),
-    }
-    let png = match std::fs::read(crate::storage::local_blob_path(blobs_root, &manifest.hash)) {
-        Ok(png) => png,
+        Err(e) if crate::storage::is_not_regular_file(&e) => {
+            return unavailable(not_regular_blob(&manifest.hash));
+        }
         Err(e) => return unavailable(cannot_read_blob(&manifest.hash, &e)),
     };
     let sha256 = Sha256Hex::of(&png);
@@ -292,16 +300,13 @@ pub enum BlobState {
     Unusable(String),
 }
 
-/// The [`BlobState`] of the local blob of `hash` under `blobs_root`: one decision, one wording
-/// for `gleon diff` and `gleon status`.
+/// The [`BlobState`] of the local blob of `hash` under `blobs_root`, without reading it (for a
+/// screenshot decided by its manifest's hash alone), worded like [`baseline_of`].
 #[must_use]
 pub fn local_blob_state(blobs_root: &Path, hash: &ImageHash) -> BlobState {
     match std::fs::symlink_metadata(crate::storage::local_blob_path(blobs_root, hash)) {
         Ok(meta) if crate::storage::is_usable_blob_metadata(&meta) => BlobState::Usable,
-        Ok(_) => BlobState::Unusable(format!(
-            "the baseline blob {hash} in .gleon/blobs is no regular file: remove it and run \
-             `gleon pull`"
-        )),
+        Ok(_) => BlobState::Unusable(not_regular_blob(hash)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => BlobState::Missing,
         Err(e) => BlobState::Unusable(cannot_read_blob(hash, &e)),
     }
@@ -310,6 +315,14 @@ pub fn local_blob_state(blobs_root: &Path, hash: &ImageHash) -> BlobState {
 /// Why the blob of `hash` cannot be read.
 fn cannot_read_blob(hash: &ImageHash, e: &std::io::Error) -> String {
     format!("cannot read the baseline blob {hash}: {e}")
+}
+
+/// Why the blob of `hash` is no blob: a directory or a symbolic link where it belongs.
+fn not_regular_blob(hash: &ImageHash) -> String {
+    format!(
+        "the baseline blob {hash} in .gleon/blobs is no regular file: remove it and run \
+         `gleon pull`"
+    )
 }
 
 /// Returns `index`'s keys with no matching entry in `present` (by exact string match).
@@ -552,13 +565,18 @@ mod tests {
     /// Asserts that `baseline` is unavailable of `kind`, its message containing `needle`.
     fn assert_unavailable(baseline: &Baseline, kind: CaseErrorKind, needle: &str) {
         assert!(
-            matches!(
-                baseline,
-                Baseline::Unavailable { kind: found, message }
-                    if *found == kind && message.contains(needle)
-            ),
+            is_unavailable(baseline, kind, needle),
             "{baseline:?} should be {kind:?} with {needle:?}"
         );
+    }
+
+    /// Whether `baseline` is unavailable of `kind`, its message containing `needle`.
+    fn is_unavailable(baseline: &Baseline, kind: CaseErrorKind, needle: &str) -> bool {
+        matches!(
+            baseline,
+            Baseline::Unavailable { kind: found, message }
+                if *found == kind && message.contains(needle)
+        )
     }
 
     /// The one baseline decision of `gleon diff` and `gleon status`, on real fixtures.
@@ -655,6 +673,27 @@ mod tests {
         std::fs::remove_dir(&blob).unwrap();
         std::fs::write(&blob, &png).unwrap();
         assert_eq!(local_blob_state(blobs.path(), &hash), BlobState::Usable);
+
+        // Metadata that cannot be read (a directory without permission) is unusable, with why.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let blob_dir = blob.parent().unwrap();
+            let mode = |mode| {
+                std::fs::set_permissions(blob_dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            };
+            mode(0o000);
+            let is_root = std::fs::symlink_metadata(&blob).is_ok();
+            let unreadable = local_blob_state(blobs.path(), &hash);
+            mode(0o755);
+            // Permissions bind no superuser: then the blob stays usable.
+            assert!(
+                is_root
+                    || matches!(&unreadable, BlobState::Unusable(reason)
+                        if reason.contains("cannot read the baseline blob")),
+                "{unreadable:?}"
+            );
+        }
     }
 
     /// A blob that is a symbolic link is never followed, like `gleon pull` and `gleon push` never
@@ -711,19 +750,18 @@ mod tests {
         mode(&blob_dir, 0o755);
         mode(&blob, 0o644);
 
-        if is_root {
-            return; // Permissions bind no superuser: nothing to observe.
+        // Permissions bind no superuser: then nothing is refused.
+        for unreadable in [&unreadable_file, &unreadable_dir] {
+            assert!(
+                is_root
+                    || is_unavailable(
+                        unreadable,
+                        CaseErrorKind::Io,
+                        "cannot read the baseline blob"
+                    ),
+                "{unreadable:?}"
+            );
         }
-        assert_unavailable(
-            &unreadable_file,
-            CaseErrorKind::Io,
-            "cannot read the baseline blob",
-        );
-        assert_unavailable(
-            &unreadable_dir,
-            CaseErrorKind::Io,
-            "cannot read the baseline blob",
-        );
     }
 
     #[test]

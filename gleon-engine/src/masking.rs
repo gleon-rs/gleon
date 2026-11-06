@@ -376,28 +376,31 @@ mod tests {
         }
     }
 
-    /// The log `run` writes on this thread, formatted, and what it returns.
-    fn logged<T>(run: impl FnOnce() -> T) -> (T, String) {
-        #[derive(Clone, Default)]
-        struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Buffer {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
+    /// The WARN events `run` logs on this thread, counted, and what it returns.
+    fn warnings<T>(run: impl FnOnce() -> T) -> (T, usize) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        /// Counts the WARN events it sees.
+        struct Warnings(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let is_warning = *event.metadata().level() == tracing::Level::WARN;
+                self.0.fetch_add(usize::from(is_warning), Ordering::Relaxed);
             }
         }
-        let buffer = Buffer::default();
-        let writer = buffer.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(Warnings(Arc::clone(&count)));
         let value = tracing::subscriber::with_default(subscriber, run);
-        let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
-        (value, log)
+        (value, count.load(Ordering::Relaxed))
     }
 
     /// The zones of a diff of two sizes resolve alike, without a warning: the sizes are the
@@ -408,15 +411,11 @@ mod tests {
             zone(90, 0, Dimension::Pixels(20), Dimension::Pixels(100)),
             zone(0, 0, Dimension::Pixels(1), Dimension::Pixels(1)),
         ];
-        let ((regions, clamped), loud) = logged(|| resolve_zones(&zones, 100, 100));
-        assert_eq!(clamped, 1);
-        assert!(
-            loud.contains("Mask zone extends beyond image bounds"),
-            "{loud}"
-        );
-        let (quiet_regions, quiet) = logged(|| resolve_zones_quietly(&zones, 100, 100));
-        assert_eq!(quiet_regions, regions);
-        assert_eq!(quiet, "");
+        // One warning per zone reaching beyond the image.
+        let ((regions, clamped), loud) = warnings(|| resolve_zones(&zones, 100, 100));
+        assert_eq!((clamped, loud), (1, 1));
+        let (quiet_regions, quiet) = warnings(|| resolve_zones_quietly(&zones, 100, 100));
+        assert_eq!((quiet_regions, quiet), (regions, 0));
     }
 
     #[test]

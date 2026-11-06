@@ -510,7 +510,7 @@ fn test_status_names_why_screenshots_cannot_be_compared() {
     let staged = [
         ("broken", "baseline_gradient_100x100.png"),
         ("tampered", "baseline_100x100.png"),
-        ("unpulled", "diff_16px_corners_100x100.png"),
+        ("not_pulled", "diff_16px_corners_100x100.png"),
         ("uncached", "200x100.png"),
     ];
     for (name, fixture) in staged {
@@ -548,7 +548,7 @@ fn test_status_names_why_screenshots_cannot_be_compared() {
     // A changed screenshot whose blob was never pulled.
     fs::copy(
         fixtures.join("diff_rounded_corners_100x100.png"),
-        root.join("billing/unpulled.png"),
+        root.join("billing/not_pulled.png"),
     )
     .unwrap();
     fs::remove_file(blob_of("diff_16px_corners_100x100.png")).unwrap();
@@ -564,8 +564,8 @@ fn test_status_names_why_screenshots_cannot_be_compared() {
     assert_eq!(reasons.len(), 3, "{report:?}");
     for ((path, reason), (expected, needle)) in reasons.iter().zip([
         ("billing/broken.png", "candidate image: "),
+        ("billing/not_pulled.png", "run `gleon pull`"),
         ("billing/tampered.png", "does not match its hash"),
-        ("billing/unpulled.png", "run `gleon pull`"),
     ]) {
         assert_eq!(path, Path::new(expected));
         assert!(reason.contains(needle), "{expected}: {reason}");

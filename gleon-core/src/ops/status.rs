@@ -220,7 +220,7 @@ enum Class {
 ///
 /// # Errors
 /// Returns [`CoreError::Io`] if the screenshot cannot be read: the workspace is broken, not the
-/// screenshot's comparison (like in `gleon diff`).
+/// comparison of the screenshot (like in `gleon diff`).
 fn classify_test_case(
     case: &crate::scanner::TestCase,
     workspace_index: &crate::manifest::WorkspaceIndex,
@@ -738,8 +738,8 @@ mod tests {
             )
             .unwrap();
 
-        // Deliberately do NOT create the blob file: the manifest's sha256 names the screenshot's
-        // bytes, so it is the baseline, decided without the blob, like `gleon diff` decides it;
+        // Deliberately do NOT create the blob file: the manifest's sha256 names the screenshot
+        // bytes, so they are the baseline, decided without the blob, like `gleon diff` decides it;
         // the missing blob (`gleon push` needs it) is listed apart.
         let res = check_status(&ctx).unwrap();
         assert!(res.is_clean(), "{res:?}");
@@ -1078,9 +1078,10 @@ screenshots:
         assert_eq!(report, modified());
     }
 
-    /// Other bytes of the same pixels pass even an exact rule, like in `gleon diff`.
+    /// Other bytes of the same pixels pass even an exact rule, like in `gleon diff`: re-encoded,
+    /// the screenshot is within tolerance.
     #[test]
-    fn test_status_reencoded_png_with_the_same_pixels_is_clean() {
+    fn test_status_re_encoded_png_with_the_same_pixels_is_within_tolerance() {
         let white = image::RgbaImage::from_pixel(10, 10, WHITE);
         let (baseline, candidate) = (png(&white), png_rgb(&white));
         assert_ne!(baseline, candidate);
@@ -1183,7 +1184,7 @@ screenshots:
     }
 
     /// A blob that is a symbolic link is no blob (like for `gleon pull` and `gleon push`): never
-    /// followed, the screenshot is modified.
+    /// followed, so the changed screenshot cannot be compared.
     #[cfg(unix)]
     #[test]
     fn test_status_never_follows_a_symlinked_blob() {

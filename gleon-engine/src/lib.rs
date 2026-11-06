@@ -474,11 +474,17 @@ mod tests {
             assert_eq!(skipped, without_diff(rendered), "{mode:?}");
         }
         // Every outcome that renders a diff was exercised.
-        let ComparisonResult::<()>::Mismatch { .. } =
-            compare_images_as::<()>(&baseline, &changed, Mode::Ssim, &config, &regions)
-        else {
-            panic!("the change fails SSIM");
-        };
+        assert!(matches!(
+            compare_images_as::<()>(&baseline, &changed, Mode::Ssim, &config, &regions),
+            ComparisonResult::Mismatch { .. }
+        ));
+        // Over the SSIM analysis budget nothing is analyzed, with a diff kept or not.
+        let huge = ImageBuffer::from_pixel(4097, 4096, white);
+        let none = PixelRegions::NONE;
+        assert_eq!(
+            compare_images_as::<()>(&huge, &huge, Mode::Ssim, &config, &none),
+            without_diff(compare_images(&huge, &huge, Mode::Ssim, &config, &none))
+        );
         assert!(outcomes.contains(&std::mem::discriminant(
             &ComparisonResult::<()>::DimensionMismatch {
                 baseline_size: (0, 0),
