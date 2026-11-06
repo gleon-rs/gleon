@@ -9,7 +9,7 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use gleon_model::fs::Durability;
+use gleon_model::fs::{Durability, replace_atomically_with};
 use object_store::{ObjectStore, ObjectStoreExt, parse_url_opts, path::Path as ObjPath};
 use tracing::{debug, instrument, warn};
 
@@ -551,8 +551,9 @@ impl ObjectStoreAdapter {
     }
 
     /// Downloads a single blob from remote storage at `blob_key(hash)` to `dest_path` atomically
-    /// and durably ([`gleon_model::fs::write_atomically_with`]), streamed: a large blob never sits
-    /// in memory whole. The content is checked against its hash before it is kept, so a truncated
+    /// and durably in place of whatever is there ([`gleon_model::fs::replace_atomically_with`]: a
+    /// symbolic link is replaced, never written through), streamed: a large blob never sits in
+    /// memory whole. The content is checked against its hash before it is kept, so a truncated
     /// or wrong download never becomes a baseline; a blob of a scheme that cannot be checked
     /// (only `sha256` can) is not downloaded.
     ///
@@ -886,8 +887,8 @@ impl ObjectStoreAdapter {
     }
 }
 
-/// Streams `chunks` into `dest` atomically and durably, kept only if the stream ends and its
-/// content hashes to `expected` (sha256).
+/// Streams `chunks` into `dest` atomically and durably (a link there replaced, not followed),
+/// kept only if the stream ends and its content hashes to `expected` (sha256).
 async fn write_verified(
     mut chunks: impl futures::Stream<Item = object_store::Result<bytes::Bytes>> + Unpin,
     dest: &Path,
@@ -901,7 +902,7 @@ async fn write_verified(
     let (dest, expected) = (dest.to_path_buf(), expected.to_owned());
     let writer = tokio::task::spawn_blocking(move || {
         let mut actual = None;
-        let written = gleon_model::fs::write_atomically_with(&dest, Durability::Durable, |file| {
+        let written = replace_atomically_with(&dest, Durability::Durable, |file| {
             let mut digest = sha2::Sha256::new();
             while let Some(chunk) = chunks_rx.blocking_recv() {
                 let Some(chunk) = chunk else {

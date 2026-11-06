@@ -9,8 +9,11 @@
 use std::path::{Path, PathBuf};
 
 use gleon_engine::phash::compute_phash;
-use gleon_model::case::{CaseErrorKind, Sha256Hex};
-use sha2::{Digest, Sha256};
+use gleon_model::{
+    case::{CaseErrorKind, Sha256Hex},
+    compare,
+    tolerance::Tolerance,
+};
 
 use crate::{
     config::ConfigError,
@@ -221,7 +224,11 @@ pub enum Baseline {
 }
 
 /// The [`Baseline`] of the screenshot `candidate` (PNG bytes, `candidate_sha256` their SHA-256)
-/// tracked by `manifest`, whose blob lies under `blobs_root`.
+/// tracked by `manifest`, whose blob lies under `blobs_root`, compared under `tolerance`.
+///
+/// Identical bytes pass only as an image that can be compared under `tolerance` at all
+/// ([`compare::check_size`]): one over the SSIM budget is unavailable with the error `compare`
+/// gives where the bytes differ, so it fails on every platform alike.
 ///
 /// A blob counts only as a regular file, opened once without following a link
 /// ([`crate::storage::open_regular_file`], like for `gleon push`): a symbolic link or a directory
@@ -232,10 +239,17 @@ pub fn baseline_of(
     manifest: &SingleTestManifest,
     candidate: &[u8],
     candidate_sha256: &Sha256Hex,
+    tolerance: &Tolerance,
     blobs_root: &Path,
 ) -> Baseline {
     let identical = |blob_read| match SingleTestManifest::validate_image_bytes(candidate) {
-        Ok(()) => Baseline::Identical { blob_read },
+        Ok((width, height)) => match compare::check_size(tolerance, width, height) {
+            Ok(()) => Baseline::Identical { blob_read },
+            Err(e) => Baseline::Unavailable {
+                kind: e.kind(),
+                message: e.to_string(),
+            },
+        },
         Err(e) => Baseline::Unavailable {
             kind: CaseErrorKind::Image,
             message: format!("candidate image: {e}"),
@@ -388,24 +402,11 @@ pub fn require_storage(
     }
 }
 
-/// Decodes raw PNG bytes and computes its SHA-256 digest, perceptual hash, and dimensions.
-///
-/// Uses [`SingleTestManifest::load_image_from_bytes`] (not a bare decode) so callers get the
-/// same dimension/format validation regardless of call site.
-///
-/// # Errors
-/// Returns the underlying [`ManifestError`] if the bytes fail to decode or validate as a
-/// supported image.
-pub fn hash_and_measure(png_bytes: &[u8]) -> Result<(String, String, u32, u32), ManifestError> {
-    let dynamic_img = SingleTestManifest::load_image_from_bytes(png_bytes)?;
-    let width = dynamic_img.width();
-    let height = dynamic_img.height();
-    let rgba_img = dynamic_img.to_rgba8();
-
-    let phash_str = compute_phash(&rgba_img);
-    let sha256_hex = hex::encode(Sha256::digest(png_bytes));
-
-    Ok((sha256_hex, phash_str, width, height))
+/// The perceptual hash a manifest records for a decoded `image` (an RGBA8 one is moved, not
+/// copied).
+#[must_use]
+pub fn phash_of(image: image::DynamicImage) -> String {
+    compute_phash(&image.into_rgba8())
 }
 
 /// Builds a [`SingleTestManifest`] from a sha256 hex digest, dhash string, and dimensions.
@@ -536,6 +537,7 @@ pub fn create_new_file_with_content(
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
+    use sha2::Digest as _;
     use tempfile::tempdir;
 
     use super::*;
@@ -579,6 +581,32 @@ mod tests {
         )
     }
 
+    /// No size budget: the decisions of the blob alone.
+    const EXACT: Tolerance = Tolerance::Exact {};
+
+    /// Identical bytes pass only if the screenshot can be compared under `tolerance` at all: one
+    /// over the SSIM budget is unavailable with the error of `compare`, on every platform, not
+    /// just where the bytes happen to differ.
+    #[test]
+    fn test_baseline_of_checks_the_size_of_identical_screenshots() {
+        let blobs = tempdir().unwrap();
+        let (big, sha256) = fixture("ssim_budget_4097x4096.png");
+        let tracked = manifest("sha256", sha256.as_str());
+        let ssim = Tolerance::Ssim {
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
+        };
+        assert_unavailable(
+            &baseline_of(&tracked, &big, &sha256, &ssim, blobs.path()),
+            CaseErrorKind::Image,
+            "4097x4096 exceeds the SSIM analysis budget",
+        );
+        assert_eq!(
+            baseline_of(&tracked, &big, &sha256, &EXACT, blobs.path()),
+            Baseline::Identical { blob_read: false }
+        );
+    }
+
     /// The one baseline decision of `gleon diff` and `gleon status`, on real fixtures.
     #[test]
     fn test_baseline_of() {
@@ -591,7 +619,7 @@ mod tests {
         // The manifest's sha256 names the bytes: identical without any blob, which is not read.
         let tracked = manifest("sha256", sha256.as_str());
         assert_eq!(
-            baseline_of(&tracked, &png, &sha256, blobs.path()),
+            baseline_of(&tracked, &png, &sha256, &EXACT, blobs.path()),
             Baseline::Identical { blob_read: false }
         );
         // ... but bytes that are no valid image are never a pass.
@@ -601,6 +629,7 @@ mod tests {
                 &manifest("sha256", corrupt_sha256.as_str()),
                 &corrupt,
                 &corrupt_sha256,
+                &EXACT,
                 blobs.path(),
             ),
             CaseErrorKind::Image,
@@ -610,20 +639,20 @@ mod tests {
         // Other bytes: the blob, if it is there.
         let blob = blob_dir.join(sha256.as_str());
         assert_unavailable(
-            &baseline_of(&tracked, &other, &other_sha256, blobs.path()),
+            &baseline_of(&tracked, &other, &other_sha256, &EXACT, blobs.path()),
             CaseErrorKind::Io,
             "run `gleon pull`",
         );
         std::fs::create_dir(&blob).unwrap();
         assert_unavailable(
-            &baseline_of(&tracked, &other, &other_sha256, blobs.path()),
+            &baseline_of(&tracked, &other, &other_sha256, &EXACT, blobs.path()),
             CaseErrorKind::Io,
             "no regular file",
         );
         std::fs::remove_dir(&blob).unwrap();
         std::fs::write(&blob, &png).unwrap();
         assert_eq!(
-            baseline_of(&tracked, &other, &other_sha256, blobs.path()),
+            baseline_of(&tracked, &other, &other_sha256, &EXACT, blobs.path()),
             Baseline::Golden {
                 png: png.clone(),
                 sha256: sha256.clone(),
@@ -634,7 +663,7 @@ mod tests {
         // candidate itself, which would compare as equal.
         std::fs::write(&blob, &other).unwrap();
         assert_unavailable(
-            &baseline_of(&tracked, &other, &other_sha256, blobs.path()),
+            &baseline_of(&tracked, &other, &other_sha256, &EXACT, blobs.path()),
             CaseErrorKind::Io,
             "does not match its hash",
         );
@@ -645,11 +674,11 @@ mod tests {
         std::fs::write(blobs.path().join("sha512").join(&sha512), &png).unwrap();
         let tracked_sha512 = manifest("sha512", &sha512);
         assert_eq!(
-            baseline_of(&tracked_sha512, &png, &sha256, blobs.path()),
+            baseline_of(&tracked_sha512, &png, &sha256, &EXACT, blobs.path()),
             Baseline::Identical { blob_read: true }
         );
         assert_eq!(
-            baseline_of(&tracked_sha512, &other, &other_sha256, blobs.path()),
+            baseline_of(&tracked_sha512, &other, &other_sha256, &EXACT, blobs.path()),
             Baseline::Golden {
                 sha256: Sha256Hex::of(&png),
                 png,
@@ -715,6 +744,7 @@ mod tests {
                 &manifest("sha256", sha256.as_str()),
                 &other,
                 &other_sha256,
+                &EXACT,
                 blobs.path(),
             ),
             CaseErrorKind::Io,
@@ -743,10 +773,10 @@ mod tests {
         // A regular file without read permission: its metadata is fine, reading fails.
         mode(&blob, 0o000);
         let is_root = std::fs::read(&blob).is_ok();
-        let unreadable_file = baseline_of(&tracked, &other, &other_sha256, blobs.path());
+        let unreadable_file = baseline_of(&tracked, &other, &other_sha256, &EXACT, blobs.path());
         // A directory without permission: not even the blob's metadata can be read.
         mode(&blob_dir, 0o000);
-        let unreadable_dir = baseline_of(&tracked, &other, &other_sha256, blobs.path());
+        let unreadable_dir = baseline_of(&tracked, &other, &other_sha256, &EXACT, blobs.path());
         mode(&blob_dir, 0o755);
         mode(&blob, 0o644);
 
@@ -885,19 +915,17 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_and_measure_and_build_manifest_roundtrip() {
+    fn test_phash_of_and_build_manifest_roundtrip() {
         let png_bytes = include_bytes!("../../tests/fixtures/baseline_100x100.png");
-        let (sha256_hex, phash_str, width, height) = hash_and_measure(png_bytes).unwrap();
-        assert_eq!(width, 100);
-        assert_eq!(height, 100);
+        let sha256 = Sha256Hex::of(png_bytes);
+        let phash = phash_of(SingleTestManifest::load_image_from_bytes(png_bytes).unwrap());
 
-        let manifest = build_manifest(&sha256_hex, &phash_str, width, height).unwrap();
-        assert_eq!(manifest.hash.value(), sha256_hex);
-    }
-
-    #[test]
-    fn test_hash_and_measure_rejects_corrupt_bytes() {
-        assert!(hash_and_measure(b"not a png").is_err());
+        let manifest = build_manifest(sha256.as_str(), &phash, 100, 100).unwrap();
+        assert_eq!(manifest.hash.value(), sha256.as_str());
+        assert_eq!(
+            format!("{}:{}", manifest.phash.scheme(), manifest.phash.value()),
+            phash
+        );
     }
 
     #[test]

@@ -37,14 +37,20 @@ jobs:
           fallback: none
 
       - name: ✨ Check formatting
-        run: cargo fmt --all -- --check
+        # `fuzz/` is a workspace of its own, which `--all` leaves out.
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
 
       - name: 🔍 Lint with clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: 🔍 Verify action.yml readability
-        # TODO: Replace with real YAML parser or actionlint once available in CI
-        run: node -e "require('fs').readFileSync('action.yml', 'utf8')"
+      - name: 🔍 Validate action.yml
+        # yq (preinstalled on the runner image) fails on invalid YAML and on metadata that is no
+        # composite action with a string name and a string description.
+        run: >-
+          yq --exit-status '(.name | tag) == "!!str" and (.description | tag) == "!!str"
+          and .runs.using == "composite"' action.yml
 
       - name: 🛑 Run cargo-deny checks
         run: cargo deny check
@@ -94,6 +100,18 @@ jobs:
 
       - name: 🧪 Test the sequential engine (incl. the SSIM corpus)
         run: cargo test --locked -p gleon-engine
+
+      - name: 🎯 Lint the fuzz targets
+        # `fuzz/` is a workspace of its own, which no other step builds: its targets must compile
+        # against the crates and the Dependabot updates of `fuzz/`. Dependabot updates only the
+        # direct dependencies of `fuzz/`: a minimum the root workspace raises for a crate of the
+        # engine or the model reaches `fuzz/Cargo.lock` by hand. A stale lockfile is a warning,
+        # not a failure, which would turn the root workspace's Dependabot PRs red.
+        run: |
+          if ! cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null; then
+            echo "::warning file=fuzz/Cargo.lock::fuzz/Cargo.lock is behind the workspace: run 'cargo check' in fuzz/ and commit the lockfile"
+          fi
+          cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings
 
       - name: 🔬 Build the Miri sysroot
         # The sysroot is the toolchain's own std, built from a manifest cargo generates: its

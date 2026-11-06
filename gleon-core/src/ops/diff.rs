@@ -274,12 +274,17 @@ impl DiffRun<'_> {
             missing.message = Some("no baseline is staged for this screenshot".to_owned());
             return missing;
         };
-        let (golden, golden_sha256) =
-            match baseline_of(manifest, candidate, candidate_sha256, &self.blobs_root) {
-                Baseline::Identical { .. } => return Judged::new(CaseOutcome::Identical),
-                Baseline::Unavailable { kind, message } => return Judged::error(kind, message),
-                Baseline::Golden { png, sha256 } => (png, sha256),
-            };
+        let (golden, golden_sha256) = match baseline_of(
+            manifest,
+            candidate,
+            candidate_sha256,
+            tolerance,
+            &self.blobs_root,
+        ) {
+            Baseline::Identical { .. } => return Judged::new(CaseOutcome::Identical),
+            Baseline::Unavailable { kind, message } => return Judged::error(kind, message),
+            Baseline::Golden { png, sha256 } => (png, sha256),
+        };
         let candidate = compare::Candidate::Png(candidate);
         let judged = match compare::compare(&golden, candidate, tolerance, masks, None) {
             Ok(compare::Comparison { compared, .. }) => match compared {

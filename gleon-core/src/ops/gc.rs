@@ -180,33 +180,6 @@ pub fn partition_remote_blobs<S: std::hash::BuildHasher>(
     (orphans, protected_by_grace_period, referenced_blobs)
 }
 
-/// Backward-compatible wrapper filtering borrowed slices of blobs.
-#[must_use]
-pub fn filter_orphans_to_delete<'a, S: std::hash::BuildHasher>(
-    remote_blobs: &'a [RemoteBlobEntry],
-    referenced_hashes: &HashSet<ImageHash, S>,
-    now: DateTime<Utc>,
-    grace_period: Duration,
-) -> (Vec<&'a RemoteBlobEntry>, usize) {
-    let mut to_delete = Vec::new();
-    let mut protected_by_grace_period = 0;
-
-    for blob in remote_blobs {
-        if referenced_hashes.contains(&blob.hash) {
-            continue;
-        }
-
-        let age = now.signed_duration_since(blob.last_modified);
-        if age < grace_period {
-            protected_by_grace_period += 1;
-        } else {
-            to_delete.push(blob);
-        }
-    }
-
-    (to_delete, protected_by_grace_period)
-}
-
 #[derive(serde::Deserialize)]
 struct ManifestHashOnly {
     hash: ImageHash,

@@ -8,34 +8,75 @@
 
 use gleon_engine::{
     PixelOptions,
-    config::{DiffConfig, Mode},
+    config::{DiffConfig, MAX_COLOR_TOLERANCE, MAX_PIXEL_OPTION, Mode},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::config::RuleMode;
 
-/// A [`Tolerance`] parameter outside its range.
+/// A [`Tolerance`] parameter, or a `diff` key of `gleon.yaml`, outside its range.
+///
+/// The one check of each range: [`Tolerance::validate`] and [`TextTolerance::validate`] name
+/// their fields, a `gleon.yaml` rule names its keys when parsed.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum ToleranceError {
-    /// A ratio outside `[0, 1]`.
+    /// A ratio outside `[0, 1]` (NaN included).
     #[error("`{name}` must be between 0.0 and 1.0 (got {value})")]
     Ratio {
-        /// Parameter name (`max_diff_ratio`, `min_similarity` or `text_tolerance`).
+        /// Parameter name (`max_diff_ratio`, `min_similarity` or `text_tolerance`), or the
+        /// `gleon.yaml` key (`diff.threshold` or `diff.min_similarity`).
         name: &'static str,
         /// The rejected value.
         value: f64,
     },
     /// A `color_tolerance` outside `[0, 255]` (NaN included).
-    #[error("`color_tolerance` must be between 0 and 255 (got {0})")]
-    ColorTolerance(f64),
-    /// A pixel option above [`gleon_engine::config::MAX_PIXEL_OPTION`].
+    #[error("`{name}` must be between 0 and 255 (got {value})")]
+    ColorTolerance {
+        /// Parameter name (`color_tolerance`), or the `gleon.yaml` key (`diff.color_tolerance`).
+        name: &'static str,
+        /// The rejected value.
+        value: f64,
+    },
+    /// A pixel option above [`MAX_PIXEL_OPTION`].
     #[error("`{name}` must be between 0 and 254 (got {value})")]
     PixelOption {
-        /// Option name (`channel_tolerance` or `edge_threshold`).
+        /// Option name (`channel_tolerance` or `edge_threshold`), or the `gleon.yaml` key
+        /// (`diff.channel_tolerance` or `diff.edge_threshold`).
         name: &'static str,
         /// The rejected value.
         value: u8,
     },
+}
+
+impl ToleranceError {
+    /// `value` if it is a ratio within `[0, 1]`, else [`Self::Ratio`] naming it `name`.
+    pub(crate) fn check_ratio(name: &'static str, value: f64) -> Result<f64, Self> {
+        if (0.0..=1.0).contains(&value) {
+            Ok(value)
+        } else {
+            Err(Self::Ratio { name, value })
+        }
+    }
+
+    /// `value` if it is a `color_tolerance` within `[0, 255]`, else [`Self::ColorTolerance`]
+    /// naming it `name`.
+    pub(crate) fn check_color_tolerance(name: &'static str, value: f64) -> Result<f64, Self> {
+        if (0.0..=MAX_COLOR_TOLERANCE).contains(&value) {
+            Ok(value)
+        } else {
+            Err(Self::ColorTolerance { name, value })
+        }
+    }
+
+    /// `value` if it is a pixel option up to [`MAX_PIXEL_OPTION`], else [`Self::PixelOption`]
+    /// naming it `name`.
+    pub(crate) const fn check_pixel_option(name: &'static str, value: u8) -> Result<u8, Self> {
+        if value <= MAX_PIXEL_OPTION {
+            Ok(value)
+        } else {
+            Err(Self::PixelOption { name, value })
+        }
+    }
 }
 
 /// Comparison tolerance.
@@ -146,16 +187,11 @@ impl Tolerance {
     /// Checks value ranges that serde cannot express.
     ///
     /// # Errors
-    /// Returns [`ToleranceError::Ratio`] if a ratio is outside `[0, 1]` (NaN included) or
-    /// [`ToleranceError::ColorTolerance`] if `color_tolerance` is outside `[0, 255]`.
+    /// Returns [`ToleranceError::Ratio`] if a ratio is outside `[0, 1]` (NaN included),
+    /// [`ToleranceError::PixelOption`] if a pixel option is above
+    /// [`MAX_PIXEL_OPTION`] or [`ToleranceError::ColorTolerance`] if `color_tolerance` is outside
+    /// `[0, 255]`.
     pub fn validate(&self) -> Result<(), ToleranceError> {
-        let ratio = |name: &'static str, value: f64| {
-            if (0.0..=1.0).contains(&value) {
-                Ok(())
-            } else {
-                Err(ToleranceError::Ratio { name, value })
-            }
-        };
         match *self {
             Self::Exact {} => Ok(()),
             Self::Pixel {
@@ -163,28 +199,20 @@ impl Tolerance {
                 channel_tolerance,
                 edge_threshold,
                 ..
-            } => {
-                let option = |name, value| {
-                    if value <= gleon_engine::config::MAX_PIXEL_OPTION {
-                        Ok(())
-                    } else {
-                        Err(ToleranceError::PixelOption { name, value })
-                    }
-                };
-                ratio("max_diff_ratio", max_diff_ratio)
-                    .and_then(|()| option("channel_tolerance", channel_tolerance))
-                    .and_then(|()| option("edge_threshold", edge_threshold))
-            }
+            } => ToleranceError::check_ratio("max_diff_ratio", max_diff_ratio)
+                .and_then(|_| {
+                    ToleranceError::check_pixel_option("channel_tolerance", channel_tolerance)
+                })
+                .and_then(|_| ToleranceError::check_pixel_option("edge_threshold", edge_threshold))
+                .map(|_| ()),
             Self::Ssim {
                 min_similarity,
                 color_tolerance,
-            } => ratio("min_similarity", min_similarity).and_then(|()| {
-                if gleon_engine::config::is_valid_color_tolerance(color_tolerance) {
-                    Ok(())
-                } else {
-                    Err(ToleranceError::ColorTolerance(color_tolerance))
-                }
-            }),
+            } => ToleranceError::check_ratio("min_similarity", min_similarity)
+                .and_then(|_| {
+                    ToleranceError::check_color_tolerance("color_tolerance", color_tolerance)
+                })
+                .map(|_| ()),
         }
     }
 
@@ -297,14 +325,7 @@ impl TextTolerance {
     /// # Errors
     /// Returns [`ToleranceError::Ratio`] if the share is outside `[0, 1]` (NaN included).
     pub fn validate(&self) -> Result<(), ToleranceError> {
-        if (0.0..=1.0).contains(&self.0) {
-            Ok(())
-        } else {
-            Err(ToleranceError::Ratio {
-                name: "text_tolerance",
-                value: self.0,
-            })
-        }
+        ToleranceError::check_ratio("text_tolerance", self.0).map(|_| ())
     }
 
     /// `self` with `-0.0` as `0.0`, like [`Tolerance::without_negative_zero`].
@@ -389,9 +410,16 @@ mod tests {
         for bad in [-1.0, 255.5, f64::NAN, f64::INFINITY] {
             assert!(matches!(
                 ssim(0.8, bad).validate(),
-                Err(ToleranceError::ColorTolerance(_))
+                Err(ToleranceError::ColorTolerance {
+                    name: "color_tolerance",
+                    ..
+                })
             ));
         }
+        assert_eq!(
+            ssim(0.8, 300.0).validate().unwrap_err().to_string(),
+            "`color_tolerance` must be between 0 and 255 (got 300)"
+        );
         assert!(ssim(0.8, 255.0).validate().is_ok());
 
         for good in [0.0, 0.1, 1.0] {
@@ -427,6 +455,36 @@ mod tests {
         assert_eq!(
             options(0, 255).validate().unwrap_err().to_string(),
             "`edge_threshold` must be between 0 and 254 (got 255)"
+        );
+    }
+
+    /// One check per range, for `Tolerance` fields and `gleon.yaml` keys alike: the caller names
+    /// the value, a valid one passes through.
+    #[test]
+    fn test_checks_pass_the_value_through_and_name_the_caller_key() {
+        assert_eq!(ToleranceError::check_ratio("x", 0.5), Ok(0.5));
+        assert_eq!(
+            ToleranceError::check_ratio("diff.threshold", 1.5),
+            Err(ToleranceError::Ratio {
+                name: "diff.threshold",
+                value: 1.5
+            })
+        );
+        assert_eq!(ToleranceError::check_pixel_option("x", 254), Ok(254));
+        assert_eq!(
+            ToleranceError::check_pixel_option("diff.edge_threshold", 255),
+            Err(ToleranceError::PixelOption {
+                name: "diff.edge_threshold",
+                value: 255
+            })
+        );
+        assert_eq!(ToleranceError::check_color_tolerance("x", 255.0), Ok(255.0));
+        assert_eq!(
+            ToleranceError::check_color_tolerance("diff.color_tolerance", 255.5),
+            Err(ToleranceError::ColorTolerance {
+                name: "diff.color_tolerance",
+                value: 255.5
+            })
         );
     }
 

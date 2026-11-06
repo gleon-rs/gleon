@@ -6,7 +6,7 @@ use gleon_model::config::GleonConfig;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|text: &str| {
-    let version = semver::Version::new(0, 3, 0);
+    let version = semver::Version::new(0, 4, 0);
     let _ = GleonConfig::check_required_version(text, &version);
     if let Ok(config) = GleonConfig::from_yaml_str(text) {
         let rules = gleon_model::rules::RuleSet::new(&config);

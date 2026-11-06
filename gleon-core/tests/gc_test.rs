@@ -22,7 +22,7 @@ use gleon_core::{
     ops::{
         gc::{
             GcError, GcMode, GcOptions, RemoteBlobEntry, collect_all_referenced_hashes,
-            filter_orphans_to_delete, garbage_collect, partition_remote_blobs,
+            garbage_collect, partition_remote_blobs,
         },
         init_workspace,
     },
@@ -55,7 +55,7 @@ fn commit_test_tree<'a>(
 }
 
 #[test]
-fn test_filter_orphans_to_delete_grace_period() {
+fn test_partition_remote_blobs() {
     let now = Utc::now();
     let grace_period = Duration::hours(24);
 
@@ -82,56 +82,16 @@ fn test_filter_orphans_to_delete_grace_period() {
             size: 3000,
         },
         RemoteBlobEntry {
-            hash: h_future_orphan.clone(),
+            hash: h_future_orphan,
             // Clock skew: upload from a machine slightly ahead in time
             last_modified: now + Duration::hours(2),
             size: 4000,
         },
         RemoteBlobEntry {
             hash: h_boundary_orphan.clone(),
+            // Exactly the grace period old: no longer protected.
             last_modified: now - Duration::hours(24),
             size: 5000,
-        },
-    ];
-
-    let mut referenced = HashSet::new();
-    referenced.insert(h_ref);
-
-    let (to_delete, protected_count) =
-        filter_orphans_to_delete(&remote_blobs, &referenced, now, grace_period);
-
-    let deleted_hashes: Vec<ImageHash> = to_delete.iter().map(|b| b.hash.clone()).collect();
-
-    assert_eq!(protected_count, 2);
-    assert_eq!(deleted_hashes.len(), 2);
-    assert!(deleted_hashes.contains(&h_old_orphan));
-    assert!(deleted_hashes.contains(&h_boundary_orphan));
-}
-
-#[test]
-fn test_partition_remote_blobs() {
-    let now = Utc::now();
-    let grace_period = Duration::hours(24);
-
-    let h_ref = make_sha256('1');
-    let h_old_orphan = make_sha256('2');
-    let h_recent_orphan = make_sha256('3');
-
-    let remote_blobs = vec![
-        RemoteBlobEntry {
-            hash: h_ref.clone(),
-            last_modified: now - Duration::hours(100),
-            size: 1000,
-        },
-        RemoteBlobEntry {
-            hash: h_old_orphan.clone(),
-            last_modified: now - Duration::hours(48),
-            size: 2000,
-        },
-        RemoteBlobEntry {
-            hash: h_recent_orphan.clone(),
-            last_modified: now - Duration::hours(12),
-            size: 3000,
         },
     ];
 
@@ -142,9 +102,9 @@ fn test_partition_remote_blobs() {
         partition_remote_blobs(remote_blobs, &referenced, now, grace_period);
 
     assert_eq!(referenced_count, 1);
-    assert_eq!(protected_count, 1);
-    assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].hash, h_old_orphan);
+    assert_eq!(protected_count, 2);
+    let orphan_hashes: Vec<ImageHash> = orphans.into_iter().map(|b| b.hash).collect();
+    assert_eq!(orphan_hashes, [h_old_orphan, h_boundary_orphan]);
 }
 
 #[test]

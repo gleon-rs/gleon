@@ -159,17 +159,20 @@ impl SingleTestManifest {
         gleon_engine::decode::limited_reader(bytes).map_err(ManifestError::StdIo)
     }
 
-    /// Safely validates image dimensions from raw bytes before fully decoding the image.
-    /// This prevents OOM (Out Of Memory) `DoS` attacks from decompression bombs.
+    /// Safely validates image dimensions from raw bytes before fully decoding the image, and
+    /// returns them (width, height). This prevents OOM (Out Of Memory) `DoS` attacks from
+    /// decompression bombs.
     ///
     /// # Errors
     /// Returns [`ManifestError::StdIo`] if the format cannot be guessed, [`ManifestError::Image`]
     /// if the image header cannot be read, or [`ManifestError::Validation`] if the declared
     /// dimensions fail [`Self::validate_dimensions`].
-    pub fn validate_image_bytes(bytes: &[u8]) -> Result<(), ManifestError> {
+    pub fn validate_image_bytes(bytes: &[u8]) -> Result<(u32, u32), ManifestError> {
         Self::make_limited_reader(bytes)
             .and_then(|reader| reader.into_dimensions().map_err(ManifestError::Image))
-            .and_then(|(width, height)| Self::validate_dimensions(width, height))
+            .and_then(|(width, height)| {
+                Self::validate_dimensions(width, height).map(|()| (width, height))
+            })
     }
 
     /// Safely decodes an image with enforced resource and dimension limits.
@@ -178,8 +181,16 @@ impl SingleTestManifest {
     /// Returns [`ManifestError::Validation`] if [`Self::validate_image_bytes`] rejects the
     /// declared dimensions, or [`ManifestError::Image`] if the image cannot be decoded.
     pub fn load_image_from_bytes(bytes: &[u8]) -> Result<image::DynamicImage, ManifestError> {
-        Self::validate_image_bytes(bytes)
-            .and_then(|()| Self::make_limited_reader(bytes))
+        Self::validate_image_bytes(bytes).and_then(|_| Self::decode_validated(bytes))
+    }
+
+    /// Decodes `bytes` whose header [`Self::validate_image_bytes`] accepted, without reading the
+    /// header again (the reader keeps the decoder limits all the same).
+    ///
+    /// # Errors
+    /// Returns [`ManifestError::Image`] if the image cannot be decoded.
+    pub fn decode_validated(bytes: &[u8]) -> Result<image::DynamicImage, ManifestError> {
+        Self::make_limited_reader(bytes)
             .and_then(|reader| reader.decode().map_err(ManifestError::Image))
     }
 
@@ -291,7 +302,10 @@ mod tests {
             image::ImageFormat::Png,
         )
         .unwrap();
-        assert!(SingleTestManifest::validate_image_bytes(&img_bytes).is_ok());
+        assert_eq!(
+            SingleTestManifest::validate_image_bytes(&img_bytes).unwrap(),
+            (1, 1)
+        );
 
         let decoded = SingleTestManifest::load_image_from_bytes(&img_bytes).unwrap();
         assert_eq!(decoded.width(), 1);

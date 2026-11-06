@@ -27,7 +27,7 @@ use gleon_model::{
         CaseOutcome, CaseReport, CaseTimings, GoldenImage, Metrics, RegionMetrics, Source,
         TestInfo,
     },
-    compare::{Candidate, Compared, Comparison, Text},
+    compare::{Candidate, CompareError, Compared, Comparison, Text},
     fs::Durability,
     origin::Stamp,
     platform::{PlatformConfig, PlatformKey},
@@ -192,6 +192,17 @@ fn update(
 ) -> Finished {
     let path = request.golden_path;
     let current = fs::read(path).ok();
+    // Never recorded: every later comparison would fail it.
+    if let Some(error) = size_error(plan, candidate) {
+        let message = error.to_string();
+        return Call::new(session, request, plan, current.as_deref(), started).error(
+            Failure::new(
+                error.kind().into(),
+                text::cannot_record(request.golden_uri, &message),
+            ),
+            message,
+        );
+    }
     if let Some(golden) = current.as_deref() {
         let call = Call::new(session, request, plan, Some(golden), started);
         match call.kept(golden, candidate) {
@@ -277,9 +288,20 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
             || call.missing_message(),
         ),
         // Identical encodings are identical pixels (a stamp aside): no decoding at all, so the
-        // masks are checked against the size in the PNG header.
+        // size and the masks are checked against the size in the PNG header. An image the
+        // tolerance cannot compare fails as other bytes would, on every platform alike.
         Ok(Some(golden)) if matches!(request.candidate, Candidate::Png(png) if call.is_image(golden, png)) =>
         {
+            if let Some(error) = size_error(plan, golden) {
+                let message = error.to_string();
+                return call.error(
+                    Failure::new(
+                        error.kind().into(),
+                        text::could_not_compare(request.golden_uri, &message),
+                    ),
+                    message,
+                );
+            }
             let clamped = case::png_size(golden).map_or(0, |(width, height)| {
                 clamped_zones(&plan.masks, width, height)
             });
@@ -306,6 +328,14 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
     finished
         .warn(unused_text)
         .warn(call.non_canonical_warning())
+}
+
+/// Why no comparison under the tolerance of `plan` could use the PNG `png` (its size read from
+/// the header, [`gleon_model::compare::check_size`]); `None` for one that fits, or no PNG.
+fn size_error(plan: &Plan, png: &[u8]) -> Option<CompareError> {
+    case::png_size(png).and_then(|(width, height)| {
+        gleon_model::compare::check_size(&plan.tolerance, width, height).err()
+    })
 }
 
 /// The golden at `path`; `None` when it does not exist.
@@ -2997,6 +3027,54 @@ metrics:
             );
             assert_eq!(case.golden.sha256, None);
         }
+    }
+
+    /// An image over the SSIM analysis budget can never be compared under SSIM: update mode does
+    /// not record it (the golden stays), and identical bytes fail like any other bytes would, so
+    /// the verdict is the same on every platform (real fixture).
+    #[test]
+    fn test_images_over_the_ssim_budget_are_neither_recorded_nor_identical() {
+        let big = include_bytes!("../tests/fixtures/ssim_budget_4097x4096.png");
+        let ssim = Some(Tolerance::Ssim {
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
+        });
+        let fixture = Fixture::new(Some(METRICS));
+        let session = fixture.session(None);
+
+        let refused = fixture.run_with(&session, Mode::Update, big, ssim, vec![]);
+        assert_eq!(
+            (refused.verdict, refused.error_kind),
+            (Verdict::Error, ErrorKind::Image)
+        );
+        assert!(
+            refused.message.starts_with(
+                "Golden \"goldens/a.png\": gleon cannot record it: 4097x4096 exceeds the SSIM \
+                 analysis budget"
+            ),
+            "{}",
+            refused.message
+        );
+        assert_eq!(fs::read(&fixture.golden).unwrap(), png(4, 4, false));
+        assert_eq!(fixture.case().outcome, CaseOutcome::Error);
+
+        fs::write(&fixture.golden, big).unwrap();
+        let identical = fixture.run_with(&session, Mode::Compare, big, ssim, vec![]);
+        assert_eq!(
+            (identical.verdict, identical.error_kind),
+            (Verdict::Error, ErrorKind::Image)
+        );
+        assert!(
+            identical.message.starts_with(
+                "Golden \"goldens/a.png\": gleon could not compare: 4097x4096 exceeds the SSIM \
+                 analysis budget"
+            ),
+            "{}",
+            identical.message
+        );
+        // Exact has no such budget: the same bytes stay identical.
+        let exact = fixture.run_with(&session, Mode::Compare, big, None, vec![]);
+        assert_eq!(exact.verdict, Verdict::Identical);
     }
 
     #[test]

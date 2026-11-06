@@ -112,7 +112,8 @@ pub fn write_or_remove(
 
 /// Writes the output of `write` to `path` atomically, creating missing parent directories.
 ///
-/// A symbolic link at `path` is written through (its target is replaced, the link stays). On
+/// A symbolic link at `path` is written through (its target is replaced, the link stays; a
+/// cache that never trusts a link uses [`replace_atomically_with`]). On
 /// Unix the file gets the permission bits of the file it replaces, or `0644` for a new one (a
 /// temporary file alone would be `0600`, while these files are committed or read by other users).
 /// A failed write removes the temporary file.
@@ -125,8 +126,35 @@ pub fn write_atomically_with(
     durability: Durability,
     write: impl FnOnce(&mut BufWriter<&fs::File>) -> io::Result<()>,
 ) -> io::Result<()> {
-    let target = resolve_link(path);
-    let parent = parent(&target)?;
+    persist_with(&resolve_link(path), durability, write)
+}
+
+/// Writes the output of `write` to `path` atomically in place of whatever entry is there,
+/// creating missing parent directories: for caches that never trust a link (blobs).
+///
+/// Like [`write_atomically_with`], but a symbolic link at `path` is never followed: the rename
+/// replaces the link itself, so the bytes never land at its target, and a reader sees the old
+/// entry or the new file, never none. A new file gets the mode of a new one (`0644` on Unix),
+/// not the mode of a link's target.
+///
+/// # Errors
+/// As [`write_atomically_with`]; a directory at `path` is an error and stays.
+pub fn replace_atomically_with(
+    path: &Path,
+    durability: Durability,
+    write: impl FnOnce(&mut BufWriter<&fs::File>) -> io::Result<()>,
+) -> io::Result<()> {
+    persist_with(path, durability, write)
+}
+
+/// Writes the output of `write` to a temporary file next to `target` and renames it over
+/// `target`, which the rename never follows if it is a link.
+fn persist_with(
+    target: &Path,
+    durability: Durability,
+    write: impl FnOnce(&mut BufWriter<&fs::File>) -> io::Result<()>,
+) -> io::Result<()> {
+    let parent = parent(target)?;
     let file_name = target
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid file name"))?;
@@ -140,11 +168,11 @@ pub fn write_atomically_with(
         write(&mut writer)?;
         writer.flush()?;
     }
-    set_mode(&temp, &target)?;
+    set_mode(&temp, target)?;
     if durability == Durability::Durable {
         temp.as_file().sync_all()?;
     }
-    temp.persist(&target).map_err(|e| e.error)?;
+    temp.persist(target).map_err(|e| e.error)?;
     if durability == Durability::Durable {
         sync_dir(parent);
     }
@@ -226,9 +254,13 @@ fn set_mode(temp: &tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
     const NEW_FILE_MODE: u32 = 0o644;
-    let mode = fs::metadata(target).map_or(NEW_FILE_MODE, |existing| {
-        existing.permissions().mode() & 0o7777
-    });
+    // The mode of the file replaced; never that of a link's target (a replacement of a link).
+    let mode = fs::symlink_metadata(target)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .map_or(NEW_FILE_MODE, |existing| {
+            existing.permissions().mode() & 0o7777
+        });
     temp.as_file()
         .set_permissions(fs::Permissions::from_mode(mode))
 }
@@ -376,6 +408,34 @@ mod tests {
         assert_eq!(fs::read(dir.path().join("shared/b.png")).unwrap(), b"new");
     }
 
+    /// A replacement puts the file in place of a symbolic link: the link's target keeps its bytes
+    /// and its mode, and the file gets the mode of a new one.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_replacement_replaces_a_symbolic_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("outside");
+        fs::write(&target, b"old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("blob");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        replace_atomically_with(&link, Durability::Durable, |writer| {
+            writer.write_all(b"new")
+        })
+        .unwrap();
+        let meta = fs::symlink_metadata(&link).unwrap();
+        assert!(meta.is_file(), "{meta:?}");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o644);
+        assert_eq!(fs::read(&link).unwrap(), b"new");
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+    }
+
     #[test]
     fn test_a_target_that_cannot_be_replaced() {
         let dir = tempfile::tempdir().unwrap();
@@ -383,6 +443,10 @@ mod tests {
         let target = dir.path().join("busy");
         fs::create_dir_all(target.join("inside")).unwrap();
         assert!(write_atomically(&target, b"x", Durability::Atomic).is_err());
+        assert!(
+            replace_atomically_with(&target, Durability::Atomic, |writer| writer.write_all(b"x"))
+                .is_err()
+        );
         assert_eq!(
             entries(dir.path()),
             ["busy"],

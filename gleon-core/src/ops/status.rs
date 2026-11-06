@@ -239,7 +239,13 @@ fn classify_test_case(
 
     let candidate = std::fs::read(&case.image.absolute_path).map_err(CoreError::Io)?;
     let candidate_sha256 = Sha256Hex::of(&candidate);
-    let golden = match baseline_of(manifest, &candidate, &candidate_sha256, blobs_root) {
+    let golden = match baseline_of(
+        manifest,
+        &candidate,
+        &candidate_sha256,
+        &case.rule.tolerance,
+        blobs_root,
+    ) {
         // Decided by the manifest's sha256 alone: the blob may be missing or broken in the local
         // cache.
         Baseline::Identical { blob_read: false } => {
@@ -876,7 +882,7 @@ screenshots:
         let baseline_path = temp.path().join("baseline.png");
         baseline_img.save(&baseline_path).unwrap();
         let baseline_bytes = std::fs::read(&baseline_path).unwrap();
-        let (baseline_hash, ..) = crate::ops::common::hash_and_measure(&baseline_bytes).unwrap();
+        let baseline_hash = hex::encode(sha2::Sha256::digest(&baseline_bytes));
 
         // Save blob in blobs_dir
         std::fs::write(blobs_dir.join(&baseline_hash), &baseline_bytes).unwrap();
@@ -1129,6 +1135,13 @@ screenshots:
         let big = image::RgbaImage::from_pixel(4097, 4096, image::Rgba([255, 0, 0, 255]));
         let report = status_of(&png(&big), &png_rgb(&big), ssim);
         assert_uncomparable(&report, "test.png", "SSIM analysis budget");
+        // The same bytes as the baseline cannot be compared either (real fixture).
+        let identical = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ssim_budget_4097x4096.png"),
+        )
+        .unwrap();
+        let report = status_of(&identical, &identical, ssim);
+        assert_uncomparable(&report, "test.png", "SSIM analysis budget");
     }
 
     /// A manifest of another hash scheme: equal bytes are unchanged, other bytes are judged
@@ -1202,7 +1215,7 @@ screenshots:
         std::fs::create_dir_all(&blobs_dir).unwrap();
         let (baseline, _) = white_and_one_black_pixel();
         let white = image::RgbaImage::from_pixel(10, 10, WHITE);
-        let (hash, ..) = crate::ops::common::hash_and_measure(&baseline).unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(&baseline));
         // The link points at the very same pixels: following it would list the screenshot as
         // within tolerance.
         let elsewhere = temp.path().join("elsewhere.bin");

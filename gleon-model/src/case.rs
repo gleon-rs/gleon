@@ -329,6 +329,24 @@ impl Sha256Hex {
         Self::from_digest(&Sha256::digest(bytes).into())
     }
 
+    /// The digest of everything `reader` yields, read through a bounded buffer: a large file is
+    /// never held in memory whole.
+    ///
+    /// # Errors
+    /// Returns the I/O error of a read; an interrupted read is retried.
+    pub fn of_reader(mut reader: impl io::Read) -> io::Result<Self> {
+        let mut digest = Sha256::new();
+        let mut buffer = [0; 8 * 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return Ok(Self::from_digest(&digest.finalize().into())),
+                Ok(read) => digest.update(&buffer[..read]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// The lowercase hex digest.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -2181,6 +2199,39 @@ mod tests {
                 None
             ),
             None
+        );
+    }
+
+    /// Read through a bounded buffer, the digest is that of the whole content: across many reads
+    /// and past an interrupted one; any other failed read is the error.
+    #[test]
+    fn test_sha256_of_a_reader() {
+        /// Fails its first read with an error of the kind it holds, then reads its bytes.
+        struct FirstReadFails(Option<io::ErrorKind>, &'static [u8]);
+
+        impl io::Read for FirstReadFails {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                match self.0.take() {
+                    Some(kind) => Err(kind.into()),
+                    None => self.1.read(buf),
+                }
+            }
+        }
+
+        let content: Vec<u8> = (0..100_000_u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(
+            Sha256Hex::of_reader(content.as_slice()).unwrap(),
+            Sha256Hex::of(&content)
+        );
+        let interrupted = FirstReadFails(Some(io::ErrorKind::Interrupted), b"png");
+        assert_eq!(
+            Sha256Hex::of_reader(interrupted).unwrap(),
+            Sha256Hex::of(b"png")
+        );
+        let denied = FirstReadFails(Some(io::ErrorKind::PermissionDenied), b"png");
+        assert_eq!(
+            Sha256Hex::of_reader(denied).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
         );
     }
 

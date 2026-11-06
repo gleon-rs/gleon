@@ -16,8 +16,11 @@ use std::{
 
 use gleon_model::{
     case::{self, CaseOutcome, CaseReport, RunId, Sha256Hex},
+    compare::{self, CompareError},
     fs::Durability,
     platform::{PlatformConfig, PlatformKey},
+    rules::{RuleSet, Selection},
+    tolerance::Tolerance,
 };
 use rayon::prelude::*;
 use thiserror::Error;
@@ -28,7 +31,7 @@ use crate::{
     context::ResolvedContext,
     manifest::{ManifestError, SingleTestManifest, WorkspaceIndex},
     ops::{
-        common::{CoreError, build_manifest, ensure_initialized},
+        common::{CoreError, build_manifest, ensure_initialized, phash_of},
         diff::CLI_TOOL,
     },
     paths::GleonPaths,
@@ -124,9 +127,55 @@ fn read_candidate(candidate: &Candidate<'_>) -> Result<Vec<u8>, ApproveError> {
     Ok(bytes)
 }
 
-/// Reads and checks the candidate: a valid PNG for a golden file, decoded and measured for a
-/// manifest.
-fn check<'a>(candidate: &'a Candidate<'a>) -> Result<Approval<'a>, ApproveError> {
+/// Writes `blob`, the blob of `candidate` (read again), unless the cache holds it already.
+///
+/// Blobs are named by their content and written atomically: one that exists is this one (cases
+/// often share a candidate), and a durable write costs an fsync. A symbolic link is no blob
+/// (`storage::is_usable_blob`): it is replaced, never written through.
+fn save_candidate_blob(blob: &Path, candidate: &Candidate<'_>) -> Result<(), ApproveError> {
+    if crate::storage::is_usable_blob(blob) {
+        return Ok(());
+    }
+    crate::storage::save_blob(blob, &read_candidate(candidate)?).map_err(|source| {
+        ApproveError::Io {
+            path: blob.to_path_buf(),
+            source,
+        }
+    })
+}
+
+/// The tolerances the baseline of `report` at `target` may be compared under, each of which it
+/// must fit ([`compare::check_size`]).
+///
+/// `gleon diff` compares a manifest under the rule of the workspace (`rules`, its config) for the
+/// screenshot alone: once no rule selects it, nothing compares it. An integration compares a
+/// golden file under the tolerance of its test call, else the rule's, else exact: the case
+/// recorded the one its run used (a call's is never in the config), the rule may have changed
+/// since. Without a config the recorded tolerance is all there is.
+fn baseline_tolerances(
+    rules: Option<&RuleSet>,
+    target: &Target,
+    report: &CaseReport,
+) -> [Option<Tolerance>; 2] {
+    let recorded = Some(report.comparison.tolerance);
+    let of_rule = rules.map(|rules| match rules.select(&report.golden.path) {
+        Selection::Rule(index) => Some(rules.rule(index).tolerance),
+        Selection::Excluded | Selection::Unmatched => None,
+    });
+    match (target, of_rule) {
+        (Target::Manifest { .. } | Target::File(_), None) => [recorded, None],
+        (Target::Manifest { .. }, Some(of_rule)) => [of_rule, None],
+        (Target::File(_), Some(of_rule)) => [recorded, of_rule],
+    }
+}
+
+/// Reads and checks the candidate: an image the tolerances of its baseline can compare (from the
+/// header, before the pixels are decoded), decoded in full (a golden file or blob must hold a
+/// whole image, not a valid header alone), and measured for a manifest.
+fn check<'a>(
+    candidate: &'a Candidate<'a>,
+    rules: Option<&RuleSet>,
+) -> Result<Approval<'a>, ApproveError> {
     let bytes = read_candidate(candidate)?;
     let decode_error = |e| match e {
         ManifestError::Image(source) => ApproveError::ImageDecode {
@@ -135,21 +184,25 @@ fn check<'a>(candidate: &'a Candidate<'a>) -> Result<Approval<'a>, ApproveError>
         },
         other => CoreError::Manifest(other).into(),
     };
+    let (width, height) = SingleTestManifest::validate_image_bytes(&bytes).map_err(decode_error)?;
+    baseline_tolerances(rules, &candidate.target, candidate.report)
+        .into_iter()
+        .flatten()
+        .try_for_each(|tolerance| compare::check_size(&tolerance, width, height))
+        .map_err(|source| ApproveError::Uncomparable {
+            name: candidate.report.name.clone(),
+            source,
+        })?;
+    let image = SingleTestManifest::decode_validated(&bytes).map_err(decode_error)?;
     Ok(match &candidate.target {
-        Target::File(golden) => {
-            SingleTestManifest::validate_image_bytes(&bytes).map_err(decode_error)?;
-            Approval::File { candidate, golden }
-        }
-        Target::Manifest { platform_key, .. } => {
-            let image = SingleTestManifest::load_image_from_bytes(&bytes).map_err(decode_error)?;
-            Approval::Manifest {
-                candidate,
-                platform_key,
-                phash: gleon_engine::phash::compute_phash(&image.to_rgba8()),
-                width: image.width(),
-                height: image.height(),
-            }
-        }
+        Target::File(golden) => Approval::File { candidate, golden },
+        Target::Manifest { platform_key, .. } => Approval::Manifest {
+            candidate,
+            platform_key,
+            phash: phash_of(image),
+            width,
+            height,
+        },
     })
 }
 
@@ -248,6 +301,18 @@ pub enum ApproveError {
         size: u64,
         /// The maximum allowed size in bytes.
         limit: u64,
+    },
+
+    /// A candidate no comparison under the tolerance of its baseline could use
+    /// ([`compare::check_size`]: under SSIM larger than the analysis budget), which `gleon diff`
+    /// or the integration would fail.
+    #[error("'{name}' cannot be compared under its tolerance: {source}")]
+    Uncomparable {
+        /// The test name of the case.
+        name: String,
+        /// Why it cannot be compared.
+        #[source]
+        source: CompareError,
     },
 
     /// Error decoding image file.
@@ -642,7 +707,9 @@ fn nothing_to_approve(
 /// Returns an error if the workspace is not initialized, if one of `runs` is no run directory,
 /// if the runs have no failed case with a candidate image (after filtering), if the case reports
 /// or a candidate cannot be read, if a candidate is not the one its report describes, exceeds the
-/// maximum size or fails to decode, if a golden path is not one approve writes, if two cases (of
+/// maximum size or fails to decode, if no comparison under the tolerances of its baseline could
+/// use a candidate ([`ApproveError::Uncomparable`]), if a golden path is not one approve writes,
+/// if two cases (of
 /// two platforms or two runs) offer different candidates for one baseline, or if writing
 /// manifests, blobs or goldens fails.
 pub fn approve_workspace(
@@ -681,9 +748,10 @@ pub fn approve_workspace(
 
     // Checked (and decoded) in parallel, one image in memory per thread; nothing is written
     // unless every candidate is fine.
+    let rules = context.config.as_ref().map(RuleSet::new);
     let mut approvals = candidates
         .par_iter()
-        .map(check)
+        .map(|candidate| check(candidate, rules.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
     let fallback = context.fallback_platform_key.as_ref();
     approvals.sort_by_key(|approval| write_order(approval, fallback));
@@ -722,12 +790,7 @@ pub fn approve_workspace(
         };
         let report = candidate.report;
         let sha256_hex = candidate.sha256.as_str();
-        let blob = blobs_dir.join(sha256_hex);
-        // Blobs are named by their content and written atomically: one that exists is this one
-        // (cases often share a candidate), and a durable write costs an fsync.
-        if !blob.is_file() {
-            write(&blob, &read_candidate(candidate)?)?;
-        }
+        save_candidate_blob(&blobs_dir.join(sha256_hex), candidate)?;
 
         let new_manifest = build_manifest(sha256_hex, &phash, width, height)?;
         let matches_fallback = match fallback.filter(|&fallback| fallback != platform_key) {
@@ -780,7 +843,7 @@ pub fn approve_workspace(
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
-    use gleon_model::platform::PlatformFields;
+    use gleon_model::{compare::CompareError, platform::PlatformFields, tolerance::Tolerance};
     use sha2::{Digest, Sha256};
 
     use super::*;
@@ -936,6 +999,20 @@ mod tests {
                 .to_string()
                 .contains("Image decode error for 'bar.png'")
         );
+
+        let too_large = ApproveError::Uncomparable {
+            name: "ssim/a".to_owned(),
+            source: CompareError::TooLarge {
+                width: 4097,
+                height: 4096,
+            },
+        };
+        assert_eq!(
+            too_large.to_string(),
+            "'ssim/a' cannot be compared under its tolerance: 4097x4096 exceeds the SSIM \
+             analysis budget of 16777216 pixels; use exact or pixel mode or a smaller capture"
+        );
+        assert!(std::error::Error::source(&too_large).is_some());
     }
 
     #[test]
@@ -1083,6 +1160,186 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    /// Whether approving `ctx`'s run fails with the SSIM budget of the case `ssim/a`
+    /// (4097x4096), and wrote nothing.
+    fn refuses_over_budget(ctx: &ResolvedContext) -> bool {
+        let refused = matches!(
+            approve_workspace(ctx, &[], &[], None),
+            Err(ApproveError::Uncomparable {
+                ref name,
+                source: CompareError::TooLarge {
+                    width: 4097,
+                    height: 4096,
+                },
+            }) if name == "ssim/a"
+        );
+        refused
+            && !ctx.base_dir.join(".gleon/manifests").exists()
+            && !ctx.base_dir.join(".gleon/blobs").exists()
+    }
+
+    /// A candidate over the SSIM analysis budget would become a baseline no comparison can use
+    /// (`gleon diff` fails it): refused from its header, nothing written. Without a config the
+    /// case's own tolerance decides.
+    #[test]
+    fn test_approve_refuses_an_ssim_candidate_over_the_analysis_budget() {
+        let (_temp, ctx) = workspace();
+        let latest = runs_latest(&ctx);
+        let mut case = failed_case(
+            &latest,
+            "ssim/a",
+            CLI_TOOL,
+            CaseOutcome::DimensionMismatch,
+            include_bytes!("../../tests/fixtures/ssim_budget_4097x4096.png"),
+        );
+        case.comparison.tolerance = Tolerance::Ssim {
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
+        };
+        write_case(&latest, &case);
+        assert!(refuses_over_budget(&ctx));
+    }
+
+    /// The tolerances a baseline must fit: `gleon diff` compares a manifest under the rule of its
+    /// screenshot alone (none, once no rule selects it), an integration compares a golden file
+    /// under its test call's tolerance (recorded in the case) or the rule's; without a config the
+    /// recorded one is all there is.
+    #[test]
+    fn test_baseline_tolerances_follow_who_compares_the_baseline() {
+        let ssim = Tolerance::Ssim {
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
+        };
+        let mut report = report("shots/a", CaseOutcome::Missing);
+        report.golden.path = "shots/a.png".to_owned();
+        report.comparison.tolerance = ssim;
+        let config = |yaml: &str| RuleSet::new(&GleonConfig::from_yaml_str(yaml).unwrap());
+        let ruled = config("screenshots:\n  - include: 'shots/*.png'\n    mode: exact\n");
+        let excluded = config(
+            "exclude: ['shots/a.png']\nscreenshots:\n  - include: 'shots/*.png'\n    mode: exact\n",
+        );
+        let manifest = Target::Manifest {
+            platform_key: PlatformKey::host().clone(),
+            name: "shots/a".to_owned(),
+        };
+        let file = Target::File(PathBuf::from("shots/a.png"));
+        let exact = Tolerance::Exact {};
+        for (rules, target, expected) in [
+            (None, &manifest, [Some(ssim), None]),
+            (Some(&ruled), &manifest, [Some(exact), None]),
+            (Some(&excluded), &manifest, [None, None]),
+            (None, &file, [Some(ssim), None]),
+            (Some(&ruled), &file, [Some(ssim), Some(exact)]),
+            (Some(&excluded), &file, [Some(ssim), None]),
+        ] {
+            assert_eq!(baseline_tolerances(rules, target, &report), expected);
+        }
+    }
+
+    /// An integration's golden file is checked like a manifest: an image no comparison under its
+    /// tolerance could use, or a candidate with a valid header but a broken body, is refused and
+    /// the golden stays as it is.
+    #[test]
+    fn test_approve_checks_integration_goldens_before_writing() {
+        let (temp, ctx) = workspace();
+        let latest = runs_latest(&ctx);
+        let golden = temp.path().join("goldens/g.png");
+        let mut case = failed_case(
+            &latest,
+            "g",
+            "gleon_flutter",
+            CaseOutcome::Missing,
+            include_bytes!("../../tests/fixtures/ssim_budget_4097x4096.png"),
+        );
+        case.comparison.tolerance = Tolerance::Ssim {
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
+        };
+        write_case(&latest, &case);
+        let err = approve_workspace(&ctx, &[], &[], None).unwrap_err();
+        assert!(
+            matches!(err, ApproveError::Uncomparable { ref name, .. } if name == "g"),
+            "{err}"
+        );
+        assert!(!golden.exists());
+
+        failed_case(
+            &latest,
+            "g",
+            "gleon_flutter",
+            CaseOutcome::Missing,
+            include_bytes!("../../tests/fixtures/truncated_100x100.png"),
+        );
+        let err = approve_workspace(&ctx, &[], &[], None).unwrap_err();
+        assert!(
+            matches!(err, ApproveError::ImageDecode { ref path, .. } if path.ends_with("g/candidate.png")),
+            "{err}"
+        );
+        assert!(!golden.exists());
+    }
+
+    /// A directory where the blob goes is neither used nor replaced: the error names its path.
+    #[test]
+    fn test_approve_reports_a_directory_in_place_of_the_blob() {
+        let (temp, ctx) = workspace();
+        let latest = runs_latest(&ctx);
+        failed_case(&latest, "a", CLI_TOOL, CaseOutcome::Mismatch, &png(1));
+        let sha = hex::encode(Sha256::digest(png(1)));
+        let blob = temp.path().join(".gleon/blobs/sha256").join(&sha);
+        std::fs::create_dir_all(&blob).unwrap();
+
+        let err = approve_workspace(&ctx, &[], &[], None).unwrap_err();
+        assert!(
+            matches!(err, ApproveError::Io { ref path, .. } if path.ends_with(&sha)),
+            "{err}"
+        );
+        assert!(blob.is_dir());
+    }
+
+    /// A blob that is a symbolic link is no blob (`storage::is_usable_blob`): approving writes the
+    /// candidate's bytes in its place instead of trusting the link.
+    #[cfg(unix)]
+    #[test]
+    fn test_approve_replaces_a_linked_blob() {
+        let (temp, ctx) = workspace();
+        let latest = runs_latest(&ctx);
+        failed_case(&latest, "a", CLI_TOOL, CaseOutcome::Mismatch, &png(1));
+        let blobs = temp.path().join(".gleon/blobs/sha256");
+        std::fs::create_dir_all(&blobs).unwrap();
+        let elsewhere = temp.path().join("elsewhere.png");
+        std::fs::write(&elsewhere, png(1)).unwrap();
+        let blob = blobs.join(hex::encode(Sha256::digest(png(1))));
+        std::os::unix::fs::symlink(&elsewhere, &blob).unwrap();
+
+        approve_workspace(&ctx, &[], &[], None).unwrap();
+        let meta = std::fs::symlink_metadata(&blob).unwrap();
+        assert!(meta.is_file() && !meta.file_type().is_symlink());
+        assert_eq!(std::fs::read(&blob).unwrap(), png(1));
+    }
+
+    /// The baseline is compared under the rule of the workspace for its screenshot, not the
+    /// tolerance the run used: a rule switched to SSIM after the run refuses the candidate.
+    #[test]
+    fn test_approve_checks_the_budget_under_the_current_rule() {
+        let (_temp, mut ctx) = workspace();
+        let latest = runs_latest(&ctx);
+        // Recorded under `exact`.
+        failed_case(
+            &latest,
+            "ssim/a",
+            CLI_TOOL,
+            CaseOutcome::DimensionMismatch,
+            include_bytes!("../../tests/fixtures/ssim_budget_4097x4096.png"),
+        );
+        ctx.config = Some(
+            GleonConfig::from_yaml_str(
+                "screenshots:\n  - include: 'goldens/ssim/*.png'\n    mode: ssim\n",
+            )
+            .unwrap(),
+        );
+        assert!(refuses_over_budget(&ctx));
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Shared internals for the `push`/`pull` blob-transfer operations, and the groundwork a future
-//! `gc` operation will build on (platform-dir enumeration + referenced-hash collection).
+//! Shared internals of the `push`, `pull` and `gc` operations: platform-dir enumeration and
+//! referenced-hash collection.
 //!
 //! `push_blobs` and `pull_blobs` each resolve which platform manifest directories to operate on,
 //! collect the blob hashes those manifests reference, and stream blobs to/from remote storage
@@ -121,9 +121,9 @@ pub struct ReferencedBlobMeta {
 /// Platforms in `platform_dirs` are visited in order (typically sorted via [`list_platform_dirs`]),
 /// and tests within each platform's [`WorkspaceIndex`] are visited in sorted order.
 ///
-/// This is also the piece a future `gc` operation needs: call [`list_platform_dirs`] with
-/// `manifests_root` to get every platform, then this function to get the full referenced-hash
-/// set to diff against local/remote blob listings before deleting anything unreferenced.
+/// `gc` uses it the same way: [`list_platform_dirs`] with `manifests_root` lists every platform,
+/// then this function collects the full referenced-hash set, which `gc` checks the remote blob
+/// listing against before deleting anything unreferenced.
 ///
 /// # Errors
 /// Returns [`CoreError::Io`] if a directory's metadata can't be queried, or [`CoreError::Manifest`]

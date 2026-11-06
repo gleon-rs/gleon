@@ -274,7 +274,10 @@ screenshots:
             width: 150 # Absolute pixels (150) or relative percentage ("25%")
             height: 40
   - include: "test/**/charts/**/*.png"
-    mode: ssim # the keys of 'ssim' only
+    # The keys of 'ssim' only. SSIM compares images of up to 4096x4096 pixels (16,777,216):
+    # `gleon stage` and `gleon approve` refuse larger screenshots under it, and `gleon diff` and
+    # `gleon status` cannot compare them (use 'exact' or 'pixel' for those).
+    mode: ssim
     diff:
       min_similarity: 0.8 # minimum local SSIM of every neighborhood [0.0 - 1.0] (default: 0.8)
       color_tolerance: 8 # tolerated deviation beyond the local 3x3 envelope, 8-bit units (default: 8)
