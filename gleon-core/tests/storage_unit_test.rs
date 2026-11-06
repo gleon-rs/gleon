@@ -167,6 +167,29 @@ async fn test_downloaded_blobs_are_world_readable() {
     );
 }
 
+/// A symbolic link where the blob goes is replaced by the download, never written through: the
+/// file it points to keeps its bytes.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_download_replaces_a_linked_blob() {
+    let adapter = ObjectStoreAdapter::from_config(&StorageConfig::new("memory://")).unwrap();
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.png");
+    std::fs::write(&src, b"blob").unwrap();
+    let hash = sha256_of(b"blob");
+    adapter.upload_blob(&hash, &src).await.unwrap();
+    let outside = dir.path().join("outside");
+    std::fs::write(&outside, b"outside").unwrap();
+    let dest = dir.path().join("blob");
+    std::os::unix::fs::symlink(&outside, &dest).unwrap();
+
+    adapter.download_blob(&hash, &dest).await.unwrap();
+    let meta = std::fs::symlink_metadata(&dest).unwrap();
+    assert!(meta.is_file(), "{meta:?}");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"blob");
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+}
+
 #[test]
 fn test_concurrency_clamp_to_one() {
     let mut config = StorageConfig::new("memory://");

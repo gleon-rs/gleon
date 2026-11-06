@@ -258,9 +258,9 @@ fn check_screenshot(
     })
 }
 
-/// Writes the blob `blob` ([`crate::storage::save_blob`]: durably, never through a link) from the
-/// screenshot at `path` (`relative` for messages), read again: it must still hold the bytes it
-/// was checked with (`sha256`).
+/// Writes the blob `blob` ([`crate::storage::save_blob`]: atomically and durably in place of
+/// whatever is there, never through a link) from the screenshot at `path` (`relative` for
+/// messages), read again: it must still hold the bytes it was checked with (`sha256`).
 fn write_blob(
     blob: &Path,
     path: &Path,

@@ -141,33 +141,32 @@ pub fn has_usable_local_blob(
     is_usable_blob(&local_blob_path(blobs_root, hash))
 }
 
-/// Writes the blob `path` durably, never through a symbolic link.
+/// Writes the blob `path` atomically and durably in place of whatever is there
+/// ([`gleon_model::fs::replace_atomically_with`]).
 ///
-/// Whatever is there (no usable blob, see [`is_usable_blob`]) is removed first, so the bytes land
-/// in the cache and not at the target of a link: `gleon_model::fs::write_atomically` writes
-/// through links, as goldens need.
+/// A symbolic link there is replaced, never written through, so the bytes land in the cache and
+/// not at the target of a link; a reader sees the old entry or the blob, never none.
 ///
 /// # Errors
-/// Returns the I/O error of the removal (a directory there is one) or of the write.
+/// Returns the I/O error of the write (a directory there is one).
 pub fn save_blob(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    gleon_model::fs::remove_if_exists(path).and_then(|()| {
-        gleon_model::fs::write_atomically(path, bytes, gleon_model::fs::Durability::Durable)
+    use std::io::Write as _;
+
+    gleon_model::fs::replace_atomically_with(path, gleon_model::fs::Durability::Durable, |writer| {
+        writer.write_all(bytes)
     })
 }
 
 /// Whether `path` is a usable blob that holds the bytes `sha256` names.
 ///
-/// The blob is opened once without following a link ([`open_regular_file`]) and read whole, like
-/// `gleon push` reads it: a missing file, a link, a directory or other bytes (a changed cache)
-/// are all no blob to keep.
+/// The blob is opened once without following a link ([`open_regular_file`]) and hashed through
+/// a bounded buffer ([`gleon_model::case::Sha256Hex::of_reader`]): a missing file, a link, a
+/// directory or other bytes (a changed cache) are all no blob to keep.
 #[must_use]
 pub fn holds_blob(path: &std::path::Path, sha256: &gleon_model::case::Sha256Hex) -> bool {
-    use std::io::Read as _;
-
-    let mut bytes = Vec::new();
     open_regular_file(path)
-        .and_then(|(mut file, _)| file.read_to_end(&mut bytes))
-        .is_ok_and(|_| gleon_model::case::Sha256Hex::of(&bytes) == *sha256)
+        .and_then(|(file, _)| gleon_model::case::Sha256Hex::of_reader(file))
+        .is_ok_and(|actual| actual == *sha256)
 }
 
 /// Returns `true` only if `path` is an existing regular file and not a symlink.
