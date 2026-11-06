@@ -2,14 +2,15 @@
 
 use std::path::PathBuf;
 
+use gleon_model::{case::Sha256Hex, compare};
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
     context::ResolvedContext,
     ops::common::{
-        CoreError, ensure_initialized, index_keys_missing_from, load_config_and_scan,
-        load_merged_index_with_fallback, platform_key, sha256_hex_matches,
+        Baseline, BlobState, CoreError, baseline_of, ensure_initialized, index_keys_missing_from,
+        load_config_and_scan, load_merged_index_with_fallback, local_blob_state, platform_key,
     },
 };
 
@@ -26,17 +27,51 @@ pub enum StatusError {
 pub struct StatusReport {
     /// Screenshots present on disk but not yet tracked in the manifest.
     pub added: Vec<PathBuf>,
-    /// Tracked screenshots whose content differs from the manifest.
+    /// Tracked screenshots that would fail their rule (`mode`, `diff`, masks) against their
+    /// baseline, exactly as `gleon diff` judges them.
     pub modified: Vec<PathBuf>,
+    /// Tracked screenshots whose bytes changed but which pass their rule: `gleon diff` passes
+    /// them, `gleon stage` would record their new bytes.
+    pub within_tolerance: Vec<PathBuf>,
+    /// Tracked screenshots that cannot be compared with their baseline, and why: a blob missing
+    /// from `.gleon/blobs` or not holding its bytes, an image that cannot be decoded, images over
+    /// the SSIM analysis budget. `gleon diff` fails them too.
+    pub uncomparable: Vec<Explained>,
     /// Manifest entries whose screenshot is missing on disk.
     pub deleted: Vec<PathBuf>,
+    /// Unchanged screenshots (the bytes their manifest names) whose blob is missing from
+    /// `.gleon/blobs`: `gleon pull` fetches it, `gleon push` needs it. No change to stage.
+    pub uncached: Vec<PathBuf>,
+    /// Unchanged screenshots whose blob in `.gleon/blobs` is there but unusable (a directory, a
+    /// symbolic link, unreadable), and why: `gleon pull` cannot simply fetch it. No change to
+    /// stage.
+    pub unusable_blobs: Vec<Explained>,
+}
+
+/// A tracked screenshot listed with why.
+///
+/// One that cannot be compared with its baseline ([`StatusReport::uncomparable`]), or an
+/// unchanged one whose blob in `.gleon/blobs` is unusable ([`StatusReport::unusable_blobs`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Explained {
+    /// The screenshot, relative to the workspace root.
+    pub path: PathBuf,
+    /// Why it is listed, for the user.
+    pub reason: String,
 }
 
 impl StatusReport {
-    /// Returns true if there are no added, modified, or deleted screenshots.
+    /// Returns true if no screenshot is added, modified, within tolerance, uncomparable or
+    /// deleted: the staged manifests describe the screenshots, so `gleon stage` writes no
+    /// manifest. (The local blobs may still need care: [`Self::uncached`],
+    /// [`Self::unusable_blobs`].)
     #[must_use]
     pub const fn is_clean(&self) -> bool {
-        self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+        self.added.is_empty()
+            && self.modified.is_empty()
+            && self.within_tolerance.is_empty()
+            && self.uncomparable.is_empty()
+            && self.deleted.is_empty()
     }
 
     /// Formats the report as pretty-printed JSON.
@@ -49,113 +84,192 @@ impl StatusReport {
         serde_json::to_string_pretty(self)
     }
 
-    /// Formats the report as human-readable text.
+    /// Formats the report as human-readable text: a section per list that is not empty, then
+    /// one line on the blobs missing from `.gleon/blobs`. A clean report says so: up to date when
+    /// the local blobs are too, else only that no change is to be staged.
     #[must_use]
     pub fn format_text(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
         if self.is_clean() {
-            out.push_str("Nothing to report. Workspace is up to date.\n");
-            return out;
+            out.push_str(
+                if self.uncached.is_empty() && self.unusable_blobs.is_empty() {
+                    "Nothing to report. Workspace is up to date.\n"
+                } else {
+                    "No changes to stage.\n"
+                },
+            );
         }
-
-        if !self.added.is_empty() {
-            out.push_str("Added:\n");
-            for path in &self.added {
-                let _ = writeln!(out, "  {}", path.display());
-            }
-        }
-
-        if !self.modified.is_empty() {
+        let explained = |entries: &[Explained]| -> Vec<String> {
+            entries
+                .iter()
+                .map(|entry| format!("{}: {}", entry.path.display(), entry.reason))
+                .collect()
+        };
+        let paths = |paths: &[PathBuf]| -> Vec<String> {
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect()
+        };
+        let sections = [
+            ("Added:", paths(&self.added)),
+            ("Modified:", paths(&self.modified)),
+            (
+                "Within tolerance (they pass their rule; `gleon stage` records the new bytes):",
+                paths(&self.within_tolerance),
+            ),
+            (
+                "Cannot compare (`gleon diff` fails them too):",
+                explained(&self.uncomparable),
+            ),
+            ("Deleted:", paths(&self.deleted)),
+            (
+                "Unchanged, but their blob in .gleon/blobs is unusable:",
+                explained(&self.unusable_blobs),
+            ),
+        ];
+        for (title, lines) in sections.iter().filter(|(_, lines)| !lines.is_empty()) {
             if !out.is_empty() {
                 out.push('\n');
             }
-            out.push_str("Modified:\n");
-            for path in &self.modified {
-                let _ = writeln!(out, "  {}", path.display());
+            out.push_str(title);
+            out.push('\n');
+            for line in lines {
+                let _ = writeln!(out, "  {line}");
             }
         }
-
-        if !self.deleted.is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str("Deleted:\n");
-            for path in &self.deleted {
-                let _ = writeln!(out, "  {}", path.display());
+        match self.uncached.len() {
+            0 => {}
+            1 => out.push_str(
+                "\n1 unchanged screenshot has no blob in .gleon/blobs: run `gleon pull`.\n",
+            ),
+            count => {
+                let _ = write!(
+                    out,
+                    "\n{count} unchanged screenshots have no blob in .gleon/blobs: run `gleon \
+                     pull`.\n"
+                );
             }
         }
-
         out
+    }
+
+    /// Files `class` under its list.
+    fn push(&mut self, class: Class) {
+        match class {
+            Class::Added(path) => self.added.push(path),
+            Class::Modified(path) => self.modified.push(path),
+            Class::WithinTolerance(path) => self.within_tolerance.push(path),
+            Class::Uncomparable(entry) => self.uncomparable.push(entry),
+            Class::Uncached(path) => self.uncached.push(path),
+            Class::UnusableBlob(entry) => self.unusable_blobs.push(entry),
+            Class::Unchanged => {}
+        }
+    }
+
+    /// Appends the lists of `other`.
+    fn append(&mut self, other: Self) {
+        self.added.extend(other.added);
+        self.modified.extend(other.modified);
+        self.within_tolerance.extend(other.within_tolerance);
+        self.uncomparable.extend(other.uncomparable);
+        self.deleted.extend(other.deleted);
+        self.uncached.extend(other.uncached);
+        self.unusable_blobs.extend(other.unusable_blobs);
+    }
+
+    /// Sorts every list by path, so parallel classification prints in a stable order.
+    fn sort(&mut self) {
+        self.added.sort();
+        self.modified.sort();
+        self.within_tolerance.sort();
+        self.uncomparable
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        self.deleted.sort();
+        self.uncached.sort();
+        self.unusable_blobs
+            .sort_by(|left, right| left.path.cmp(&right.path));
     }
 }
 
-/// Classifies one scanned test case against `workspace_index`: `(Some(path), None)` if it's
-/// untracked (added), `(None, Some(path))` if its content differs from the baseline once masks
-/// are applied (modified), or `(None, None)` if unchanged.
+/// Where one scanned screenshot belongs in a [`StatusReport`].
+#[derive(Debug, PartialEq, Eq)]
+enum Class {
+    /// Not tracked by a manifest.
+    Added(PathBuf),
+    /// Fails its rule against its baseline.
+    Modified(PathBuf),
+    /// Other bytes than the baseline's that pass its rule.
+    WithinTolerance(PathBuf),
+    /// Cannot be compared with its baseline.
+    Uncomparable(Explained),
+    /// The baseline's bytes, whose blob is missing from `.gleon/blobs`.
+    Uncached(PathBuf),
+    /// The baseline's bytes, whose blob in `.gleon/blobs` is there but unusable.
+    UnusableBlob(Explained),
+    /// The baseline's bytes.
+    Unchanged,
+}
+
+/// Classifies one scanned test case against `workspace_index`, judged as `gleon diff` judges
+/// it: the same baseline ([`baseline_of`]: the manifest's hash, else the local blob) and the
+/// same comparison under the rule's tolerance and masks ([`compare::verdict`], which encodes no
+/// diff). A screenshot that cannot be compared is a failed case in `gleon diff`; here it is
+/// listed with the reason instead of failing the whole status.
 ///
-/// Pulled out of [`check_status`]'s parallel scan so the per-case comparison logic (hash/blob
-/// lookup, mask-aware image diffing) reads as its own unit rather than an ~80-line closure body.
+/// # Errors
+/// Returns [`CoreError::Io`] if the screenshot cannot be read: the workspace is broken, not the
+/// comparison of the screenshot (like in `gleon diff`).
 fn classify_test_case(
     case: &crate::scanner::TestCase,
     workspace_index: &crate::manifest::WorkspaceIndex,
     blobs_root: &std::path::Path,
-) -> Result<(Option<PathBuf>, Option<PathBuf>), StatusError> {
-    let img = &case.image;
-
+) -> Result<Class, StatusError> {
+    let path = &case.image.relative_path;
     let Some(manifest) = workspace_index.get(&case.name) else {
-        return Ok((Some(img.relative_path.clone()), None));
+        return Ok(Class::Added(path.clone()));
+    };
+    let uncomparable = |reason: String| {
+        Class::Uncomparable(Explained {
+            path: path.clone(),
+            reason,
+        })
     };
 
-    let raw_bytes = std::fs::read(&img.absolute_path).map_err(CoreError::Io)?;
-    let is_unchanged = if manifest.hash.scheme() == "sha256" {
-        if sha256_hex_matches(&manifest.hash, &raw_bytes) {
-            crate::storage::has_usable_local_blob(blobs_root, &manifest.hash)
-        } else {
-            false
+    let candidate = std::fs::read(&case.image.absolute_path).map_err(CoreError::Io)?;
+    let candidate_sha256 = Sha256Hex::of(&candidate);
+    let golden = match baseline_of(manifest, &candidate, &candidate_sha256, blobs_root) {
+        // Decided by the manifest's sha256 alone: the blob may be missing or broken in the local
+        // cache.
+        Baseline::Identical { blob_read: false } => {
+            return Ok(match local_blob_state(blobs_root, &manifest.hash) {
+                BlobState::Usable => Class::Unchanged,
+                BlobState::Missing => Class::Uncached(path.clone()),
+                BlobState::Unusable(reason) => Class::UnusableBlob(Explained {
+                    path: path.clone(),
+                    reason,
+                }),
+            });
         }
-    } else {
-        let baseline_blob_path = crate::storage::local_blob_path(blobs_root, &manifest.hash);
-        match std::fs::read(&baseline_blob_path) {
-            Ok(b_bytes) => raw_bytes == b_bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(CoreError::Io(e).into()),
-        }
+        Baseline::Identical { blob_read: true } => return Ok(Class::Unchanged),
+        Baseline::Unavailable { message, .. } => return Ok(uncomparable(message)),
+        Baseline::Golden { png, .. } => png,
     };
-
-    if is_unchanged {
-        crate::manifest::SingleTestManifest::validate_image_bytes(&raw_bytes)
-            .map_err(CoreError::Manifest)?;
-        return Ok((None, None));
-    }
-
-    let matched_zones = case.rule.matched_mask_zones(&img.relative_path);
-    if matched_zones.is_empty() {
-        return Ok((None, Some(img.relative_path.clone())));
-    }
-
-    let baseline_blob_path = crate::storage::local_blob_path(blobs_root, &manifest.hash);
-    let b_bytes = match std::fs::read(&baseline_blob_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((None, Some(img.relative_path.clone())));
+    let masks = case.rule.matched_mask_zones(path);
+    let verdict = compare::verdict(
+        &golden,
+        compare::Candidate::Png(&candidate),
+        &case.rule.tolerance,
+        &masks,
+    );
+    Ok(match verdict {
+        Ok(compare::Verdict::Match) => Class::WithinTolerance(path.clone()),
+        Ok(compare::Verdict::Mismatch | compare::Verdict::DimensionMismatch) => {
+            Class::Modified(path.clone())
         }
-        Err(e) => return Err(CoreError::Io(e).into()),
-    };
-
-    // Decoded and masked exactly like `gleon diff` and the integrations compare.
-    let decoded = gleon_model::compare::decode_masked(&b_bytes, &raw_bytes, &matched_zones)
-        .map_err(|e| {
-            CoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                e.to_string(),
-            ))
-        })?;
-    if decoded.golden == decoded.candidate {
-        return Ok((None, None));
-    }
-
-    Ok((None, Some(img.relative_path.clone())))
+        Err(e) => uncomparable(e.to_string()),
+    })
 }
 
 /// Evaluates status for the workspace at `base_dir`.
@@ -163,8 +277,8 @@ fn classify_test_case(
 /// # Errors
 ///
 /// Returns an error if the workspace is not initialized, if the platform key cannot be
-/// resolved, if manifests or workspace configuration fail to load, if screenshots cannot be
-/// scanned, or if reading/decoding actual or baseline images fails.
+/// resolved, if manifests or workspace configuration fail to load, or if screenshots cannot be
+/// scanned or read.
 pub fn check_status(context: &ResolvedContext) -> Result<StatusReport, StatusError> {
     use rayon::prelude::*;
 
@@ -182,56 +296,31 @@ pub fn check_status(context: &ResolvedContext) -> Result<StatusReport, StatusErr
     // Scan workspace screenshots
     let test_cases = load_config_and_scan(context)?;
 
-    let (mut added, mut modified) = test_cases
+    let mut report = test_cases
         .par_iter()
         .map(|case| classify_test_case(case, &workspace_index, &blobs_root))
-        .try_fold(
-            || (Vec::new(), Vec::new()),
-            |mut acc, item| -> Result<_, StatusError> {
-                let (opt_add, opt_mod) = match item {
-                    Ok(val) => val,
-                    Err(e) => return Err(e),
-                };
-                if let Some(p) = opt_add {
-                    acc.0.push(p);
-                }
-                if let Some(p) = opt_mod {
-                    acc.1.push(p);
-                }
-                Ok(acc)
-            },
-        )
-        .try_reduce(
-            || (Vec::new(), Vec::new()),
-            |mut a, b| -> Result<_, StatusError> {
-                a.0.extend(b.0);
-                a.1.extend(b.1);
-                Ok(a)
-            },
-        )?;
+        .try_fold(StatusReport::default, |mut report, class| {
+            report.push(class?);
+            Ok::<_, StatusError>(report)
+        })
+        .try_reduce(StatusReport::default, |mut report, other| {
+            report.append(other);
+            Ok(report)
+        })?;
 
     let seen_test_cases: std::collections::HashSet<&str> =
         test_cases.iter().map(|c| c.name.as_str()).collect();
-
-    let mut deleted = Vec::new();
 
     // Identify deleted test cases (staged in index but no longer present on disk)
     for staged_name in index_keys_missing_from(&workspace_index, &seen_test_cases) {
         let mut p = String::with_capacity(staged_name.len() + 4);
         p.push_str(staged_name);
         p.push_str(".png");
-        deleted.push(PathBuf::from(p));
+        report.deleted.push(PathBuf::from(p));
     }
 
-    added.sort();
-    modified.sort();
-    deleted.sort();
-
-    Ok(StatusReport {
-        added,
-        modified,
-        deleted,
-    })
+    report.sort();
+    Ok(report)
 }
 
 #[cfg(all(test, not(miri)))]
@@ -246,7 +335,9 @@ pub fn check_status(context: &ResolvedContext) -> Result<StatusReport, StatusErr
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
-    use gleon_model::platform::PlatformKey;
+    use std::path::Path;
+
+    use gleon_model::{platform::PlatformKey, tolerance::Tolerance};
     use sha2::Digest;
 
     use super::*;
@@ -292,31 +383,98 @@ mod tests {
         let report = StatusReport {
             added: vec![PathBuf::from("a.png")],
             modified: vec![PathBuf::from("b.png")],
+            within_tolerance: vec![PathBuf::from("d.png")],
+            uncomparable: vec![Explained {
+                path: PathBuf::from("e.png"),
+                reason: "candidate image: broken".to_owned(),
+            }],
             deleted: vec![PathBuf::from("c.png")],
+            uncached: vec![PathBuf::from("f.png"), PathBuf::from("g.png")],
+            unusable_blobs: vec![Explained {
+                path: PathBuf::from("h.png"),
+                reason: "no regular file".to_owned(),
+            }],
         };
         assert!(!report.is_clean());
-        let text = report.format_text();
-        assert!(text.contains("Added:"));
-        assert!(text.contains("a.png"));
-        assert!(text.contains("Modified:"));
-        assert!(text.contains("b.png"));
-        assert!(text.contains("Deleted:"));
-        assert!(text.contains("c.png"));
+        assert_eq!(
+            report.format_text(),
+            "Added:\n  a.png\n\nModified:\n  b.png\n\nWithin tolerance (they pass their rule; \
+             `gleon stage` records the new bytes):\n  d.png\n\nCannot compare (`gleon diff` \
+             fails them too):\n  e.png: candidate image: broken\n\nDeleted:\n  c.png\n\n\
+             Unchanged, but their blob in .gleon/blobs is unusable:\n  h.png: no regular \
+             file\n\n2 unchanged screenshots have no blob in .gleon/blobs: run `gleon pull`.\n"
+        );
+        let json: serde_json::Value = serde_json::from_str(&report.format_json().unwrap()).unwrap();
+        assert_eq!(
+            json["uncomparable"],
+            serde_json::json!([{"path": "e.png", "reason": "candidate image: broken"}])
+        );
+        assert_eq!(json["uncached"], serde_json::json!(["f.png", "g.png"]));
+        assert_eq!(
+            json["unusable_blobs"],
+            serde_json::json!([{"path": "h.png", "reason": "no regular file"}])
+        );
+        // A broken cache changes no manifest: clean, but named.
+        let unusable = StatusReport {
+            unusable_blobs: vec![Explained {
+                path: PathBuf::from("h.png"),
+                reason: "no regular file".to_owned(),
+            }],
+            ..StatusReport::default()
+        };
+        assert!(unusable.is_clean());
+        assert_eq!(
+            unusable.format_text(),
+            "No changes to stage.\n\nUnchanged, but their blob in \
+             .gleon/blobs is unusable:\n  h.png: no regular file\n"
+        );
+
+        for (unclean, why) in [
+            (
+                StatusReport {
+                    within_tolerance: vec![PathBuf::from("d.png")],
+                    ..StatusReport::default()
+                },
+                "`gleon stage` would record d.png",
+            ),
+            (
+                StatusReport {
+                    uncomparable: vec![Explained {
+                        path: PathBuf::from("e.png"),
+                        reason: "broken".to_owned(),
+                    }],
+                    ..StatusReport::default()
+                },
+                "e.png fails `gleon diff`",
+            ),
+        ] {
+            assert!(!unclean.is_clean(), "{why}");
+        }
 
         let clean = StatusReport::default();
         assert!(clean.is_clean());
-        assert!(clean.format_text().contains("Nothing to report"));
-
-        let json = report.format_json().unwrap();
-        assert!(json.contains("a.png"));
+        assert_eq!(
+            clean.format_text(),
+            "Nothing to report. Workspace is up to date.\n"
+        );
+        // Blobs missing from the local cache change no manifest: clean, with a hint.
+        let uncached = StatusReport {
+            uncached: vec![PathBuf::from("f.png")],
+            ..StatusReport::default()
+        };
+        assert!(uncached.is_clean());
+        assert_eq!(
+            uncached.format_text(),
+            "No changes to stage.\n\n1 unchanged screenshot has no blob in \
+             .gleon/blobs: run `gleon pull`.\n"
+        );
     }
 
     #[test]
     fn test_status_deleted_dotted_test_name() {
         let report = StatusReport {
-            added: vec![],
-            modified: vec![],
             deleted: vec![PathBuf::from("auth/user.v2.png")],
+            ..StatusReport::default()
         };
         let text = report.format_text();
         assert!(text.contains("auth/user.v2.png"));
@@ -350,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_missing_baseline_blob_returns_modified() {
+    fn test_status_missing_baseline_blob_is_uncomparable() {
         let temp = tempfile::tempdir().unwrap();
         let gleon_dir = temp.path().join(".gleon");
         let ctx = ResolvedContext {
@@ -381,10 +539,7 @@ mod tests {
             .unwrap();
 
         let report = check_status(&ctx).unwrap();
-        assert_eq!(
-            report.modified,
-            vec![PathBuf::from("screenshots/login.png")]
-        );
+        assert_uncomparable(&report, "screenshots/login.png", "run `gleon pull`");
     }
 
     #[test]
@@ -435,13 +590,13 @@ mod tests {
         let img = image::RgbaImage::new(10, 10);
         img.save(temp.path().join("test.png")).unwrap();
 
-        // Define a mask so status.rs attempts to read the baseline blob
+        // The bytes differ from the manifest, so status reads the baseline blob.
         let ctx = ResolvedContext {
             base_dir: temp.path().to_path_buf(),
             config: Some(crate::config::GleonConfig {
                 screenshots: vec![crate::config::ScreenshotRule {
                     include: vec![crate::config::GlobPattern::new("**/*.png").unwrap()],
-                    tolerance: gleon_model::tolerance::Tolerance::pixel(0.01),
+                    tolerance: Tolerance::pixel(0.01),
                     masks: vec![crate::config::MaskRule {
                         path: crate::config::GlobPattern::new("**/*.png").unwrap(),
                         zones: vec![gleon_engine::config::Zone {
@@ -458,18 +613,18 @@ mod tests {
             ..Default::default()
         };
 
-        // Blob doesn't exist, so we expect Modified (NotFound branch lines 175-178)
-        let res = check_status(&ctx);
-        let res_unwrapped = res.unwrap();
-        assert_eq!(res_unwrapped.modified.len(), 1);
+        // The blob does not exist: it cannot be compared, the reason says why.
+        let report = check_status(&ctx).unwrap();
+        assert_uncomparable(&report, "test.png", "run `gleon pull`");
 
-        // Now create a CORRUPT baseline blob (lines 181-189)
+        // A blob that does not hold the bytes its name says cannot be compared either: a failed
+        // case in `gleon diff`, never a pass and never an error of the whole status.
         let blob_dir = gleon_dir.join("blobs").join("sha256");
         std::fs::create_dir_all(&blob_dir).unwrap();
         std::fs::write(blob_dir.join(hash_val), "fake png data").unwrap();
 
-        let res2 = check_status(&ctx);
-        assert!(matches!(res2, Err(StatusError::Core(CoreError::Io(_)))));
+        let report = check_status(&ctx).unwrap();
+        assert_uncomparable(&report, "test.png", "does not match its hash");
     }
 
     #[test]
@@ -545,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_sha256_missing_blob() {
+    fn test_status_sha256_identical_without_blob_is_unchanged() {
         let temp = tempfile::tempdir().unwrap();
         let gleon_dir = temp.path().join(".gleon");
         let ctx = ResolvedContext {
@@ -583,13 +738,18 @@ mod tests {
             )
             .unwrap();
 
-        // Deliberately do NOT create the blob file.
-        // Even though the actual image matches the sha256 in the manifest,
-        // status should return modified because the baseline blob is unusable.
+        // Deliberately do NOT create the blob file: the manifest's sha256 names the screenshot
+        // bytes, so they are the baseline, decided without the blob, like `gleon diff` decides it;
+        // the missing blob (`gleon push` needs it) is listed apart.
         let res = check_status(&ctx).unwrap();
-        assert!(!res.is_clean());
-        assert_eq!(res.modified.len(), 1);
-        assert_eq!(res.modified[0].to_string_lossy(), "test.png");
+        assert!(res.is_clean(), "{res:?}");
+        assert_eq!(res.uncached, vec![PathBuf::from("test.png")]);
+
+        // With the blob in place nothing is listed.
+        let blob_dir = gleon_dir.join("blobs").join("sha256");
+        std::fs::create_dir_all(&blob_dir).unwrap();
+        std::fs::write(blob_dir.join(&hash_val), &img_bytes).unwrap();
+        assert_eq!(check_status(&ctx).unwrap(), StatusReport::default());
     }
 
     #[test]
@@ -767,7 +927,7 @@ screenshots:
             config: Some(crate::config::GleonConfig {
                 screenshots: vec![crate::config::ScreenshotRule {
                     include: vec![crate::config::GlobPattern::new("**/*.png").unwrap()],
-                    tolerance: gleon_model::tolerance::Tolerance::pixel(0.01),
+                    tolerance: Tolerance::pixel(0.0),
                     masks: vec![crate::config::MaskRule {
                         path: crate::config::GlobPattern::new("**/*.png").unwrap(),
                         zones: vec![gleon_engine::config::Zone {
@@ -784,10 +944,348 @@ screenshots:
             ..Default::default()
         };
 
+        // No differing pixel is tolerated, so only the mask decides.
         let report = check_status(&ctx).unwrap();
-        // test1 is masked so unchanged
-        assert!(!report.modified.contains(&PathBuf::from("test1.png")));
-        // test2 still differs so modified
-        assert!(report.modified.contains(&PathBuf::from("test2.png")));
+        // test1 differs only under the mask: it passes, with other bytes.
+        assert_eq!(report.within_tolerance, vec![PathBuf::from("test1.png")]);
+        // test2 still differs outside the mask.
+        assert_eq!(report.modified, vec![PathBuf::from("test2.png")]);
+    }
+
+    /// The status of a workspace whose `test.png` (`candidate` on disk) is tracked with
+    /// `baseline` as its staged blob, compared under `tolerance` without masks.
+    fn status_of(baseline: &[u8], candidate: &[u8], tolerance: Tolerance) -> StatusReport {
+        let temp = tempfile::tempdir().unwrap();
+        let gleon_dir = temp.path().join(".gleon");
+        let ctx = ResolvedContext {
+            base_dir: temp.path().to_path_buf(),
+            config: Some(crate::config::GleonConfig {
+                screenshots: vec![crate::config::ScreenshotRule {
+                    include: vec![crate::config::GlobPattern::new("*.png").unwrap()],
+                    tolerance,
+                    masks: vec![],
+                    text_tolerance: None,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let manifests_dir = gleon_dir
+            .join("manifests")
+            .join(ctx.platform.key().unwrap());
+        let blobs_dir = gleon_dir.join("blobs").join("sha256");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(baseline));
+        let (width, height) = gleon_model::case::png_size(baseline).unwrap();
+        std::fs::write(blobs_dir.join(&hash), baseline).unwrap();
+        WorkspaceIndex::new()
+            .save_test(
+                &manifests_dir,
+                "test",
+                &crate::manifest::SingleTestManifest {
+                    schema_version: 1,
+                    hash: crate::manifest::ImageHash::new("sha256", &hash).unwrap(),
+                    phash: crate::manifest::ImageHash::new("dhash", "0000000000000000").unwrap(),
+                    width,
+                    height,
+                },
+            )
+            .unwrap();
+        std::fs::write(temp.path().join("test.png"), candidate).unwrap();
+        check_status(&ctx).unwrap()
+    }
+
+    fn png(image: &image::RgbaImage) -> Vec<u8> {
+        compare::encode_png(image).unwrap()
+    }
+
+    /// The same pixels as `image` (opaque) in another PNG color type, so other bytes.
+    fn png_rgb(image: &image::RgbaImage) -> Vec<u8> {
+        let rgb = image::DynamicImage::ImageRgba8(image.clone()).to_rgb8();
+        let mut bytes = Vec::new();
+        rgb.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        bytes
+    }
+
+    const WHITE: image::Rgba<u8> = image::Rgba([255, 255, 255, 255]);
+
+    /// A white 10x10 image and the same with one black pixel (1% of the pixels).
+    fn white_and_one_black_pixel() -> (Vec<u8>, Vec<u8>) {
+        let white = image::RgbaImage::from_pixel(10, 10, WHITE);
+        let mut changed = white.clone();
+        changed.put_pixel(4, 4, image::Rgba([0, 0, 0, 255]));
+        (png(&white), png(&changed))
+    }
+
+    /// Only `within_tolerance` lists `test.png`.
+    fn within_tolerance() -> StatusReport {
+        StatusReport {
+            within_tolerance: vec![PathBuf::from("test.png")],
+            ..StatusReport::default()
+        }
+    }
+
+    /// Asserts that `report` lists only `path` as uncomparable, its reason containing `needle`.
+    fn assert_uncomparable(report: &StatusReport, path: &str, needle: &str) {
+        assert!(
+            matches!(
+                report,
+                StatusReport { uncomparable, .. }
+                    if matches!(
+                        uncomparable.as_slice(),
+                        [Explained { path: found, reason }]
+                            if found == Path::new(path) && reason.contains(needle)
+                    )
+            ),
+            "{report:?} should list {path} as uncomparable with {needle:?}"
+        );
+        assert_eq!(
+            StatusReport {
+                uncomparable: vec![],
+                ..report.clone()
+            },
+            StatusReport::default(),
+            "nothing else is listed"
+        );
+    }
+
+    /// Only `modified` lists `test.png`.
+    fn modified() -> StatusReport {
+        StatusReport {
+            modified: vec![PathBuf::from("test.png")],
+            ..StatusReport::default()
+        }
+    }
+
+    /// The headline case: a change `gleon diff` passes under the rule's threshold is no
+    /// modification, but `gleon stage` would still record it.
+    #[test]
+    fn test_status_pixel_threshold_tolerates_a_small_change() {
+        let (baseline, candidate) = white_and_one_black_pixel();
+        let report = status_of(&baseline, &candidate, Tolerance::pixel(0.05));
+        assert_eq!(report, within_tolerance());
+    }
+
+    #[test]
+    fn test_status_exact_rule_reports_one_pixel() {
+        let (baseline, candidate) = white_and_one_black_pixel();
+        let report = status_of(&baseline, &candidate, Tolerance::Exact {});
+        assert_eq!(report, modified());
+    }
+
+    /// Other bytes of the same pixels pass even an exact rule, like in `gleon diff`: re-encoded,
+    /// the screenshot is within tolerance.
+    #[test]
+    fn test_status_re_encoded_png_with_the_same_pixels_is_within_tolerance() {
+        let white = image::RgbaImage::from_pixel(10, 10, WHITE);
+        let (baseline, candidate) = (png(&white), png_rgb(&white));
+        assert_ne!(baseline, candidate);
+        let report = status_of(&baseline, &candidate, Tolerance::Exact {});
+        assert_eq!(report, within_tolerance());
+    }
+
+    #[test]
+    fn test_status_dimension_mismatch_is_modified() {
+        let red = image::Rgba([255, 0, 0, 255]);
+        let baseline = png(&image::RgbaImage::from_pixel(10, 10, red));
+        let candidate = png(&image::RgbaImage::from_pixel(12, 10, red));
+        let report = status_of(&baseline, &candidate, Tolerance::pixel(0.5));
+        assert_eq!(report, modified());
+    }
+
+    #[test]
+    fn test_status_ssim_rule() {
+        let ssim = Tolerance::Ssim {
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
+        };
+        let red = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 0, 255]));
+        let mut half_blue = red.clone();
+        for (x, _, pixel) in half_blue.enumerate_pixels_mut() {
+            if x < 32 {
+                *pixel = image::Rgba([0, 0, 255, 255]);
+            }
+        }
+        assert_eq!(status_of(&png(&red), &png(&half_blue), ssim), modified());
+        assert_eq!(
+            status_of(&png(&red), &png_rgb(&red), ssim),
+            within_tolerance()
+        );
+    }
+
+    /// Images over the SSIM analysis budget cannot be compared: a failed case in `gleon diff`,
+    /// listed with the reason, not an error of the whole status.
+    #[test]
+    fn test_status_ssim_over_the_analysis_budget_is_uncomparable() {
+        let ssim = Tolerance::Ssim {
+            min_similarity: 0.8,
+            color_tolerance: 8.0,
+        };
+        let big = image::RgbaImage::from_pixel(4097, 4096, image::Rgba([255, 0, 0, 255]));
+        let report = status_of(&png(&big), &png_rgb(&big), ssim);
+        assert_uncomparable(&report, "test.png", "SSIM analysis budget");
+    }
+
+    /// A manifest of another hash scheme: equal bytes are unchanged, other bytes are judged
+    /// under the rule like for sha256.
+    #[test]
+    fn test_status_non_sha256_manifest_judges_changed_bytes() {
+        let status = |baseline: &[u8], candidate: &[u8]| {
+            let temp = tempfile::tempdir().unwrap();
+            let gleon_dir = temp.path().join(".gleon");
+            let ctx = ResolvedContext {
+                base_dir: temp.path().to_path_buf(),
+                config: Some(crate::config::GleonConfig {
+                    screenshots: vec![crate::config::ScreenshotRule {
+                        include: vec![crate::config::GlobPattern::new("*.png").unwrap()],
+                        tolerance: Tolerance::Exact {},
+                        masks: vec![],
+                        text_tolerance: None,
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let manifests_dir = gleon_dir
+                .join("manifests")
+                .join(ctx.platform.key().unwrap());
+            std::fs::create_dir_all(&manifests_dir).unwrap();
+            let hash = hex::encode(sha2::Sha512::digest(baseline));
+            let blob_dir = gleon_dir.join("blobs").join("sha512");
+            std::fs::create_dir_all(&blob_dir).unwrap();
+            std::fs::write(blob_dir.join(&hash), baseline).unwrap();
+            WorkspaceIndex::new()
+                .save_test(
+                    &manifests_dir,
+                    "test",
+                    &crate::manifest::SingleTestManifest {
+                        schema_version: 1,
+                        hash: crate::manifest::ImageHash::new("sha512", &hash).unwrap(),
+                        phash: crate::manifest::ImageHash::new("dhash", "0000000000000000")
+                            .unwrap(),
+                        width: 10,
+                        height: 10,
+                    },
+                )
+                .unwrap();
+            std::fs::write(temp.path().join("test.png"), candidate).unwrap();
+            check_status(&ctx).unwrap()
+        };
+        let white = image::RgbaImage::from_pixel(10, 10, WHITE);
+        let (baseline, changed) = white_and_one_black_pixel();
+        assert!(status(&baseline, &baseline).is_clean());
+        assert_eq!(status(&baseline, &png_rgb(&white)), within_tolerance());
+        assert_eq!(status(&baseline, &changed), modified());
+    }
+
+    /// A blob that is a symbolic link is no blob (like for `gleon pull` and `gleon push`): never
+    /// followed, so the changed screenshot cannot be compared.
+    #[cfg(unix)]
+    #[test]
+    fn test_status_never_follows_a_symlinked_blob() {
+        let temp = tempfile::tempdir().unwrap();
+        let gleon_dir = temp.path().join(".gleon");
+        let ctx = ResolvedContext {
+            base_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let manifests_dir = gleon_dir
+            .join("manifests")
+            .join(ctx.platform.key().unwrap());
+        let blobs_dir = gleon_dir.join("blobs").join("sha256");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        let (baseline, _) = white_and_one_black_pixel();
+        let white = image::RgbaImage::from_pixel(10, 10, WHITE);
+        let (hash, ..) = crate::ops::common::hash_and_measure(&baseline).unwrap();
+        // The link points at the very same pixels: following it would list the screenshot as
+        // within tolerance.
+        let elsewhere = temp.path().join("elsewhere.bin");
+        std::fs::write(&elsewhere, &baseline).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, blobs_dir.join(&hash)).unwrap();
+        WorkspaceIndex::new()
+            .save_test(
+                &manifests_dir,
+                "test",
+                &crate::manifest::SingleTestManifest {
+                    schema_version: 1,
+                    hash: crate::manifest::ImageHash::new("sha256", &hash).unwrap(),
+                    phash: crate::manifest::ImageHash::new("dhash", "0000000000000000").unwrap(),
+                    width: 10,
+                    height: 10,
+                },
+            )
+            .unwrap();
+        std::fs::write(temp.path().join("test.png"), png_rgb(&white)).unwrap();
+
+        assert_uncomparable(&check_status(&ctx).unwrap(), "test.png", "no regular file");
+    }
+
+    /// An unchanged screenshot (the bytes its manifest names) whose blob in `.gleon/blobs` is
+    /// there but unusable: named with the reason, since `gleon pull` cannot simply fetch it.
+    #[test]
+    fn test_status_names_an_unusable_blob_of_an_unchanged_screenshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let gleon_dir = temp.path().join(".gleon");
+        let ctx = ResolvedContext {
+            base_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let manifests_dir = gleon_dir
+            .join("manifests")
+            .join(ctx.platform.key().unwrap());
+        let blobs_dir = gleon_dir.join("blobs").join("sha256");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        let png = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/baseline_100x100.png"),
+        )
+        .unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(&png));
+        WorkspaceIndex::new()
+            .save_test(
+                &manifests_dir,
+                "test",
+                &crate::manifest::SingleTestManifest {
+                    schema_version: 1,
+                    hash: crate::manifest::ImageHash::new("sha256", &hash).unwrap(),
+                    phash: crate::manifest::ImageHash::new("dhash", "0000000000000000").unwrap(),
+                    width: 100,
+                    height: 100,
+                },
+            )
+            .unwrap();
+        std::fs::write(temp.path().join("test.png"), &png).unwrap();
+        let unusable = |report: StatusReport| {
+            assert!(report.is_clean(), "{report:?}");
+            assert!(
+                matches!(
+                    report.unusable_blobs.as_slice(),
+                    [Explained { path, reason }]
+                        if path == Path::new("test.png") && reason.contains("no regular file")
+                ),
+                "{report:?}"
+            );
+            assert!(report.uncached.is_empty(), "{report:?}");
+        };
+
+        // A directory where the blob belongs: `gleon pull` could not write over it.
+        std::fs::create_dir(blobs_dir.join(&hash)).unwrap();
+        unusable(check_status(&ctx).unwrap());
+
+        // A symbolic link: never taken for a blob.
+        #[cfg(unix)]
+        {
+            std::fs::remove_dir(blobs_dir.join(&hash)).unwrap();
+            let elsewhere = temp.path().join("elsewhere.bin");
+            std::fs::write(&elsewhere, &png).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, blobs_dir.join(&hash)).unwrap();
+            unusable(check_status(&ctx).unwrap());
+        }
     }
 }

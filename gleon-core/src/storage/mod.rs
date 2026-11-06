@@ -99,6 +99,20 @@ pub enum StorageError {
         /// The hash of the downloaded content.
         actual: String,
     },
+
+    /// A local blob is not the content its hash names (changed in `.gleon/blobs`): never
+    /// uploaded, since every pull of it would fail.
+    #[error(
+        "the local blob {expected} does not match its hash (got {actual}): remove it from \
+         .gleon/blobs, then run `gleon stage` if this machine holds the screenshot, or push from \
+         the machine that recorded it"
+    )]
+    LocalHashMismatch {
+        /// The blob's hash value.
+        expected: String,
+        /// The hash of the local content.
+        actual: String,
+    },
 }
 
 /// Helper function constructing the remote object path for a CAS blob hash.
@@ -131,7 +145,90 @@ pub fn has_usable_local_blob(
 /// Returns `true` only if `path` is an existing regular file and not a symlink.
 #[must_use]
 pub fn is_usable_blob(path: &std::path::Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_symlink() && meta.is_file())
+    std::fs::symlink_metadata(path).is_ok_and(|meta| is_usable_blob_metadata(&meta))
+}
+
+/// Whether `meta` (of [`std::fs::symlink_metadata`], which never follows a link) is that of a
+/// usable blob: a regular file, not a symlink.
+#[must_use]
+pub fn is_usable_blob_metadata(meta: &std::fs::Metadata) -> bool {
+    !meta.is_symlink() && meta.is_file()
+}
+
+/// Why [`open_regular_file`] refused a path: a symbolic link, a directory or another file that
+/// is no regular file.
+#[derive(Debug)]
+struct NotRegularFile;
+
+impl std::fmt::Display for NotRegularFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Symlink or non-regular file blobs are not allowed for security reasons")
+    }
+}
+
+impl std::error::Error for NotRegularFile {}
+
+/// Opens `path` for reading once, without following a symbolic link, as a regular file only.
+///
+/// Returns the handle with its metadata, checked on the handle itself, so the file read is the
+/// file checked (no check-then-reopen race).
+///
+/// # Errors
+/// Returns [`std::io::ErrorKind::NotFound`] for a missing file, an error [`is_not_regular_file`]
+/// tells for a symbolic link, a directory or another non-regular file, and any other I/O error as
+/// it is.
+pub fn open_regular_file(
+    path: &std::path::Path,
+) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
+    let not_regular = || std::io::Error::new(std::io::ErrorKind::InvalidInput, NotRegularFile);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // No link followed, and a FIFO never blocks the open.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // The link itself opens, not its target.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        // A directory opens too (like `std::fs::metadata` opens it), so the metadata check below
+        // refuses it as no regular file instead of an access error.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    // `O_NOFOLLOW` refuses a symbolic link with `ELOOP`.
+    #[cfg(unix)]
+    let refused_link = |e: &std::io::Error| e.raw_os_error() == Some(libc::ELOOP);
+    #[cfg(not(unix))]
+    let refused_link = |_: &std::io::Error| false;
+    let file = options
+        .open(path)
+        .map_err(|e| if refused_link(&e) { not_regular() } else { e })?;
+    // A reparse point or a directory opens on Windows: its handle's metadata tells it apart.
+    let meta = file.metadata()?;
+    #[cfg(windows)]
+    let is_link = {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    };
+    #[cfg(not(windows))]
+    let is_link = meta.is_symlink();
+    if is_link || !meta.is_file() {
+        return Err(not_regular());
+    }
+    Ok((file, meta))
+}
+
+/// Whether `error` is [`open_regular_file`]'s refusal of a path that is no regular file.
+#[must_use]
+pub fn is_not_regular_file(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync>::is::<NotRegularFile>)
 }
 
 #[cfg(all(test, not(miri)))]
@@ -173,6 +270,56 @@ mod tests {
         let dir_hash = sha256(&"b".repeat(64));
         std::fs::create_dir_all(local_blob_path(root, &dir_hash)).unwrap();
         assert!(!has_usable_local_blob(root, &dir_hash));
+    }
+
+    /// One open without following a link: a regular file opens with its metadata, a directory
+    /// or a symbolic link is refused as no regular file, a missing path is `NotFound`.
+    #[test]
+    fn test_open_regular_file() {
+        use std::io::Read as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("blob");
+        std::fs::write(&file, b"png").unwrap();
+        let (mut opened, meta) = open_regular_file(&file).unwrap();
+        let mut bytes = Vec::new();
+        opened.read_to_end(&mut bytes).unwrap();
+        assert_eq!((bytes.as_slice(), meta.len()), (&b"png"[..], 3));
+
+        let directory = open_regular_file(temp.path()).unwrap_err();
+        assert!(is_not_regular_file(&directory), "{directory:?}");
+        let missing = open_regular_file(&temp.path().join("missing")).unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        assert!(!is_not_regular_file(&missing));
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            let refused = open_regular_file(&link).unwrap_err();
+            assert!(is_not_regular_file(&refused), "{refused:?}");
+            assert!(
+                refused.to_string().contains("non-regular file"),
+                "{refused}"
+            );
+        }
+    }
+
+    /// The metadata predicate decides like the path check it backs.
+    #[test]
+    fn test_is_usable_blob_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("blob");
+        std::fs::write(&file, b"png").unwrap();
+        let meta = |path: &std::path::Path| std::fs::symlink_metadata(path).unwrap();
+        assert!(is_usable_blob_metadata(&meta(&file)));
+        assert!(!is_usable_blob_metadata(&meta(temp.path())));
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(!is_usable_blob_metadata(&meta(&link)));
+            assert!(link.is_file(), "the link resolves to a file");
+        }
     }
 
     #[test]

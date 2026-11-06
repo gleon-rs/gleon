@@ -25,4 +25,4 @@ pub use pull::{PullError, PullResult, pull_blobs};
 pub use push::{PushError, PushResult, push_blobs};
 pub use resolve::{ConflictedManifestItem, ResolveError, apply_resolution, scan_conflicts};
 pub use stage::{StageError, StageResult, stage_workspace};
-pub use status::{StatusError, StatusReport, check_status};
+pub use status::{Explained, StatusError, StatusReport, check_status};

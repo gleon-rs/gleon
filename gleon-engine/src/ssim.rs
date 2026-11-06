@@ -553,6 +553,19 @@ pub fn analyze<'a>(
     actual: impl Into<Pixels<'a>>,
     policy: &SsimPolicy,
 ) -> SsimAnalysis {
+    analyze_with(baseline, actual, policy, true)
+}
+
+/// [`analyze`], rendering [`SsimAnalysis::diff_image`] of a failure only if `render_diff`.
+///
+/// # Panics
+/// Like [`analyze`].
+pub(crate) fn analyze_with<'a>(
+    baseline: impl Into<Pixels<'a>>,
+    actual: impl Into<Pixels<'a>>,
+    policy: &SsimPolicy,
+    render_diff: bool,
+) -> SsimAnalysis {
     let (baseline, actual) = (baseline.into(), actual.into());
     assert_eq!(
         baseline.dimensions(),
@@ -627,7 +640,8 @@ pub fn analyze<'a>(
         reason = "pixel counts are far below 2^52, so the f64 conversion is exact"
     )]
     let mean_ssim = (ssim_sum + (coarse_total - coarse_evaluated) as f64) / coarse_total as f64;
-    let diff_image = (failing_pixels > 0).then(|| render_diff(base, cand, fail_rect, &failing));
+    let diff_image = (render_diff && failing_pixels > 0)
+        .then(|| self::render_diff(base, cand, fail_rect, &failing));
     let planes = Planes {
         changed,
         excess: &excess,
@@ -1021,6 +1035,20 @@ mod tests {
         let a = analyze(&base, &cand, &POLICY);
         assert_eq!(a.peak_excess, 0.0, "{a:?}");
         assert_eq!(a.changed_pixels, 32);
+    }
+
+    /// Without a diff, the analysis is the same but for the image it does not render.
+    #[test]
+    fn test_analyze_without_diff_renders_nothing_else_alike() {
+        let base = solid(64, 64, [255, 255, 255, 255]);
+        let mut cand = base.clone();
+        cand.put_pixel(20, 30, Rgba([0, 0, 0, 255]));
+        let mut rendered = analyze(&base, &cand, &POLICY);
+        let skipped = analyze_with(&base, &cand, &POLICY, false);
+        assert!(!skipped.passed());
+        assert!(rendered.diff_image.is_some() && skipped.diff_image.is_none());
+        rendered.diff_image = None;
+        assert_eq!(format!("{rendered:?}"), format!("{skipped:?}"));
     }
 
     #[test]

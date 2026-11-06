@@ -382,7 +382,9 @@ mod tests {
         let manifests_dir = gleon_dir.join("manifests").join(plat_key);
         std::fs::create_dir_all(&manifests_dir).unwrap();
 
-        let hash = "1111111111111111111111111111111111111111111111111111111111111111";
+        // The content address of the empty blob uploaded below: uploads are checked.
+        let sha256 = crate::case::Sha256Hex::of(b"");
+        let hash = sha256.as_str();
         let manifest = crate::manifest::SingleTestManifest::new(
             ImageHash::new("sha256", hash).unwrap(),
             ImageHash::new("dhash", "0000000000000000").unwrap(),

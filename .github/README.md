@@ -85,7 +85,10 @@ git commit -m "chore: record initial visual regression baselines"
 When you or your team make changes and re-run your visual tests:
 
 ```bash
-# Check test status (Clean, Added, Modified, Deleted)
+# Check test status, judged like `gleon diff`: Added, Modified (fails its rule), Within
+# tolerance (passes it with other bytes: `gleon stage` records them), Cannot compare (with the
+# reason), Deleted; then unchanged screenshots whose blob in .gleon/blobs is missing (run
+# `gleon pull`) or unusable (a directory or a link: remove it, then pull)
 gleon status
 
 # Run pixel/SSIM comparison against committed baselines (one case report per screenshot)
@@ -186,7 +189,7 @@ Public repositories and local runs need no license; private repositories need on
 | :------------------------- | :------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------ |
 | `gleon init`               | Scaffolds the `.gleon/` directory tree and a `.gleon/gleon.yaml` (`--flutter`/`--generic`). | `gleon init`<br>`gleon init --generic`                                          |
 | `gleon stage [PATHS...]`   | Records matching screenshots as official baseline manifests for the current platform.       | `gleon stage`<br>`gleon stage test/goldens/login.png`                           |
-| `gleon status`             | Reports the status (`Clean`, `Added`, `Modified`, `Deleted`) of all discovered screenshots. | `gleon status`<br>`gleon status --json`                                         |
+| `gleon status`             | Lists added, modified, within-tolerance, uncomparable and deleted screenshots.              | `gleon status`<br>`gleon status --json`                                         |
 | `gleon diff`               | Runs visual comparison between actual screenshots and committed baselines.                  | `gleon diff`<br>`gleon diff --artifacts .gleon/runs/ci`                         |
 | `gleon test -- <COMMAND>`  | Runs a test command (e.g. `flutter test`) as one run with metrics on, then sums it up.      | `gleon test -- flutter test`<br>`gleon test -- npm test`                        |
 | `gleon report <FORMAT>`    | Renders the case reports of the latest run (`html`, `markdown`, `junit`, `json`).           | `gleon report html --out report.html`<br>`gleon report markdown --pr-number 42` |

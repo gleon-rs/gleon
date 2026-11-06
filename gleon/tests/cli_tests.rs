@@ -552,6 +552,161 @@ fn test_cli_diff_exit_code_on_match_and_mismatch() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// `gleon status` lists a change within the rule's threshold apart from modifications and names
+/// why a screenshot cannot be compared, in text and in JSON, without failing (real fixtures).
+#[test]
+fn test_status_lists_within_tolerance_and_uncomparable_screenshots()
+-> Result<(), Box<dyn std::error::Error>> {
+    let core_fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("gleon-core/tests/fixtures");
+    // `shots/*.png` with `threshold: 0.01`.
+    let dir = init_with_config("config/shots");
+    let shots = dir.path().join("shots");
+    std::fs::create_dir_all(&shots)?;
+    for (file, fixture) in [
+        ("dot.png", "baseline_gradient_100x100.png"),
+        ("broken.png", "baseline_100x100.png"),
+        ("corners.png", "200x100.png"),
+    ] {
+        std::fs::copy(core_fixtures.join(fixture), shots.join(file))?;
+    }
+    gleon()
+        .current_dir(dir.path())
+        .arg("stage")
+        .assert()
+        .success();
+    // One pixel of 10,000; no PNG at all; another size.
+    for (file, fixture) in [
+        ("dot.png", "diff_1px_black_center_100x100.png"),
+        ("broken.png", "corrupt.png"),
+        ("corners.png", "diff_16px_corners_100x100.png"),
+    ] {
+        std::fs::copy(core_fixtures.join(fixture), shots.join(file))?;
+    }
+
+    let output = gleon()
+        .current_dir(dir.path())
+        .args(["-q", "status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output)?;
+    let paths = |key: &str| -> Vec<std::path::PathBuf> {
+        json[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| path.as_str().unwrap().into())
+            .collect()
+    };
+    assert_eq!(
+        paths("modified"),
+        [std::path::Path::new("shots/corners.png")]
+    );
+    assert_eq!(
+        paths("within_tolerance"),
+        [std::path::Path::new("shots/dot.png")]
+    );
+    assert_eq!(paths("uncached"), Vec::<std::path::PathBuf>::new());
+    assert_eq!(json["unusable_blobs"], serde_json::json!([]));
+    let uncomparable = json["uncomparable"].as_array().unwrap();
+    assert_eq!(uncomparable.len(), 1, "{json}");
+    assert_eq!(
+        std::path::Path::new(uncomparable[0]["path"].as_str().unwrap()),
+        std::path::Path::new("shots/broken.png")
+    );
+    assert!(
+        uncomparable[0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("candidate image: "),
+        "{json}"
+    );
+
+    gleon()
+        .current_dir(dir.path())
+        .args(["-q", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Modified:\n  shots"))
+        .stdout(predicate::str::contains(
+            "Within tolerance (they pass their rule; `gleon stage` records the new bytes):",
+        ))
+        .stdout(predicate::str::contains(
+            "Cannot compare (`gleon diff` fails them too):",
+        ))
+        .stdout(predicate::str::contains("broken.png: candidate image: "));
+    Ok(())
+}
+
+/// A screenshot of another size than its golden is a finding of its own: neither `gleon status`
+/// nor `gleon diff` warns about a mask that reaches beyond the golden, while a screenshot of the
+/// same size still does (real fixtures; asserted on stderr, in the process of the CLI).
+#[test]
+fn test_masks_of_another_size_warn_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    let core_fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("gleon-core/tests/fixtures");
+    // A mask from x 150 to 250: beyond the 200x100 and the 100x100 goldens.
+    let dir = init_with_config("config/billing-masked-beyond");
+    let billing = dir.path().join("billing");
+    std::fs::create_dir_all(&billing)?;
+    let screenshots = [
+        // Another size: the size is the finding.
+        ("form.png", "200x100.png", "baseline_100x100.png"),
+        // The same size: compared under the mask, which reaches beyond it.
+        (
+            "same.png",
+            "baseline_gradient_100x100.png",
+            "diff_1px_black_center_100x100.png",
+        ),
+    ];
+    for (file, golden, _) in screenshots {
+        std::fs::copy(core_fixtures.join(golden), billing.join(file))?;
+    }
+    gleon()
+        .current_dir(dir.path())
+        .arg("stage")
+        .assert()
+        .success();
+    for (file, _, actual) in screenshots {
+        std::fs::copy(core_fixtures.join(actual), billing.join(file))?;
+    }
+    let warns_only_for_the_same_size = || {
+        predicate::str::contains("image_dims = 100x100")
+            .and(predicate::str::contains("image_dims = 200x100").not())
+    };
+
+    let status = gleon()
+        .current_dir(dir.path())
+        .args(["status", "--json"])
+        .assert()
+        .success()
+        .stderr(warns_only_for_the_same_size())
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&status)?;
+    let modified = json["modified"].as_array().unwrap();
+    assert_eq!(modified.len(), 1, "{json}");
+    assert_eq!(
+        std::path::Path::new(modified[0].as_str().unwrap()),
+        std::path::Path::new("billing/form.png")
+    );
+    gleon()
+        .current_dir(dir.path())
+        .arg("diff")
+        .assert()
+        .code(1)
+        .stderr(warns_only_for_the_same_size());
+    Ok(())
+}
+
 #[test]
 fn test_stage_already_up_to_date_message() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();

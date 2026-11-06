@@ -189,7 +189,12 @@ pub enum Commands {
     /// the directory has a pubspec.yaml: goldens under every test/ compared exactly, text on this
     /// platform)
     Init(InitArgs),
-    /// Print resolved configuration and active status
+    /// List added, modified, within-tolerance, uncomparable and deleted screenshots
+    ///
+    /// Modified screenshots fail their rule, as `gleon diff` judges them; within-tolerance ones
+    /// pass it with other bytes, which `gleon stage` records; uncomparable ones are listed with
+    /// the reason. Unchanged screenshots whose blob is missing or unusable in .gleon/blobs follow
+    /// (`--json` keys: `uncached`, `unusable_blobs`).
     Status {
         /// Format output as JSON
         #[arg(long = "json")]

@@ -277,3 +277,45 @@ async fn test_push_pull_all_platforms_option() {
     assert!(blobs_dir.join(sha1).is_file());
     assert!(blobs_dir.join(sha2).is_file());
 }
+
+/// A local blob that does not hold the bytes its name says is never uploaded: in the bucket it
+/// would fail every `gleon pull` of the team (real fixtures).
+#[tokio::test]
+async fn test_push_refuses_a_local_blob_that_does_not_match_its_hash() {
+    let workspace_temp = tempdir().unwrap();
+    let remote_temp = tempdir().unwrap();
+    let storage_config = StorageConfig::new(format!(
+        "file://{}",
+        remote_temp.path().to_string_lossy().replace('\\', "/")
+    ));
+    let ctx =
+        ResolvedContext::from_options(&ContextOptions::default(), workspace_temp.path()).unwrap();
+    init_workspace(&ctx, None).unwrap();
+    let screenshots_dir = workspace_temp.path().join("screenshots");
+    fs::create_dir_all(&screenshots_dir).unwrap();
+    let fixture_png = include_bytes!("fixtures/baseline_100x100.png");
+    fs::write(screenshots_dir.join("login.png"), fixture_png).unwrap();
+    stage_workspace(&ctx, None).unwrap();
+
+    let sha256_hex = gleon_core::case::Sha256Hex::of(fixture_png);
+    let local_blob = workspace_temp
+        .path()
+        .join(".gleon/blobs/sha256")
+        .join(sha256_hex.as_str());
+    fs::write(&local_blob, include_bytes!("fixtures/corrupt.png")).unwrap();
+
+    let error = push_blobs(&ctx, Some(&storage_config), false, None, false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("does not match its hash"), "{error}");
+    assert!(error.contains(sha256_hex.as_str()), "{error}");
+    assert!(
+        !remote_temp
+            .path()
+            .join("blobs/sha256")
+            .join(sha256_hex.as_str())
+            .exists(),
+        "nothing is uploaded"
+    );
+}

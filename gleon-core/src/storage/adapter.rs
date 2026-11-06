@@ -349,46 +349,8 @@ impl ObjectStoreAdapter {
         metadata: Option<&BlobMetadata>,
     ) -> Result<(), StorageError> {
         let key = blob_key(hash);
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
-        }
-
-        let std_file = options.open(src_path)?;
-
-        // On Windows, opening a reparse point with FILE_FLAG_OPEN_REPARSE_POINT succeeds.
-        // We must inspect the metadata of the opened handle to reject symlinks.
-        // On Unix, O_NOFOLLOW fails to open symlinks with ELOOP, but this check is a harmless safety net.
-        let file_meta = std_file.metadata()?;
-
-        #[cfg(windows)]
-        let is_symlink_or_reparse = {
-            use std::os::windows::fs::MetadataExt;
-            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-            file_meta.is_symlink()
-                || (file_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
-        };
-        #[cfg(not(windows))]
-        let is_symlink_or_reparse = file_meta.is_symlink();
-
-        if is_symlink_or_reparse || !file_meta.is_file() {
-            return Err(StorageError::Io {
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Symlink or non-regular file blobs are not allowed for security reasons",
-                ),
-            });
-        }
+        // One no-follow open of a regular file; the bytes read are those of the file checked.
+        let (std_file, file_meta) = super::open_regular_file(src_path)?;
 
         let len = file_meta.len();
         const MAX_BLOB_SIZE: u64 = 100 * 1024 * 1024;
@@ -412,6 +374,17 @@ impl ObjectStoreAdapter {
         )]
         let mut bytes = Vec::with_capacity(len as usize);
         tokio::io::AsyncReadExt::read_to_end(&mut file, &mut bytes).await?;
+        // Checked like a download (`write_verified`): other schemes cannot be checked there
+        // either.
+        if hash.scheme() == "sha256" {
+            let actual = gleon_model::case::Sha256Hex::of(&bytes);
+            if !actual.as_str().eq_ignore_ascii_case(hash.value()) {
+                return Err(StorageError::LocalHashMismatch {
+                    expected: hash.value().to_owned(),
+                    actual: actual.as_str().to_owned(),
+                });
+            }
+        }
 
         let payload_bytes = bytes::Bytes::from(bytes);
 
@@ -1195,7 +1168,8 @@ mod tests {
 
         let hash = crate::manifest::ImageHash::new(
             "sha256",
-            "6666666666666666666666666666666666666666666666666666666666666666",
+            // The content address of the sample: uploads are checked.
+            crate::case::Sha256Hex::of(b"sample_fallback_data").as_str(),
         )
         .unwrap();
 
@@ -1230,7 +1204,8 @@ mod tests {
 
         let hash = crate::manifest::ImageHash::new(
             "sha256",
-            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            // The content address of the sample: uploads are checked.
+            crate::case::Sha256Hex::of(b"data").as_str(),
         )
         .unwrap();
 
@@ -1258,7 +1233,8 @@ mod tests {
 
         let hash = crate::manifest::ImageHash::new(
             "sha256",
-            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            // The content address of the sample: uploads are checked.
+            crate::case::Sha256Hex::of(b"data2").as_str(),
         )
         .unwrap();
 

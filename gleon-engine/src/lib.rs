@@ -169,9 +169,49 @@ impl Measurement {
     }
 }
 
-/// The result of comparing a baseline and an actual image.
+/// What a comparison keeps of the diff visualization of a failure ([`compare_images_as`]):
+/// [`RgbaImage`] renders it, `()` renders none.
+pub trait DiffImage: Sized {
+    /// Whether a failure's diff is rendered at all.
+    const RENDERED: bool;
+
+    /// The diff of a failure, drawn by `draw` if this kind keeps one.
+    fn of(draw: impl FnOnce() -> RgbaImage) -> Self;
+
+    /// The diff of images of different sizes, drawn by `draw` (`None` when its canvas is over
+    /// the decoding budget) if this kind keeps one.
+    fn of_sizes(draw: impl FnOnce() -> Option<RgbaImage>) -> Option<Self>;
+}
+
+/// The diff rendered ([`compare_images`]).
+impl DiffImage for RgbaImage {
+    const RENDERED: bool = true;
+
+    fn of(draw: impl FnOnce() -> Self) -> Self {
+        draw()
+    }
+
+    fn of_sizes(draw: impl FnOnce() -> Option<Self>) -> Option<Self> {
+        draw()
+    }
+}
+
+/// No diff: for callers that only need the verdict and the measurement (`gleon status`), so a
+/// failure costs no image of its size.
+impl DiffImage for () {
+    const RENDERED: bool = false;
+
+    fn of(_: impl FnOnce() -> RgbaImage) -> Self {}
+
+    fn of_sizes(_: impl FnOnce() -> Option<RgbaImage>) -> Option<Self> {
+        None
+    }
+}
+
+/// The result of comparing a baseline and an actual image, with the diff visualization of a
+/// failure as `D` ([`DiffImage`]).
 #[derive(Debug, Clone, PartialEq)]
-pub enum ComparisonResult {
+pub enum ComparisonResult<D = RgbaImage> {
     /// The images match within the configured tolerance thresholds.
     Match {
         /// What the comparison measured (headroom to the thresholds).
@@ -182,7 +222,7 @@ pub enum ComparisonResult {
         /// What the comparison measured, including why it failed.
         measurement: Measurement,
         /// The generated visualization diff image.
-        diff_image: RgbaImage,
+        diff_image: D,
     },
     /// SSIM mode only: the images exceed [`ssim::MAX_ANALYSIS_PIXELS`], so they were not analyzed
     /// (the analysis workspace is bounded separately from the decoder budget).
@@ -197,17 +237,17 @@ pub enum ComparisonResult {
         /// Dimensions of the actual image.
         actual_size: (u32, u32),
         /// The visualization of both sizes ([`pixel::dimension_diff`]); `None` when its canvas
-        /// is over the decoding budget.
-        diff_image: Option<RgbaImage>,
+        /// is over the decoding budget, or when `D` keeps no diff.
+        diff_image: Option<D>,
     },
 }
 
-fn execute_pixel_comparison(
+fn execute_pixel_comparison<D: DiffImage>(
     baseline: Pixels<'_>,
     actual: Pixels<'_>,
     config: &DiffConfig,
     regions: &PixelRegions<'_>,
-) -> ComparisonResult {
+) -> ComparisonResult<D> {
     let threshold = config.threshold;
     let compared = pixel::compare(baseline, actual, regions, &PixelOptions::from(config));
     let analysis = compared.analysis;
@@ -238,7 +278,7 @@ fn execute_pixel_comparison(
     // Only generate the diff image once we know there's actually a mismatch to report.
     ComparisonResult::Mismatch {
         measurement,
-        diff_image: compared.diff_image(baseline, actual),
+        diff_image: D::of(|| compared.diff_image(baseline, actual)),
     }
 }
 
@@ -264,6 +304,22 @@ pub fn compare_images<'a>(
     config: &DiffConfig,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult {
+    compare_images_as(baseline, actual, mode, config, regions)
+}
+
+/// [`compare_images`], keeping the diff visualization of a failure as `D`: `()` decides and
+/// measures exactly the same but renders no diff, for callers that only need the verdict.
+///
+/// # Panics
+/// Like [`compare_images`].
+#[must_use]
+pub fn compare_images_as<'a, D: DiffImage>(
+    baseline: impl Into<Pixels<'a>>,
+    actual: impl Into<Pixels<'a>>,
+    mode: Mode,
+    config: &DiffConfig,
+    regions: &PixelRegions<'_>,
+) -> ComparisonResult<D> {
     let (baseline, actual) = (baseline.into(), actual.into());
     let (w1, h1) = baseline.dimensions();
     let (w2, h2) = actual.dimensions();
@@ -272,7 +328,7 @@ pub fn compare_images<'a>(
         return ComparisonResult::DimensionMismatch {
             baseline_size: (w1, h1),
             actual_size: (w2, h2),
-            diff_image: pixel::dimension_diff(baseline, actual, regions.masks),
+            diff_image: D::of_sizes(|| pixel::dimension_diff(baseline, actual, regions.masks)),
         };
     }
 
@@ -285,12 +341,12 @@ pub fn compare_images<'a>(
     }
 }
 
-fn execute_ssim_comparison(
+fn execute_ssim_comparison<D: DiffImage>(
     baseline: Pixels<'_>,
     actual: Pixels<'_>,
     config: &DiffConfig,
     regions: &PixelRegions<'_>,
-) -> ComparisonResult {
+) -> ComparisonResult<D> {
     let policy = SsimPolicy {
         min_similarity: config.min_similarity,
         color_tolerance: config.color_tolerance,
@@ -309,19 +365,22 @@ fn execute_ssim_comparison(
         image
     });
     let analyzed_actual = patched.as_ref().map_or(actual, Pixels::from);
-    let analysis = ssim::analyze(baseline, analyzed_actual, &policy);
+    let analysis = ssim::analyze_with(baseline, analyzed_actual, &policy, D::RENDERED);
     let text_passes = text.as_ref().is_none_or(pixel::Compared::text_passes);
     let measurement =
         Measurement::ssim(&analysis, text.as_ref().and_then(|text| text.analysis.text));
     if analysis.passed() && text_passes {
         return ComparisonResult::Match { measurement };
     }
-    let mut diff_image = analysis
-        .diff_image
-        .unwrap_or_else(|| ssim::passing_diff(baseline, analyzed_actual));
-    if let Some(text) = &text {
-        text.paint_text(&mut diff_image, baseline);
-    }
+    let diff_image = D::of(|| {
+        let mut diff_image = analysis
+            .diff_image
+            .unwrap_or_else(|| ssim::passing_diff(baseline, analyzed_actual));
+        if let Some(text) = &text {
+            text.paint_text(&mut diff_image, baseline);
+        }
+        diff_image
+    });
     ComparisonResult::Mismatch {
         measurement,
         diff_image,
@@ -344,6 +403,96 @@ mod tests {
 
     use super::*;
     use crate::config::DiffConfig;
+
+    /// `result` with its diff visualization dropped, as [`compare_images_as::<()>`] returns it.
+    fn without_diff(result: ComparisonResult) -> ComparisonResult<()> {
+        match result {
+            ComparisonResult::Match { measurement } => ComparisonResult::Match { measurement },
+            ComparisonResult::Mismatch { measurement, .. } => ComparisonResult::Mismatch {
+                measurement,
+                diff_image: (),
+            },
+            ComparisonResult::TooLarge { size } => ComparisonResult::TooLarge { size },
+            ComparisonResult::DimensionMismatch {
+                baseline_size,
+                actual_size,
+                ..
+            } => ComparisonResult::DimensionMismatch {
+                baseline_size,
+                actual_size,
+                diff_image: None,
+            },
+        }
+    }
+
+    /// Keeping no diff, a comparison decides and measures exactly as with one, in both modes,
+    /// with text and masks, and for another size; failures render nothing.
+    #[test]
+    fn test_compare_images_as_unit_decides_alike_and_renders_no_diff() {
+        let (white, black) = (Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]));
+        let baseline = ImageBuffer::from_pixel(48, 32, white);
+        let text = [Region {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+        }];
+        let masks = [Region {
+            x: 32,
+            y: 0,
+            width: 16,
+            height: 8,
+        }];
+        let regions = PixelRegions {
+            masks: &masks,
+            text: &text,
+            text_tolerance: Some(0.05),
+        };
+        let config = DiffConfig::default();
+        // A dense change of the text, a masked change and a change elsewhere.
+        let mut changed = baseline.clone();
+        for x in 0..16 {
+            changed.put_pixel(x, 0, black);
+        }
+        changed.put_pixel(40, 2, black);
+        changed.put_pixel(40, 20, black);
+        let wider = ImageBuffer::from_pixel(49, 32, white);
+
+        let mut outcomes = Vec::new();
+        for (actual, mode) in [
+            (&baseline, Mode::Pixel),
+            (&changed, Mode::Pixel),
+            (&wider, Mode::Pixel),
+            (&baseline, Mode::Ssim),
+            (&changed, Mode::Ssim),
+            (&wider, Mode::Ssim),
+        ] {
+            let rendered = compare_images(&baseline, actual, mode, &config, &regions);
+            let skipped: ComparisonResult<()> =
+                compare_images_as(&baseline, actual, mode, &config, &regions);
+            outcomes.push(std::mem::discriminant(&skipped));
+            assert_eq!(skipped, without_diff(rendered), "{mode:?}");
+        }
+        // Every outcome that renders a diff was exercised.
+        assert!(matches!(
+            compare_images_as::<()>(&baseline, &changed, Mode::Ssim, &config, &regions),
+            ComparisonResult::Mismatch { .. }
+        ));
+        // Over the SSIM analysis budget nothing is analyzed, with a diff kept or not.
+        let huge = ImageBuffer::from_pixel(4097, 4096, white);
+        let none = PixelRegions::NONE;
+        assert_eq!(
+            compare_images_as::<()>(&huge, &huge, Mode::Ssim, &config, &none),
+            without_diff(compare_images(&huge, &huge, Mode::Ssim, &config, &none))
+        );
+        assert!(outcomes.contains(&std::mem::discriminant(
+            &ComparisonResult::<()>::DimensionMismatch {
+                baseline_size: (0, 0),
+                actual_size: (0, 0),
+                diff_image: None,
+            }
+        )));
+    }
 
     /// Pixel mode passes a frame whose text differs within its policy and fails a strict
     /// difference or a dense text cluster; masked pixels are neither compared nor counted, and

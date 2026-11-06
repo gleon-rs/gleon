@@ -1008,17 +1008,15 @@ mod tests {
             let dummy_src = repo_root.join("dummy.png");
             std::fs::write(&dummy_src, b"fake png").unwrap();
 
-            let h_orphan = ImageHash::new(
-                "sha256",
-                "7777777777777777777777777777777777777777777777777777777777777777",
-            )
-            .unwrap();
+            // The content address of the dummy blob: uploads are checked.
+            let h_orphan =
+                ImageHash::new("sha256", crate::case::Sha256Hex::of(b"fake png").as_str()).unwrap();
             adapter.upload_blob(&h_orphan, &dummy_src).await.unwrap();
 
             let orphan_path = remote_dir
                 .join("blobs")
                 .join("sha256")
-                .join("7777777777777777777777777777777777777777777777777777777777777777");
+                .join(h_orphan.value());
             let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
             let times = std::fs::FileTimes::new().set_modified(old_time);
             let f = std::fs::File::options()

@@ -105,10 +105,16 @@ fn sha256_of(bytes: &[u8]) -> gleon_core::manifest::ImageHash {
 async fn test_download_rejects_content_that_does_not_match_its_hash() {
     let adapter = ObjectStoreAdapter::from_config(&StorageConfig::new("memory://")).unwrap();
     let dir = tempdir().unwrap();
-    let src = dir.path().join("src.png");
-    std::fs::write(&src, b"truncated").unwrap();
     let claimed = sha256_of(b"the whole blob");
-    adapter.upload_blob(&claimed, &src).await.unwrap();
+    // Seeded raw: `upload_blob` refuses content that is not what its hash names.
+    adapter
+        .put_object(
+            &format!("blobs/sha256/{}", claimed.value()),
+            b"truncated".to_vec().into(),
+            None,
+        )
+        .await
+        .unwrap();
 
     let blobs = dir.path().join("blobs/sha256");
     let dest = blobs.join(claimed.value());
@@ -178,11 +184,7 @@ async fn test_adapter_download_io_errors() {
     let src_file = dir.path().join("sample_blob.png");
     std::fs::write(&src_file, b"png_file_bytes").expect("write src file");
 
-    let blob_hash = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "1111111111111111111111111111111111111111111111111111111111111111",
-    )
-    .unwrap();
+    let blob_hash = sha256_of(b"png_file_bytes");
     adapter.upload_blob(&blob_hash, &src_file).await.unwrap();
 
     let file_as_dir = dir.path().join("regular_file.txt");
@@ -206,11 +208,7 @@ async fn test_adapter_list_blobs() {
     let src_file = dir.path().join("blob.png");
     std::fs::write(&src_file, b"sample bytes").unwrap();
 
-    let blob_hash = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "2222222222222222222222222222222222222222222222222222222222222222",
-    )
-    .unwrap();
+    let blob_hash = sha256_of(b"sample bytes");
     adapter.upload_blob(&blob_hash, &src_file).await.unwrap();
 
     let blobs = adapter.list_blobs("sha256").await.unwrap();
@@ -265,11 +263,7 @@ async fn test_upload_blob_with_metadata_attributes() {
     let src_file = dir.path().join("blob_with_meta.png");
     std::fs::write(&src_file, b"sample_png_bytes").unwrap();
 
-    let hash = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "4444444444444444444444444444444444444444444444444444444444444444",
-    )
-    .unwrap();
+    let hash = sha256_of(b"sample_png_bytes");
 
     let meta = BlobMetadata::new("auth/login_screen", "macos-arm64");
     adapter
@@ -330,11 +324,7 @@ async fn test_local_file_system_skips_attributes_for_file_scheme() {
     let src_file = dir.path().join("local_sample.png");
     std::fs::write(&src_file, b"sample_file_data").unwrap();
 
-    let hash = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "5555555555555555555555555555555555555555555555555555555555555555",
-    )
-    .unwrap();
+    let hash = sha256_of(b"sample_file_data");
 
     let meta = BlobMetadata::new("home/dashboard", "linux-x86_64");
     adapter
@@ -356,11 +346,7 @@ async fn test_upload_blob_with_custom_content_type_and_sanitization() {
     let src_file = dir.path().join("blob_custom_meta.png");
     std::fs::write(&src_file, b"sample_custom_bytes").unwrap();
 
-    let hash = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "7777777777777777777777777777777777777777777777777777777777777777",
-    )
-    .unwrap();
+    let hash = sha256_of(b"sample_custom_bytes");
 
     // Pass custom content_type and invalid (control / newline) characters in metadata
     let mut meta = BlobMetadata::new("auth/login", "macos-arm64");
@@ -404,12 +390,10 @@ async fn test_upload_blob_with_custom_content_type_and_sanitization() {
         "macos-arm64/auth/login.png"
     );
 
-    // Second upload: invalid path and invalid content_type are also skipped safely
-    let hash2 = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "9999999999999999999999999999999999999999999999999999999999999999",
-    )
-    .unwrap();
+    // Second upload (another blob): invalid path and invalid content_type are also skipped safely
+    let src_file2 = dir.path().join("blob_custom_meta_2.png");
+    std::fs::write(&src_file2, b"sample_custom_bytes_2").unwrap();
+    let hash2 = sha256_of(b"sample_custom_bytes_2");
 
     let meta2 = BlobMetadata {
         content_type: Some("invalid\ncontent/type".to_string()),
@@ -418,7 +402,7 @@ async fn test_upload_blob_with_custom_content_type_and_sanitization() {
     };
 
     adapter
-        .upload_blob_with_metadata(&hash2, &src_file, Some(&meta2))
+        .upload_blob_with_metadata(&hash2, &src_file2, Some(&meta2))
         .await
         .unwrap();
 
@@ -435,16 +419,15 @@ async fn test_upload_blob_with_custom_content_type_and_sanitization() {
             .is_none()
     );
 
-    // Third upload: metadata with None fields falls back to default Content-Type and sets no headers
-    let hash3 = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "1111111111111111111111111111111111111111111111111111111111111111",
-    )
-    .unwrap();
+    // Third upload (another blob): metadata with None fields falls back to default Content-Type and
+    // sets no headers
+    let src_file3 = dir.path().join("blob_custom_meta_3.png");
+    std::fs::write(&src_file3, b"sample_custom_bytes_3").unwrap();
+    let hash3 = sha256_of(b"sample_custom_bytes_3");
 
     let meta3 = BlobMetadata::default();
     adapter
-        .upload_blob_with_metadata(&hash3, &src_file, Some(&meta3))
+        .upload_blob_with_metadata(&hash3, &src_file3, Some(&meta3))
         .await
         .unwrap();
 
@@ -484,11 +467,7 @@ async fn test_adapter_delete_blob_lifecycle() {
     let src_file = dir.path().join("sample_blob.png");
     std::fs::write(&src_file, b"png_file_bytes").expect("write src file");
 
-    let blob_hash = gleon_core::manifest::ImageHash::new(
-        "sha256",
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    )
-    .unwrap();
+    let blob_hash = sha256_of(b"png_file_bytes");
 
     // 1. Upload blob
     adapter
@@ -530,4 +509,39 @@ fn test_adapter_r2_s3_gcs_construction_and_default_concurrency() {
     let config_gs = StorageConfig::new("gs://my-bucket/custom-prefix");
     let adapter_gs = ObjectStoreAdapter::from_config(&config_gs).unwrap();
     assert_eq!(adapter_gs.concurrency(), 8);
+}
+
+/// A local file that is not what its hash names is never uploaded, like a download that is not
+/// is never kept (real fixtures): the bucket stays content addressed.
+#[tokio::test]
+async fn test_upload_refuses_content_that_does_not_match_its_hash() {
+    let adapter = ObjectStoreAdapter::from_config(&StorageConfig::new("memory://")).unwrap();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let claimed = sha256_of(&std::fs::read(fixtures.join("baseline_100x100.png")).unwrap());
+
+    let err = adapter
+        .upload_blob(&claimed, &fixtures.join("corrupt.png"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, StorageError::LocalHashMismatch { expected, actual }
+            if expected == claimed.value() && actual != expected),
+        "{err:?}"
+    );
+    // The advice covers a blob of this machine's screenshot and one of another platform's.
+    assert!(err.to_string().contains("gleon stage"), "{err}");
+    assert!(
+        err.to_string().contains("the machine that recorded it"),
+        "{err}"
+    );
+    assert!(
+        !adapter.blob_exists(&claimed).await.unwrap(),
+        "nothing is uploaded"
+    );
+
+    adapter
+        .upload_blob(&claimed, &fixtures.join("baseline_100x100.png"))
+        .await
+        .unwrap();
+    assert!(adapter.blob_exists(&claimed).await.unwrap());
 }
