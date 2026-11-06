@@ -644,34 +644,50 @@ fn test_status_lists_within_tolerance_and_uncomparable_screenshots()
 }
 
 /// A screenshot of another size than its golden is a finding of its own: neither `gleon status`
-/// nor `gleon diff` warns about a mask that reaches beyond the golden (real fixtures).
+/// nor `gleon diff` warns about a mask that reaches beyond the golden, while a screenshot of the
+/// same size still does (real fixtures; asserted on stderr, in the process of the CLI).
 #[test]
 fn test_masks_of_another_size_warn_nothing() -> Result<(), Box<dyn std::error::Error>> {
     let core_fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("gleon-core/tests/fixtures");
-    // A mask from x 150 to 250 on the 200x100 golden.
+    // A mask from x 150 to 250: beyond the 200x100 and the 100x100 goldens.
     let dir = init_with_config("config/billing-masked-beyond");
     let billing = dir.path().join("billing");
     std::fs::create_dir_all(&billing)?;
-    std::fs::copy(core_fixtures.join("200x100.png"), billing.join("form.png"))?;
+    let screenshots = [
+        // Another size: the size is the finding.
+        ("form.png", "200x100.png", "baseline_100x100.png"),
+        // The same size: compared under the mask, which reaches beyond it.
+        (
+            "same.png",
+            "baseline_gradient_100x100.png",
+            "diff_1px_black_center_100x100.png",
+        ),
+    ];
+    for (file, golden, _) in screenshots {
+        std::fs::copy(core_fixtures.join(golden), billing.join(file))?;
+    }
     gleon()
         .current_dir(dir.path())
         .arg("stage")
         .assert()
         .success();
-    std::fs::copy(
-        core_fixtures.join("baseline_100x100.png"),
-        billing.join("form.png"),
-    )?;
+    for (file, _, actual) in screenshots {
+        std::fs::copy(core_fixtures.join(actual), billing.join(file))?;
+    }
+    let warns_only_for_the_same_size = || {
+        predicate::str::contains("image_dims = 100x100")
+            .and(predicate::str::contains("image_dims = 200x100").not())
+    };
 
     let status = gleon()
         .current_dir(dir.path())
         .args(["status", "--json"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Mask zone").not())
+        .stderr(warns_only_for_the_same_size())
         .get_output()
         .stdout
         .clone();
@@ -687,7 +703,7 @@ fn test_masks_of_another_size_warn_nothing() -> Result<(), Box<dyn std::error::E
         .arg("diff")
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("Mask zone").not());
+        .stderr(warns_only_for_the_same_size());
     Ok(())
 }
 

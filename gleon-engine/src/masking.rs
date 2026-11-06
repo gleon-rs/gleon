@@ -376,46 +376,19 @@ mod tests {
         }
     }
 
-    /// The WARN events `run` logs on this thread, counted, and what it returns.
-    fn warnings<T>(run: impl FnOnce() -> T) -> (T, usize) {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-
-        use tracing_subscriber::layer::SubscriberExt as _;
-
-        /// Counts the WARN events it sees.
-        struct Warnings(Arc<AtomicUsize>);
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                let is_warning = *event.metadata().level() == tracing::Level::WARN;
-                self.0.fetch_add(usize::from(is_warning), Ordering::Relaxed);
-            }
-        }
-        let count = Arc::new(AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(Warnings(Arc::clone(&count)));
-        let value = tracing::subscriber::with_default(subscriber, run);
-        (value, count.load(Ordering::Relaxed))
-    }
-
-    /// The zones of a diff of two sizes resolve alike, without a warning: the sizes are the
-    /// finding, not the masks.
+    /// The zones of a diff of two sizes resolve alike, but quietly: the sizes are the finding, not
+    /// the masks. (That no warning is logged is asserted on the stderr of the CLI, in its own
+    /// process: a thread-local subscriber misses events when parallel tests move the global level
+    /// of tracing.)
     #[test]
-    fn quiet_resolution_resolves_alike_without_warning() {
+    fn quiet_resolution_resolves_alike() {
         let zones = [
             zone(90, 0, Dimension::Pixels(20), Dimension::Pixels(100)),
             zone(0, 0, Dimension::Pixels(1), Dimension::Pixels(1)),
         ];
-        // One warning per zone reaching beyond the image.
-        let ((regions, clamped), loud) = warnings(|| resolve_zones(&zones, 100, 100));
-        assert_eq!((clamped, loud), (1, 1));
-        let (quiet_regions, quiet) = warnings(|| resolve_zones_quietly(&zones, 100, 100));
-        assert_eq!((quiet_regions, quiet), (regions, 0));
+        let (regions, clamped) = resolve_zones(&zones, 100, 100);
+        assert_eq!(clamped, 1);
+        assert_eq!(resolve_zones_quietly(&zones, 100, 100), regions);
     }
 
     #[test]

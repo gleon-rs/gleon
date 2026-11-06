@@ -707,23 +707,11 @@ mod tests {
         ));
     }
 
-    /// The log `run` writes on this thread, formatted, and what it returns.
-    fn logged<T>(run: impl FnOnce() -> T) -> (T, String) {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        // `&File` is `io::Write`, so a shared file collects the formatted log.
-        let writer = std::sync::Arc::new(file.reopen().unwrap());
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(writer)
-            .finish();
-        let value = tracing::subscriber::with_default(subscriber, run);
-        (value, std::fs::read_to_string(file.path()).unwrap())
-    }
-
-    /// A mask beyond the golden warns when the images share a size; with two sizes the sizes are
-    /// the finding: no warning, and `verdict` does not even resolve the masks.
+    /// A mask beyond the golden is clamped when the images share a size; with two sizes the sizes
+    /// are the finding: no mask counts as clamped, and `verdict` decides without the masks. (That
+    /// nothing is logged then is asserted on the stderr of the CLI, in its own process.)
     #[test]
-    fn test_masks_of_images_of_two_sizes_warn_nothing() {
+    fn test_masks_of_images_of_two_sizes_count_nothing() {
         let golden = png(8, 8, |_, _| RED);
         let wider = png(9, 8, |_, _| RED);
         let beyond = [Zone {
@@ -732,13 +720,10 @@ mod tests {
             width: Dimension::Pixels(4),
             height: Dimension::Pixels(1),
         }];
-        let (same, warned) =
-            logged(|| compare(&golden, Candidate::Png(&golden), &EXACT, &beyond, None).unwrap());
+        let same = compare(&golden, Candidate::Png(&golden), &EXACT, &beyond, None).unwrap();
         assert_eq!(same.clamped_masks, 1);
-        assert!(warned.contains("Mask zone extends beyond"), "{warned}");
 
-        let (sizes, quiet) =
-            logged(|| compare(&golden, Candidate::Png(&wider), &EXACT, &beyond, None).unwrap());
+        let sizes = compare(&golden, Candidate::Png(&wider), &EXACT, &beyond, None).unwrap();
         assert!(matches!(
             sizes.compared,
             Compared::DimensionMismatch {
@@ -746,10 +731,11 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!((sizes.clamped_masks, quiet.as_str()), (0, ""));
-        let (verdict, quiet) =
-            logged(|| verdict(&golden, Candidate::Png(&wider), &EXACT, &beyond).unwrap());
-        assert_eq!((verdict, quiet.as_str()), (Verdict::DimensionMismatch, ""));
+        assert_eq!(sizes.clamped_masks, 0);
+        assert_eq!(
+            verdict(&golden, Candidate::Png(&wider), &EXACT, &beyond).unwrap(),
+            Verdict::DimensionMismatch
+        );
     }
 
     /// `verdict` decides like `compare`, under every mode, masks and sizes.

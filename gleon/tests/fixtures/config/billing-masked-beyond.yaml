@@ -1,4 +1,4 @@
-# A mask that reaches beyond the 200x100 fixture's right edge.
+# A mask that reaches beyond the right edge of the 200x100 and the 100x100 fixtures.
 required_version: ">=0.1.0"
 screenshots:
   - include: "billing/**/*.png"

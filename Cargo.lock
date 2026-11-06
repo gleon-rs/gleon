@@ -1704,7 +1704,6 @@ dependencies = [
  "serde",
  "thiserror",
  "tracing",
- "tracing-subscriber",
  "yaml_serde",
 ]
 
@@ -1740,7 +1739,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
- "tracing-subscriber",
  "yaml_serde",
 ]
 

@@ -32,4 +32,3 @@ schemars = ["dep:schemars"]
 
 [dev-dependencies]
 serde_yaml = { workspace = true }
-tracing-subscriber = { workspace = true }

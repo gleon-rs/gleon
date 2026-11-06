@@ -192,7 +192,12 @@ pub fn open_regular_file(
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+        // The link itself opens, not its target.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        // A directory opens too (like `std::fs::metadata` opens it), so the metadata check below
+        // refuses it as no regular file instead of an access error.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
     }
     // `O_NOFOLLOW` refuses a symbolic link with `ELOOP`.
     #[cfg(unix)]
@@ -202,7 +207,7 @@ pub fn open_regular_file(
     let file = options
         .open(path)
         .map_err(|e| if refused_link(&e) { not_regular() } else { e })?;
-    // A reparse point opens on Windows: its handle's metadata tells it apart.
+    // A reparse point or a directory opens on Windows: its handle's metadata tells it apart.
     let meta = file.metadata()?;
     #[cfg(windows)]
     let is_link = {

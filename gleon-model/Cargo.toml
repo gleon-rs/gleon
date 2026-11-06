@@ -30,4 +30,3 @@ tracing = { workspace = true }
 [dev-dependencies]
 globset = { workspace = true }
 regex = { workspace = true }
-tracing-subscriber = { workspace = true }
