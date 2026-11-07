@@ -695,7 +695,8 @@ pub enum RuleError {
 
 /// The thresholds of a rule's mode: each key belongs to one mode, a key of another mode is an
 /// error by being there (even at its default), and a key of the rule's mode left out is its
-/// default.
+/// default, except `threshold`, which `mode: pixel` requires (no share of differing pixels is
+/// tolerated unless it is written).
 // Every key is optional (`default`), and none has a `default` of `null` in the schema
 // (`skip_serializing_if`); `with` gives the schema the type of the value.
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]

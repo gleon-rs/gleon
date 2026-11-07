@@ -402,7 +402,8 @@ set the CLI's platform only. The case `name` and rule matching are the same on e
 
 > [!IMPORTANT]
 > `gleon diff`, `gleon test` and the `verify` command read the manifests of the checkout, so a shallow clone is enough for them.
-> `gleon gc` reads the manifests of every commit of every branch, so it refuses a **shallow clone** (`fetch-depth: 1`, the default of `actions/checkout`).
+> `gleon gc` keeps the blobs that these manifests name: those of the workspace, at `HEAD`, and at the tip of each branch, remote branch, tag and pull request ref. It reads no older commit, so after the grace period it deletes a blob that only an older commit names, also in a full clone.
+> `gleon gc` refuses a **shallow clone** (`fetch-depth: 1`, the default of `actions/checkout`) unless `--force` or `--dry-run` is given: such a clone has no other branches and tags.
 >
 > **In the job that runs `gleon gc`, configure `actions/checkout` with `fetch-depth: 0`:**
 
@@ -410,7 +411,7 @@ set the CLI's platform only. The case `name` and rule matching are the same on e
 - name: Checkout repository
   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
   with:
-    fetch-depth: 0 # gleon gc reads the history of every branch
+    fetch-depth: 0 # no shallow clone: every branch and tag, whose tips gleon gc reads
 ```
 
 ### Pull Request Verification Workflow

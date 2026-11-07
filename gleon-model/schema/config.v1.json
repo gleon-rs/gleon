@@ -88,7 +88,7 @@
       ]
     },
     "DiffConfig": {
-      "description": "The thresholds of a rule's mode: each key belongs to one mode, a key of another mode is an\nerror by being there (even at its default), and a key of the rule's mode left out is its\ndefault.",
+      "description": "The thresholds of a rule's mode: each key belongs to one mode, a key of another mode is an\nerror by being there (even at its default), and a key of the rule's mode left out is its\ndefault, except `threshold`, which `mode: pixel` requires (no share of differing pixels is\ntolerated unless it is written).",
       "type": "object",
       "properties": {
         "anti_alias": {
