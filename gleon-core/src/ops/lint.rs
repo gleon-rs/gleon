@@ -279,7 +279,8 @@ mod tests {
 
     /// A manifest named by no valid test path fails the lint, as it fails every command that loads
     /// its platform: a path with a space, and one that names the test case of another file once
-    /// lowercase (`\` as `/`).
+    /// lowercase (`\` as `/`). `auth\login.json` is a file name on Unix only.
+    #[cfg(unix)]
     #[test]
     fn test_lint_fails_manifests_no_index_loads() {
         let temp = tempdir().unwrap();

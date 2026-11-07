@@ -4,6 +4,10 @@ use std::{fs, path::Path};
 
 /// Copies the fixture config `tests/fixtures/<fixture>.yaml` (`config/…` or `platform/…`) to
 /// `.gleon/gleon.yaml` of the workspace at `root`, creating `.gleon` when needed.
+#[allow(
+    dead_code,
+    reason = "each integration test binary uses its own subset of the helpers"
+)]
 pub fn copy_config(root: &Path, fixture: &str) {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -41,3 +45,17 @@ pub const GLEON_ENV: [&str; 9] = [
     reason = "each integration test binary uses its own subset of the helpers"
 )]
 pub const FLUTTER_GOLDENS: &str = "../../../gleon-core/tests/fixtures/config/flutter_goldens";
+
+/// Clears the environment of `cmd` but for where an instrumented run (`cargo llvm-cov`) collects
+/// profiles: without it the child writes its profile into its working directory, and its
+/// coverage is lost.
+#[allow(
+    dead_code,
+    reason = "each integration test binary uses its own subset of the helpers"
+)]
+pub fn clear_env(cmd: &mut assert_cmd::Command) {
+    cmd.env_clear();
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        cmd.env("LLVM_PROFILE_FILE", profile);
+    }
+}

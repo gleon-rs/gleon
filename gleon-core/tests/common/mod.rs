@@ -4,6 +4,10 @@ use std::{fs, path::Path};
 
 /// Copies the fixture config `tests/fixtures/config/<name>.yaml` to `.gleon/gleon.yaml` of the
 /// workspace at `root`, creating `.gleon` when needed.
+#[allow(
+    dead_code,
+    reason = "each integration test binary uses its own subset of the helpers"
+)]
 pub fn copy_config(root: &Path, name: &str) {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/config")
@@ -68,4 +72,20 @@ pub fn assert_unchanged(files: &[(std::path::PathBuf, Vec<u8>)]) {
     for (path, bytes) in files {
         assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
     }
+}
+
+/// Whether the blob `hash` is in the remote storage of `adapter`.
+#[allow(
+    dead_code,
+    reason = "each integration test binary uses its own subset of the helpers"
+)]
+pub async fn blob_exists(
+    adapter: &gleon_core::storage::ObjectStoreAdapter,
+    hash: &gleon_core::manifest::ImageHash,
+) -> bool {
+    adapter
+        .head_object(gleon_core::storage::blob_key(hash).as_ref())
+        .await
+        .unwrap()
+        .is_some()
 }

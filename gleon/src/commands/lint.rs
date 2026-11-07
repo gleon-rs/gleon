@@ -1,7 +1,7 @@
 //! Implementation of the `gleon lint-manifests` subcommand.
 
 use gleon_core::{context::ResolvedContext, ops::lint_workspace_manifests};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{commands::report_failure, exit_code::ExitCode};
 
@@ -24,6 +24,13 @@ pub fn run_lint(ctx: &ResolvedContext, platform_filter: Option<&str>) -> ExitCod
         "Inspected {} manifest file(s): {} valid.",
         report.total_files, report.valid_files
     );
+    for path in &report.foreign_entries {
+        warn!(
+            "{} is no platform directory, so gleon never reads it (an older layout, a stray \
+             file?): manifests belong in .gleon/manifests/<platform key>/",
+            path.display()
+        );
+    }
 
     if !report.conflicted_files.is_empty() {
         error!("Git merge conflict markers (<<<<<<<) found in:");

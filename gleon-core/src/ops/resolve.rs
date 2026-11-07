@@ -66,10 +66,13 @@ pub fn scan_conflicts(
     let search_dirs = if let Some(filter) = platform_filter {
         let search_dir = platform_filter_dir(&manifests_root, filter)
             .map_err(|p| ResolveError::InvalidPlatformFilter(p.to_string()))?;
-        if std::fs::metadata(&search_dir).is_err() {
-            return Err(ResolveError::ManifestDirNotFound(search_dir));
+        match std::fs::metadata(&search_dir) {
+            Ok(_) => vec![search_dir],
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ResolveError::ManifestDirNotFound(search_dir));
+            }
+            Err(e) => return Err(ResolveError::Io(e)),
         }
-        vec![search_dir]
     } else {
         let root = read_manifests_root(&manifests_root).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -291,6 +294,16 @@ mod tests {
             err_missing,
             Err(ResolveError::ManifestDirNotFound(_))
         ));
+        // One that cannot be read is no missing one: here `.gleon/manifests` is a file.
+        let manifests = temp.path().join(".gleon").join("manifests");
+        std::fs::create_dir_all(manifests.parent().unwrap()).unwrap();
+        std::fs::write(&manifests, "").unwrap();
+        let err_unreadable = scan_conflicts(temp.path(), Some("linux-x86_64"));
+        assert!(
+            matches!(err_unreadable, Err(ResolveError::Io(_))),
+            "{err_unreadable:?}"
+        );
+        std::fs::remove_file(&manifests).unwrap();
 
         // 4. Positive valid single platform filter case
         let manifests_dir = temp

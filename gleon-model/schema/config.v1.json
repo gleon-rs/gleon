@@ -88,7 +88,7 @@
       ]
     },
     "DiffConfig": {
-      "description": "Configuration parameters for the diff engine.",
+      "description": "The thresholds of a rule's mode: each key belongs to one mode, a key of another mode is an\nerror by being there (even at its default), and a key of the rule's mode left out is its\ndefault.",
       "type": "object",
       "properties": {
         "anti_alias": {

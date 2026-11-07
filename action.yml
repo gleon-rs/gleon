@@ -17,10 +17,6 @@ inputs:
     description: "Fail build on license violation ('true' or 'false')"
     required: false
     default: "false"
-  target-branch:
-    description: "Target branch for baseline comparison (defaults to PR base ref or default branch)"
-    required: false
-    default: "${{ github.base_ref || github.event.repository.default_branch || 'main' }}"
   command:
     description: "gleon command to execute (e.g. 'diff', 'pull', 'approve', 'verify')"
     required: false
@@ -206,7 +202,6 @@ runs:
       env:
         GLEON_LICENSE_KEY: ${{ inputs.license-key }}
         GLEON_STRICT: ${{ inputs.strict }}
-        GLEON_TARGET_BRANCH: ${{ inputs.target-branch }}
         GLEON_COMMAND: ${{ inputs.command }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         ARGS_FILE: ${{ steps.parse.outputs.args_file }}
@@ -271,7 +266,6 @@ runs:
       env:
         GLEON_LICENSE_KEY: ${{ inputs.license-key }}
         GLEON_STRICT: ${{ inputs.strict }}
-        GLEON_TARGET_BRANCH: ${{ inputs.target-branch }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         TEST_COMMAND_FILE: ${{ steps.parse.outputs.test_command_file }}
         ARGS_FILE: ${{ steps.parse.outputs.args_file }}

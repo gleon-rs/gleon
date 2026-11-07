@@ -198,16 +198,15 @@ Public repositories and local runs need no license; private repositories need on
 | `gleon pull`               | Downloads missing baseline blobs from remote object storage (`--require-storage` or `GLEON_REQUIRE_STORAGE=1`: fail without one). | `gleon pull`<br>`gleon pull --all`                                     |
 | `gleon push`               | Uploads locally staged baseline blobs to remote object storage (`--require-storage` likewise). | `gleon push`                                                                 |
 | `gleon clean`              | Removes `.gleon/runs/`; `--screenshots` also deletes, untracks and ignores screenshots.     | `gleon clean`<br>`gleon clean --screenshots --dry-run`                          |
-| `gleon lint`               | Verifies integrity and schema compliance of all manifests and configs.                      | `gleon lint`                                                                    |
-| `gleon resolve`            | Interactively or automatically resolves Git merge conflicts in baseline manifests.          | `gleon resolve`                                                                 |
+| `gleon lint`               | Verifies integrity and schema compliance of all manifests, and names entries of `.gleon/manifests/` that are no platform directory (gleon never reads them). | `gleon lint`                                                                    |
+| `gleon resolve`            | Interactively resolves Git merge conflicts in baseline manifests (of one platform with `--platform`). | `gleon resolve`                                                                 |
 
 ### Global Flags
 
 All commands support the following global options:
 
 - `--config <PATH>`: Specify an explicit path to the configuration file (default: `.gleon/gleon.yaml`, searched upwards from the current directory, no further than the repository root (the first directory with `.git`, `.hg`, `.jj` or `.sl`) and never in the home directory or above unless that is a repository root itself: a `~/.gleon/gleon.yaml` is no workspace, and neither is its `.env`). Integrations search upwards from each golden the same way.
-- `--target-branch <BRANCH>`: Target branch for baseline comparison (defaults to `main`, or `GLEON_TARGET_BRANCH`).
-- `--platform <STRING>`: Override platform context with an opaque string (e.g. `--platform my-custom-env`).
+- `--platform <STRING>`: Override platform context with one opaque name (e.g. `--platform my-custom-env`; aliases such as `macos-arm64` read as `macos-aarch64`). `lint`, `resolve`, `pull` and `push` then read the manifests of this platform only. A key with a renderer or labels comes from `--os`/`--arch`/`--renderer`/`--label`.
 - `--os <OS>` / `--arch <ARCH>` / `--renderer <RENDERER>`: Override individual platform context dimensions.
 - `--label <KEY=VALUE>`: Add custom isolation labels (e.g. `--label theme=dark`).
 - `--verbose`: Enable debug logging output (routed to `stderr`).
@@ -402,16 +401,16 @@ set the CLI's platform only. The case `name` and rule matching are the same on e
 ### CI/CD Prerequisites (Shallow Clone Constraint)
 
 > [!IMPORTANT]
-> `gleon` computes baseline manifests by resolving the `merge-base` commit between the pull request branch and the target branch (`main`).
-> Default CI checkout actions (`actions/checkout`) perform a **shallow clone** (`fetch-depth: 1`), which lacks commit ancestry.
+> `gleon diff`, `gleon test` and the `verify` command read the manifests of the checkout, so a shallow clone is enough for them.
+> `gleon gc` reads the manifests of every commit of every branch, so it refuses a **shallow clone** (`fetch-depth: 1`, the default of `actions/checkout`).
 >
-> **You must configure `actions/checkout` with `fetch-depth: 0`:**
+> **In the job that runs `gleon gc`, configure `actions/checkout` with `fetch-depth: 0`:**
 
 ```yaml
 - name: Checkout repository
   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
   with:
-    fetch-depth: 0 # Required for gleon merge-base resolution
+    fetch-depth: 0 # gleon gc reads the history of every branch
 ```
 
 ### Pull Request Verification Workflow
@@ -434,8 +433,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
 
       - name: Run Test Suite (generate actual screenshots)
         run: npm test # or flutter test, cargo test, etc.
@@ -454,7 +451,6 @@ jobs:
 | `version`           | Release version tag to download (e.g. `'v0.3.0'` or `'latest'`)                                       | `'latest'`                    |
 | `command`           | Execution mode: `'verify'` (pull + diff + report) or single command (`'diff'`, `'pull'`, `'approve'`) | `'diff'`                      |
 | `github-token`      | Token (`${{ secrets.GITHUB_TOKEN }}`) for release downloads and PR comments                           | `${{ github.token }}`         |
-| `target-branch`     | Target branch for baseline comparison                                                                 | PR base ref or default branch |
 | `working-directory` | Working directory to run gleon from (useful for monorepos)                                            | `'.'`                         |
 | `args`              | Additional flags for the selected command                                                             | `''`                          |
 | `test-command`      | For `verify`: the tests of an integration (`flutter test`), run as `gleon test -- <command>` instead of `pull` + `diff` | `''`         |
