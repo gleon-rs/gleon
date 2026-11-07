@@ -118,59 +118,38 @@ impl Serialize for Dimension {
     }
 }
 
-/// Configuration parameters for the diff engine.
-// Never parsed itself: `gleon_model` reads the `diff` keys of a `gleon.yaml` rule and checks
-// their ranges (`gleon_model::tolerance::ToleranceError`). The schema attributes describe those
-// keys in the JSON Schema of the config.
+/// Configuration parameters for the diff engine: the input of a comparison.
+///
+/// Never parsed: `gleon_model` reads the `diff` keys of a `gleon.yaml` rule into its tolerance
+/// and builds this from it for each comparison.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    feature = "schemars",
-    derive(schemars::JsonSchema),
-    schemars(deny_unknown_fields)
-)]
 pub struct DiffConfig {
-    /// Largest share [0.0, 1.0] of differing pixels in pixel mode: required by `mode: pixel`
-    /// (0: every pixel identical, the pixel options aside).
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(
-            default = "default_threshold",
-            range(min = 0.0, max = 1.0),
-            transform = without_default
-        )
-    )]
+    /// Largest share [0.0, 1.0] of differing pixels in pixel mode (0: every pixel identical, the
+    /// pixel options aside).
     pub threshold: f64,
     /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(default = "default_min_similarity", range(min = 0.0, max = 1.0))
-    )]
     pub min_similarity: f64,
     /// Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode).
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(default = "default_color_tolerance", range(min = 0.0, max = 255.0))
-    )]
     pub color_tolerance: f64,
     /// Pixel mode, outside text: a differing pixel counts as equal when none of its RGBA bytes
-    /// differs by more than this, `[0, 254]` (default 0: off). For GPU and color-conversion
-    /// drift.
-    #[cfg_attr(feature = "schemars", schemars(default, range(max = 254)))]
+    /// differs by more than this, `[0, 254]` (0: off). For GPU and color-conversion drift.
     pub channel_tolerance: u8,
     /// Pixel mode, outside text: a differing pixel counts as equal when it looks anti-aliased in
     /// either image (the detection of pixelmatch: between a darker and a brighter neighbor that
-    /// sit in flat areas of both images). Default off.
-    #[cfg_attr(feature = "schemars", schemars(default))]
+    /// sit in flat areas of both images).
     pub anti_alias: bool,
     /// Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the
     /// baseline's luma there (8-bit units, unnormalized like Skia Gold's: a sharp step of 16
-    /// gives 64) exceeds this, `[0, 254]`: the edges a sub-pixel shift or another rasterizer
-    /// moves (Skia Gold's edge mask). Default 0: off. Hides every change that lies on edges too:
-    /// on the calibration corpus a missing glyph, a card moved by 1px and, at 64, a missing small
-    /// icon pass; the lower the value, the more pixels count as edges.
-    #[cfg_attr(feature = "schemars", schemars(default, range(max = 254)))]
+    /// gives 64) exceeds this, `[0, 254]` (0: off): the edges a sub-pixel shift or another
+    /// rasterizer moves (Skia Gold's edge mask).
     pub edge_threshold: u8,
 }
+
+/// The default `min_similarity` of SSIM mode.
+pub const DEFAULT_MIN_SIMILARITY: f64 = 0.8;
+
+/// The default `color_tolerance` of SSIM mode.
+pub const DEFAULT_COLOR_TOLERANCE: f64 = 8.0;
 
 /// The largest `channel_tolerance` and `edge_threshold`: 255 would make every pixel equal or
 /// hide nothing (gradients are capped at 255), so it is no valid setting.
@@ -179,12 +158,14 @@ pub const MAX_PIXEL_OPTION: u8 = 254;
 /// The largest `color_tolerance`: a whole 8-bit channel.
 pub const MAX_COLOR_TOLERANCE: f64 = 255.0;
 
+/// Strict: no pixel may differ in pixel mode, as no share of differing pixels is ever tolerated
+/// unless named; SSIM mode at its defaults.
 impl Default for DiffConfig {
     fn default() -> Self {
         Self {
-            threshold: default_threshold(),
-            min_similarity: default_min_similarity(),
-            color_tolerance: default_color_tolerance(),
+            threshold: 0.0,
+            min_similarity: DEFAULT_MIN_SIMILARITY,
+            color_tolerance: DEFAULT_COLOR_TOLERANCE,
             channel_tolerance: 0,
             anti_alias: false,
             edge_threshold: 0,
@@ -215,25 +196,6 @@ pub struct Zone {
     pub width: Dimension,
     /// Height of the zone.
     pub height: Dimension,
-}
-
-/// Drops the `default` of a field's schema: a rule names the value, a default would read as one
-/// it falls back to.
-#[cfg(feature = "schemars")]
-fn without_default(schema: &mut schemars::Schema) {
-    schema.remove("default");
-}
-
-const fn default_threshold() -> f64 {
-    0.01
-}
-
-const fn default_min_similarity() -> f64 {
-    0.8
-}
-
-const fn default_color_tolerance() -> f64 {
-    8.0
 }
 
 #[cfg(all(test, not(miri)))]

@@ -43,7 +43,7 @@ fn test_init_workspace_creates_real_structure_and_valid_config() {
 
     // Verify created config is a valid GleonConfig that can be parsed
     let loaded_config =
-        GleonConfig::load_from_file(&config_path).expect("Created config should be valid YAML");
+        GleonConfig::load(&config_path, None).expect("Created config should be valid YAML");
     assert_eq!(loaded_config, GleonConfig::default());
 }
 
@@ -60,7 +60,7 @@ fn test_init_workspace_idempotent_preserves_custom_config() {
     let result = init_workspace(&ctx, None).expect("Second init should succeed");
 
     assert_eq!(result.created, None, "an existing config is kept");
-    let loaded_config = GleonConfig::load_from_file(&config_path).unwrap();
+    let loaded_config = GleonConfig::load(&config_path, None).unwrap();
     assert_eq!(
         loaded_config.screenshots[0].include[0].as_str(),
         "custom/**/*.png"

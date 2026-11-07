@@ -185,7 +185,11 @@ impl Workspace {
         }
         let mut lines = GITIGNORE_LINES.join("\n");
         lines.push('\n');
-        gleon_model::fs::create_new(&self.gleon_dir().join(".gitignore"), lines.as_bytes())?;
+        gleon_model::fs::create_new(
+            &self.gleon_dir().join(".gitignore"),
+            lines.as_bytes(),
+            gleon_model::fs::Durability::Atomic,
+        )?;
         self.has_gitignore.store(true, Ordering::Relaxed);
         Ok(())
     }

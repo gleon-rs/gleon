@@ -1219,7 +1219,7 @@ screenshots:
 "#;
         let config_file = gleon_dir.join("gleon.yaml");
         std::fs::write(&config_file, config_yaml).unwrap();
-        ctx.config = Some(crate::config::GleonConfig::load_from_file(&config_file).unwrap());
+        ctx.config = Some(crate::config::GleonConfig::load(&config_file, None).unwrap());
 
         // Create 2 test screenshot files
         let img1 = image::RgbaImage::new(10, 10);

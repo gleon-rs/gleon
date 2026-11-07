@@ -14,6 +14,8 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+mod common;
+
 #[test]
 fn test_cli_blocks_execution_in_private_ci_without_valid_license_or_timestamp() {
     // This test simulates running the gleon CLI in a private CI environment.
@@ -22,7 +24,7 @@ fn test_cli_blocks_execution_in_private_ci_without_valid_license_or_timestamp() 
     // In a generic private CI context, this must trigger an exit 42 with compliance error.
 
     let mut cmd = Command::cargo_bin("gleon").unwrap();
-    cmd.env_clear();
+    common::clear_env(&mut cmd);
 
     // Mock Generic CI environment (private repository)
     cmd.env("CI", "true");
@@ -49,7 +51,7 @@ fn test_cli_allows_execution_in_local_dev() {
     let temp_dir = tempfile::tempdir().unwrap();
     let mut cmd = Command::cargo_bin("gleon").unwrap();
     cmd.current_dir(temp_dir.path());
-    cmd.env_clear();
+    common::clear_env(&mut cmd);
     cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
 
     let assert = cmd.arg("status").assert().failure();
@@ -66,7 +68,7 @@ fn test_cli_allows_execution_in_public_github_actions() {
 
     let mut cmd = Command::cargo_bin("gleon").unwrap();
     cmd.current_dir(temp_dir.path());
-    cmd.env_clear();
+    common::clear_env(&mut cmd);
     cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
     cmd.env("GITHUB_ACTIONS", "true");
     cmd.env("GITHUB_REPOSITORY", "open-source/public-repo");

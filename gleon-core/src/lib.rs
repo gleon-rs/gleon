@@ -4,9 +4,10 @@
 // the library reports through return values and `tracing`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-// The case report, config and naming modules live in the permissive `gleon-model` crate (shared
-// with the Flutter package); re-exported for the CLI.
-pub use gleon_model::{case, config, naming};
+// The case report and config modules live in the permissive `gleon-model` crate (shared with the
+// Flutter package); re-exported for the CLI. `naming` is used inside this crate only.
+pub(crate) use gleon_model::naming;
+pub use gleon_model::{case, config};
 pub mod cases;
 /// Resolves the effective run context (platform, branch, renderer) from CLI flags, config, and environment.
 pub mod context;

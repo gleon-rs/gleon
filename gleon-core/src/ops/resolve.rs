@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use crate::{
     io::{IoError, save_json_atomically},
-    manifest::{ConflictManifest, ConflictParseError, SingleTestManifest, parse_conflict_manifest},
-    ops::common::resolve_platform_filter_dir,
+    manifest::{ConflictManifest, SingleTestManifest, parse_conflict_manifest},
+    ops::{common::platform_filter_dir, sync::read_manifests_root},
     paths::GleonPaths,
 };
 
@@ -18,17 +18,13 @@ pub enum ResolveError {
     #[error("Manifest directory does not exist at {0}")]
     ManifestDirNotFound(PathBuf),
 
-    /// Invalid platform filter path provided.
-    #[error("Invalid platform filter '{0}': must be a single platform segment")]
+    /// A platform filter that is no platform key.
+    #[error("Invalid platform filter '{0}': must be a platform key")]
     InvalidPlatformFilter(String),
 
     /// Standard I/O error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-
-    /// Failed to parse conflict markers in a manifest file.
-    #[error("Failed to parse conflict markers in {0}: {1}")]
-    ConflictParse(PathBuf, #[source] ConflictParseError),
 
     /// Failed to save resolved manifest file.
     #[error("Failed to save resolved manifest to {0}: {1}")]
@@ -48,26 +44,49 @@ pub struct ConflictedManifestItem {
     pub conflict: ConflictManifest,
 }
 
-/// Scans `.gleon/manifests/` for files containing Git conflict markers (`<<<<<<<`).
+/// Scans the platform directories of `.gleon/manifests/` for files with Git conflict markers.
+///
+/// Only the directory of `platform_filter` is scanned when it is given. Other entries of the root
+/// (a directory of an older key format, a stray file) hold no manifests gleon reads, as
+/// `gleon lint` says, so they are not scanned.
+///
+/// A file whose conflict markers cannot be parsed, or an entry that cannot be read while walking,
+/// is skipped with a warning.
 ///
 /// # Errors
-/// Returns [`ResolveError`] if directory walking fails or if a conflict marker cannot be parsed.
+/// Returns [`ResolveError::InvalidPlatformFilter`] for a filter that is no platform key,
+/// [`ResolveError::ManifestDirNotFound`] if the directory to scan is missing, or
+/// [`ResolveError::Io`] if `.gleon/manifests/` or a manifest file cannot be read.
 pub fn scan_conflicts(
     base_dir: &Path,
     platform_filter: Option<&str>,
 ) -> Result<Vec<ConflictedManifestItem>, ResolveError> {
     let manifests_root = GleonPaths::new(base_dir).manifests_root();
 
-    let search_dir = resolve_platform_filter_dir(&manifests_root, platform_filter)
-        .map_err(|p| ResolveError::InvalidPlatformFilter(p.to_string()))?;
-
-    if std::fs::metadata(&search_dir).is_err() {
-        return Err(ResolveError::ManifestDirNotFound(search_dir));
-    }
+    let search_dirs = if let Some(filter) = platform_filter {
+        let search_dir = platform_filter_dir(&manifests_root, filter)
+            .map_err(|p| ResolveError::InvalidPlatformFilter(p.to_string()))?;
+        if std::fs::metadata(&search_dir).is_err() {
+            return Err(ResolveError::ManifestDirNotFound(search_dir));
+        }
+        vec![search_dir]
+    } else {
+        let root = read_manifests_root(&manifests_root).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ResolveError::ManifestDirNotFound(manifests_root.clone())
+            } else {
+                ResolveError::Io(e)
+            }
+        })?;
+        root.platforms.into_iter().map(|(_, dir)| dir).collect()
+    };
 
     let mut items = Vec::new();
 
-    for entry_res in crate::walk::manifest_walker(&search_dir).build() {
+    for entry_res in search_dirs
+        .iter()
+        .flat_map(|dir| crate::walk::manifest_walker(dir).build())
+    {
         let entry = match entry_res {
             Ok(e) => e,
             Err(err) => {
@@ -211,6 +230,36 @@ mod tests {
         assert!(conflicts.is_empty());
     }
 
+    /// Only platform directories hold manifests gleon reads: a conflicted file in a directory of
+    /// an older key format or at the root of `.gleon/manifests/` is never offered (it would
+    /// resolve a file gleon ignores, a stray one with an empty test path).
+    #[test]
+    fn test_scan_conflicts_reads_platform_directories_only() {
+        let temp = tempdir().unwrap();
+        let manifests = temp.path().join(".gleon").join("manifests");
+        let conflicted = include_str!("../../tests/fixtures/conflict_2way.json");
+        for dir in ["macos-aarch64/auth", "macos aarch64/auth"] {
+            std::fs::create_dir_all(manifests.join(dir)).unwrap();
+            std::fs::write(manifests.join(dir).join("login.json"), conflicted).unwrap();
+        }
+        std::fs::write(manifests.join("stray.json"), conflicted).unwrap();
+
+        let conflicts = scan_conflicts(temp.path(), None).unwrap();
+        let found: Vec<_> = conflicts
+            .iter()
+            .map(|item| (item.platform.as_str(), item.test_path.as_str()))
+            .collect();
+        assert_eq!(found, [("macos-aarch64", "auth/login")]);
+
+        // `.gleon/manifests` that cannot be listed (here a file) is an error.
+        std::fs::remove_dir_all(&manifests).unwrap();
+        std::fs::write(&manifests, "").unwrap();
+        assert!(matches!(
+            scan_conflicts(temp.path(), None),
+            Err(ResolveError::Io(_))
+        ));
+    }
+
     #[test]
     fn test_scan_conflicts_platform_filter_validation() {
         let temp = tempdir().unwrap();
@@ -234,6 +283,13 @@ mod tests {
         assert!(matches!(
             err_multi,
             Err(ResolveError::InvalidPlatformFilter(_))
+        ));
+
+        // A valid filter of a platform with no manifests directory.
+        let err_missing = scan_conflicts(temp.path(), Some("linux-x86_64"));
+        assert!(matches!(
+            err_missing,
+            Err(ResolveError::ManifestDirNotFound(_))
         ));
 
         // 4. Positive valid single platform filter case

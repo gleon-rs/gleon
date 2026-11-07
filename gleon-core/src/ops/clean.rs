@@ -262,7 +262,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{config::ConfigError, context::ContextError, git::GitError, scanner::ScannerError};
+    use crate::{
+        config::ConfigError, context::ContextError, platform::PlatformError, scanner::ScannerError,
+    };
 
     #[test]
     fn test_clean_workspace_dry_run_and_execution() {
@@ -451,8 +453,10 @@ screenshots:
         let io_err: CleanError = CoreError::Io(std::io::Error::other("disk full")).into();
         assert!(io_err.to_string().contains("IO error: disk full"));
 
-        let ctx_err: CleanError =
-            CoreError::Context(ContextError::Git(GitError::DetachedHead)).into();
+        let ctx_err: CleanError = CoreError::Context(ContextError::Platform(
+            PlatformError::InvalidSegment("x".to_string()),
+        ))
+        .into();
         assert!(ctx_err.to_string().contains("Context resolution error:"));
 
         let cfg_err: CleanError =

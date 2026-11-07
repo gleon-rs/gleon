@@ -281,22 +281,31 @@ impl Cases {
         let selected = select_runs(&reports, run_file.as_ref());
 
         let root = workspace_root(runs_latest);
+        // Every platform of the reports has its selection. Without a run, a report is kept while
+        // its golden exists: one `stat` each, on the threads that read files. With a run for every
+        // platform (or no workspace) the check compares ids only, so it stays on this thread.
+        let keep = |(key, report): &Keyed| {
+            selected.get(key).is_some_and(|run| {
+                run.as_ref().map_or_else(
+                    || {
+                        report.outcome == CaseOutcome::Missing
+                            || root.is_none_or(|root| {
+                                root.join(&report.golden.path).try_exists().unwrap_or(true)
+                            })
+                    },
+                    |run_id| report.run_id.as_ref() == Some(run_id),
+                )
+            })
+        };
+        let kept: Vec<bool> = if root.is_some() && selected.values().any(Option::is_none) {
+            crate::io::map_files(&reports, keep)
+        } else {
+            reports.iter().map(keep).collect()
+        };
         let reports: Vec<_> = reports
             .into_iter()
-            // Every platform of the reports has its selection.
-            .filter(|(key, report)| {
-                selected.get(key).is_some_and(|run| {
-                    run.as_ref().map_or_else(
-                        || {
-                            report.outcome == CaseOutcome::Missing
-                                || root.is_none_or(|root| {
-                                    root.join(&report.golden.path).try_exists().unwrap_or(true)
-                                })
-                        },
-                        |run_id| report.run_id.as_ref() == Some(run_id),
-                    )
-                })
-            })
+            .zip(kept)
+            .filter_map(|(report, kept)| kept.then_some(report))
             .collect();
         let without_run = reports
             .iter()

@@ -25,7 +25,8 @@ pub enum ReportFormat {
     about = "Universal visual regression testing CLI"
 )]
 pub struct Cli {
-    /// Override the active git branch context
+    /// The branch `gleon dashboard` records the run under (default: `GLEON_BRANCH`, the branch of
+    /// CI, else the checked-out branch)
     #[arg(short = 'b', long = "branch", global = true)]
     pub branch: Option<String>,
 
@@ -45,7 +46,9 @@ pub struct Cli {
     #[arg(long = "label", global = true, value_parser = parse_label)]
     pub labels: Vec<(String, String)>,
 
-    /// Override the active platform with an opaque custom string
+    /// Override the active platform with one opaque name (`[a-z0-9_.-]`, e.g. `my-custom-env`;
+    /// `macos-arm64` as `macos-aarch64`); `lint`, `resolve`, `pull` and `push` then read only its
+    /// manifests. Keys with a renderer or labels come from `--os`, `--arch`, `--renderer`, `--label`
     #[arg(short = 'p', long = "platform", global = true)]
     pub platform: Option<String>,
 
@@ -69,15 +72,6 @@ pub struct Cli {
         value_parser = clap::builder::FalseyValueParser::new()
     )]
     pub strict: bool,
-
-    /// The target branch to compare against (defaults to 'main')
-    #[arg(
-        long = "target-branch",
-        global = true,
-        env = "GLEON_TARGET_BRANCH",
-        default_value = "main"
-    )]
-    pub target_branch: String,
 
     /// The subcommand to execute
     #[command(subcommand)]
@@ -132,7 +126,6 @@ impl From<&Cli> for gleon_core::context::ContextOptions {
             labels: cli.labels.clone(),
             platform: cli.platform.clone(),
             branch: cli.branch.clone(),
-            target_branch: cli.target_branch.clone(),
             cli_version: Some(env!("CARGO_PKG_VERSION")),
         }
     }
@@ -221,7 +214,8 @@ pub enum Commands {
     /// global `--platform`'s when it is given)
     #[command(alias = "lint")]
     LintManifests,
-    /// Interactively resolve Git merge conflicts in baseline manifests
+    /// Interactively resolve Git merge conflicts in baseline manifests (only the global
+    /// `--platform`'s when it is given)
     Resolve {
         /// Optional specific test path filter
         #[arg(value_name = "TEST")]
@@ -352,7 +346,11 @@ pub enum Commands {
 
         /// Maximum number of runs kept in history.json (the oldest are dropped): the file is read
         /// and rewritten whole on every run, so it must not grow without bound
-        #[arg(long = "truncate-history", value_name = "NUM", default_value = "200")]
+        #[arg(
+            long = "truncate-history",
+            value_name = "NUM",
+            default_value_t = gleon_core::dashboard::DEFAULT_HISTORY_RUNS
+        )]
         truncate_history: std::num::NonZeroUsize,
 
         /// Upload history.json and dashboard.html to remote storage
@@ -476,7 +474,6 @@ mod tests {
                 artifacts: None
             }
         );
-        assert_eq!(cli.target_branch, "main"); // Default value
         Ok(())
     }
 
@@ -506,14 +503,6 @@ mod tests {
             Cli::try_parse_from(["gleon", "diff", "--resolve"]).is_err(),
             "conflicts are resolved by `gleon resolve`"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_target_branch_flag() -> Result<(), clap::Error> {
-        let args = ["gleon", "--target-branch", "develop", "diff"];
-        let cli = Cli::try_parse_from(args)?;
-        assert_eq!(cli.target_branch, "develop");
         Ok(())
     }
 

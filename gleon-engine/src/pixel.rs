@@ -75,7 +75,7 @@ impl PixelOptions {
 
     /// Whether every differing pixel is a difference.
     #[must_use]
-    pub const fn is_strict(&self) -> bool {
+    pub(crate) const fn is_strict(self) -> bool {
         self.channel_tolerance == 0 && !self.anti_alias && self.edge_threshold == 0
     }
 }
@@ -164,7 +164,7 @@ pub struct Compared {
 impl Compared {
     /// Whether the text is within its tolerance (no text: it is).
     #[must_use]
-    pub const fn text_passes(&self) -> bool {
+    pub(crate) const fn text_passes(&self) -> bool {
         !self.text_fails
     }
 

@@ -89,7 +89,7 @@ async fn test_dashboard_compilation_and_history_lifecycle() {
 
     // Run 1: Compile and push to remote storage with truncate limit 2
     let dash_opts = DashboardOptions {
-        truncate_limit: NonZeroUsize::new(2),
+        truncate_limit: NonZeroUsize::new(2).unwrap(),
         push_to_storage: true,
         ..Default::default()
     };
@@ -328,7 +328,7 @@ fn test_history_fixture_round_trip_and_truncation() {
         &key("linux-x86_64"),
     );
     assert_eq!(entry.id, "ci-new/linux-x86_64");
-    history.append_run(entry.clone(), NonZeroUsize::new(200));
+    history.append_run(entry.clone(), NonZeroUsize::new(200).unwrap());
     assert_eq!(history.runs.len(), 200);
     assert_eq!(history.runs[0].id, "run-0002", "the oldest run is dropped");
     assert_eq!(history.runs.last(), Some(&entry));

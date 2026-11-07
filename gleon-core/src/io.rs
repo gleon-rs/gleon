@@ -35,46 +35,16 @@ pub fn load_json<T: serde::de::DeserializeOwned, P: AsRef<Path>>(path: P) -> Res
         })
 }
 
-/// Loads the JSON (or uses Default if missing), applies the closure, and saves it atomically.
-///
-/// # Errors
-/// Returns `E` if loading fails for a reason other than the file being missing, if the
-/// closure `f` returns an error, or if the atomic save fails.
-pub fn update_json_atomically<T, P, F, D, E>(path: P, default_fn: D, f: F) -> Result<(), E>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-    P: AsRef<Path>,
-    D: FnOnce() -> T,
-    F: FnOnce(&mut T) -> Result<(), E>,
-    E: From<IoError>,
-{
-    let path = path.as_ref();
-    let mut value = match load_json(path) {
-        Ok(val) => val,
-        Err(IoError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => default_fn(),
-        Err(e) => return Err(E::from(e)),
-    };
-
-    match f(&mut value) {
-        Ok(()) => save_json_atomically(path, &value).map_err(E::from),
-        Err(err) => Err(err),
-    }
-}
-
 /// Writes to a temporary file created next to `path` via the closure `f`, then durably and
 /// atomically persists it to `path` (see [`gleon_model::fs::write_atomically_with`]).
 ///
-/// # Errors
-/// Returns `E` if `path` is the root, the parent directory cannot be created, the temporary file
-/// cannot be created or written, the closure `f` returns an error, or the final persist/fsync
-/// step fails.
-pub fn write_file_atomically<P, F, E>(path: P, f: F) -> Result<(), E>
-where
-    P: AsRef<Path>,
-    F: FnOnce(&mut std::io::BufWriter<&std::fs::File>) -> Result<(), E>,
-    E: From<IoError>,
-{
-    let path = path.as_ref();
+/// Returns the error of `f` itself (a [`IoError::JsonParse`] stays one), else [`IoError::Io`] if
+/// `path` is the root, the parent directory cannot be created, the temporary file cannot be
+/// created or written, or the final persist/fsync step fails.
+fn write_file_atomically(
+    path: &Path,
+    f: impl FnOnce(&mut std::io::BufWriter<&std::fs::File>) -> Result<(), IoError>,
+) -> Result<(), IoError> {
     // The closure's own error is carried out of the `io::Result` of the shared writer.
     let mut closure_error = None;
     gleon_model::fs::write_atomically_with(path, gleon_model::fs::Durability::Durable, |writer| {
@@ -85,9 +55,7 @@ where
     })
     .map_err(|e| {
         tracing::error!("Failed to save file atomically to {:?}: {}", path, e);
-        closure_error
-            .take()
-            .unwrap_or_else(|| E::from(IoError::Io(e)))
+        closure_error.take().unwrap_or(IoError::Io(e))
     })
 }
 
@@ -96,7 +64,7 @@ where
 /// # Errors
 /// Returns [`IoError`] if the write or the atomic persist step fails.
 pub fn save_file_atomically<P: AsRef<Path>>(path: P, content: &[u8]) -> Result<(), IoError> {
-    write_file_atomically(path, |writer| {
+    write_file_atomically(path.as_ref(), |writer| {
         use std::io::Write;
         writer.write_all(content).map_err(IoError::Io)
     })
@@ -111,7 +79,7 @@ pub fn save_json_atomically<T: serde::Serialize + ?Sized, P: AsRef<Path>>(
     path: P,
     value: &T,
 ) -> Result<(), IoError> {
-    write_file_atomically(path, |writer| {
+    write_file_atomically(path.as_ref(), |writer| {
         serde_json::to_writer_pretty(writer, value).map_err(IoError::JsonParse)
     })
 }
@@ -261,55 +229,6 @@ mod tests {
                 if err.kind() == std::io::ErrorKind::InvalidInput
                     && err.to_string() == "Cannot resolve parent directory for root path"
         ));
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug, Default)]
-    struct TestData {
-        count: u32,
-    }
-
-    #[test]
-    fn test_update_json_atomically_missing_file_uses_default() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let file_path = temp_dir.path().join("data.json");
-
-        update_json_atomically::<TestData, _, _, _, IoError>(
-            &file_path,
-            TestData::default,
-            |data: &mut TestData| {
-                data.count += 5;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        let loaded: TestData = load_json(&file_path).unwrap();
-        assert_eq!(loaded, TestData { count: 5 });
-    }
-
-    #[test]
-    fn test_update_json_atomically_corrupted_file_fails() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let file_path = temp_dir.path().join("corrupt.json");
-
-        // Write invalid JSON content to simulate file corruption
-        std::fs::write(&file_path, "{ invalid json ").unwrap();
-
-        let result = update_json_atomically::<TestData, _, _, _, IoError>(
-            &file_path,
-            TestData::default,
-            |data: &mut TestData| {
-                data.count += 5;
-                Ok(())
-            },
-        );
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), IoError::JsonParse(_)));
-
-        // Verify the corrupted file content was NOT overwritten
-        let raw_content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(raw_content, "{ invalid json ");
     }
 
     #[test]

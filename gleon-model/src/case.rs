@@ -41,7 +41,7 @@ use crate::{
 pub const CASE_SCHEMA_VERSION: u32 = 5;
 
 /// Directory of the case reports, relative to `.gleon/`.
-pub const CASES_DIR: &str = "runs/latest/cases";
+pub(crate) const CASES_DIR: &str = "runs/latest/cases";
 
 /// Name of the environment variable holding the [`RunId`] of the current run (set by CI or by
 /// `gleon test`).
@@ -170,7 +170,7 @@ impl Metrics {
     /// Returns `None` if they belong to different modes (a pixel measurement under an SSIM
     /// tolerance or vice versa), which callers treat as an internal error.
     #[must_use]
-    pub fn from_measurement(
+    pub(crate) fn from_measurement(
         measurement: &Measurement,
         tolerance: &Tolerance,
         text: Option<&TextTolerance>,
@@ -418,7 +418,7 @@ impl RegionMetrics {
     /// `measurement` under `text` (if any), then (SSIM, measured under `tolerance`) its changed
     /// and failing regions.
     #[must_use]
-    pub fn of(
+    pub(crate) fn of(
         metrics: Metrics,
         measurement: &Measurement,
         tolerance: &Tolerance,
@@ -1635,7 +1635,7 @@ pub mod text {
 
     /// Why an image cannot be analyzed with SSIM: `width`x`height` exceeds the engine's budget.
     #[must_use]
-    pub fn too_large_for_ssim(width: u32, height: u32) -> String {
+    pub(crate) fn too_large_for_ssim(width: u32, height: u32) -> String {
         format!(
             "{width}x{height} exceeds the SSIM analysis budget of {} pixels; use exact or pixel \
              mode or a smaller capture",

@@ -196,7 +196,11 @@ fn test_integration_ssim_large_diff() {
 /// one that renders it (`gleon diff`): pixel and SSIM failures and passes, and another size.
 #[test]
 fn test_integration_without_diff_decides_like_with_diff() {
-    let config = DiffConfig::default();
+    // A 1% pixel threshold: one differing pixel of 10,000 passes.
+    let config = DiffConfig {
+        threshold: 0.01,
+        ..DiffConfig::default()
+    };
     for (baseline, actual, mode, expected) in [
         (
             "dashboard_baseline.png",

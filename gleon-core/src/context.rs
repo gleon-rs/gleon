@@ -14,9 +14,6 @@ pub enum ContextError {
     /// Resolving the platform identity failed.
     #[error("Platform error: {0}")]
     Platform(#[from] PlatformError),
-    /// Resolving the current Git branch failed with a non-recoverable error.
-    #[error("Git error: {0}")]
-    Git(#[from] crate::git::GitError),
 }
 
 /// Traverses parent directories starting from `start_dir` to find `.gleon/gleon.yaml`, within the
@@ -52,8 +49,6 @@ pub struct ContextOptions {
     pub platform: Option<String>,
     /// Branch name override.
     pub branch: Option<String>,
-    /// Target branch to compare against; empty/whitespace-only is treated as `"main"`.
-    pub target_branch: String,
     /// The version of the running CLI binary (its `CARGO_PKG_VERSION`): the
     /// `required_version` of the config must accept it, and `gleon init` writes it as the floor. `None` for
     /// callers that are no CLI (tests), which check no version.
@@ -73,8 +68,6 @@ pub struct ResolvedContext {
     pub fallback_platform_key: Option<PlatformKey>,
     /// The resolved current branch name.
     pub branch: String,
-    /// The resolved target branch name to compare against.
-    pub target_branch: String,
     /// The resolved repository/configuration root directory.
     pub base_dir: std::path::PathBuf,
     /// The resolved Git HEAD commit SHA, or `None` if not inside a Git repository or offline.
@@ -95,7 +88,6 @@ impl Default for ResolvedContext {
             },
             fallback_platform_key: None,
             branch: "main".to_string(),
-            target_branch: "main".to_string(),
             base_dir: std::path::PathBuf::from("."),
             commit_sha: None,
             cli_version: None,
@@ -118,8 +110,7 @@ impl ResolvedContext {
     ///
     /// # Errors
     /// Returns `ContextError::Config` if the `gleon.yaml` configuration fails to load
-    /// or parse, `ContextError::Platform` if the platform identity cannot be resolved,
-    /// or `ContextError::Git` if the current branch name is invalid.
+    /// or parse, or `ContextError::Platform` if the platform identity cannot be resolved.
     pub fn from_options(
         options: &ContextOptions,
         base_dir: &std::path::Path,
@@ -132,8 +123,8 @@ impl ResolvedContext {
     ///
     /// # Errors
     /// Returns `ContextError::Config` if the `gleon.yaml` configuration fails to load
-    /// or parse, `ContextError::Platform` if the platform identity or fallback platform
-    /// cannot be resolved, or `ContextError::Git` if the current branch name is invalid.
+    /// or parse, or `ContextError::Platform` if the platform identity or fallback platform
+    /// cannot be resolved.
     pub fn resolve(
         options: &ContextOptions,
         base_dir: &std::path::Path,
@@ -185,29 +176,16 @@ impl ResolvedContext {
             None
         };
 
-        let branch = match crate::git::GitResolver::resolve_branch_impl(
+        // Only recorded (`gleon dashboard`), so a run outside a repository still has one.
+        let branch = crate::git::GitResolver::resolve_branch(
             options.branch.as_deref(),
             &resolved_base_dir,
             env_provider,
-        ) {
-            Ok(b) => b,
-            Err(e @ crate::git::GitError::InvalidBranchName(_)) => {
-                return Err(ContextError::Git(e));
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Git branch resolution failed: {}. Falling back to 'main' for offline mode.",
-                    e
-                );
-                "main".to_string()
-            }
-        };
-
-        let target_branch = if options.target_branch.trim().is_empty() {
+        )
+        .unwrap_or_else(|e| {
+            tracing::debug!("No Git branch ({e}): the run is recorded under 'main'");
             "main".to_string()
-        } else {
-            options.target_branch.clone()
-        };
+        });
 
         let commit_sha = match crate::git::GitResolver::get_head_commit_sha(&resolved_base_dir) {
             Ok(sha) => Some(sha),
@@ -222,7 +200,6 @@ impl ResolvedContext {
             platform,
             fallback_platform_key,
             branch,
-            target_branch,
             base_dir: resolved_base_dir,
             commit_sha,
             cli_version,
@@ -232,7 +209,7 @@ impl ResolvedContext {
 
 /// The config of the workspace and its root: the explicit `config_path` (relative to
 /// `base_dir`), else the nearest `.gleon/gleon.yaml` above `base_dir`, else none; loaded for the
-/// CLI of `cli_version` ([`GleonConfig::load_for_cli`]). No walk reaches past a repository root
+/// CLI of `cli_version` ([`GleonConfig::load`]). No walk reaches past a repository root
 /// or into `home` ([`crate::paths::find_workspace_root`]).
 fn load_config(
     config_path: Option<&std::path::Path>,
@@ -247,7 +224,7 @@ fn load_config(
         } else {
             base_dir.join(path)
         };
-        let cfg = GleonConfig::load_for_cli(&resolved_path, cli_version)?;
+        let cfg = GleonConfig::load(&resolved_path, cli_version)?;
         // A loaded file has a parent: `resolved_path` is absolute or joined to `base_dir`.
         let config_dir = resolved_path.parent().unwrap_or(base_dir);
         let workspace =
@@ -262,7 +239,7 @@ fn load_config(
             config_path,
             root_dir
         );
-        let cfg = GleonConfig::load_for_cli(&config_path, cli_version)?;
+        let cfg = GleonConfig::load(&config_path, cli_version)?;
         (Some(cfg), root_dir)
     } else {
         (None, base_dir.to_path_buf())
@@ -323,7 +300,6 @@ mod tests {
         .unwrap();
 
         let options = ContextOptions {
-            target_branch: "develop".to_string(),
             config_path: Some(config_path),
             ..Default::default()
         };
@@ -331,7 +307,6 @@ mod tests {
         let context = ResolvedContext::resolve(&options, dir.path(), &EmptyEnv).unwrap();
         assert!(context.config.is_some());
         assert_eq!(context.branch, "main");
-        assert_eq!(context.target_branch, "develop");
     }
 
     /// A config requiring a newer CLI is refused before anything runs.
@@ -433,14 +408,12 @@ mod tests {
         let dir = tempdir().unwrap();
         create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
         let options = ContextOptions {
-            target_branch: "develop".to_string(),
             ..Default::default()
         };
 
         let context = ResolvedContext::resolve(&options, dir.path(), &EmptyEnv).unwrap();
         assert!(context.config.is_none());
         assert_eq!(context.branch, "main");
-        assert_eq!(context.target_branch, "develop");
     }
 
     #[test]
@@ -458,14 +431,12 @@ mod tests {
         .unwrap();
 
         let options = ContextOptions {
-            target_branch: "develop".to_string(),
             ..Default::default()
         };
 
         let context = ResolvedContext::resolve(&options, dir.path(), &EmptyEnv).unwrap();
         assert!(context.config.is_some());
         assert_eq!(context.branch, "main");
-        assert_eq!(context.target_branch, "develop");
     }
 
     #[test]
@@ -474,7 +445,6 @@ mod tests {
         create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
         let options = ContextOptions {
             branch: Some("main".to_string()),
-            target_branch: "develop".to_string(),
             os: Some("linux".to_string()),
             arch: Some("x86_64".to_string()),
             ..Default::default()
@@ -490,7 +460,6 @@ mod tests {
         // 1. Platform resolver error
         let options_platform_err = ContextOptions {
             branch: Some("main".to_string()),
-            target_branch: "develop".to_string(),
             platform: Some("custom-opaque".to_string()),
             ..Default::default()
         };
@@ -498,19 +467,13 @@ mod tests {
         let result = ResolvedContext::resolve(&options_platform_err, dir.path(), &env_conflict);
         assert!(result.is_err());
 
-        // 2. Git resolver error propagation (invalid branch name is returned as Err)
-        let options_git_err = ContextOptions {
-            branch: Some("invalid branch name space".to_string()),
-            target_branch: "develop".to_string(),
+        // 2. A branch name Git would refuse is only recorded, so it fails no command.
+        let options_branch = ContextOptions {
+            branch: Some("feature x".to_string()),
             ..Default::default()
         };
-        let result = ResolvedContext::resolve(&options_git_err, dir.path(), &EmptyEnv);
-        assert!(matches!(
-            result,
-            Err(ContextError::Git(crate::git::GitError::InvalidBranchName(
-                _
-            )))
-        ));
+        let context = ResolvedContext::resolve(&options_branch, dir.path(), &EmptyEnv).unwrap();
+        assert_eq!(context.branch, "feature x");
     }
 
     #[test]
@@ -640,31 +603,6 @@ mod tests {
             err_cfg,
             ContextError::Config(_) | ContextError::Platform(_)
         ));
-    }
-
-    #[test]
-    fn test_target_branch_defaulting_and_retention() {
-        let temp = tempdir().unwrap();
-        let root_dir = temp.path();
-
-        let make_options = |tb: &str| ContextOptions {
-            target_branch: tb.to_string(),
-            ..Default::default()
-        };
-
-        // Empty string defaults to "main"
-        let ctx_empty = ResolvedContext::resolve(&make_options(""), root_dir, &EmptyEnv).unwrap();
-        assert_eq!(ctx_empty.target_branch, "main");
-
-        // Whitespace-only defaults to "main"
-        let ctx_spaces =
-            ResolvedContext::resolve(&make_options("   "), root_dir, &EmptyEnv).unwrap();
-        assert_eq!(ctx_spaces.target_branch, "main");
-
-        // Explicit non-empty target branch retained
-        let ctx_develop =
-            ResolvedContext::resolve(&make_options("develop"), root_dir, &EmptyEnv).unwrap();
-        assert_eq!(ctx_develop.target_branch, "develop");
     }
 
     #[test]

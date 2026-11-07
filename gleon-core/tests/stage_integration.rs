@@ -30,7 +30,6 @@ fn test_stage_uninitialized_fails() {
 
     let options = ContextOptions {
         branch: Some("main".to_string()),
-        target_branch: "main".to_string(),
         ..Default::default()
     };
 
@@ -70,7 +69,6 @@ fn test_stage_real_fixture_updates_index_and_makes_workspace_clean() {
 
     let options = ContextOptions {
         branch: Some("main".to_string()),
-        target_branch: "main".to_string(),
         ..Default::default()
     };
 

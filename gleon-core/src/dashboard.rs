@@ -24,7 +24,7 @@ use crate::{
     cases::{Cases, CasesError},
     context::ResolvedContext,
     paths::GleonPaths,
-    storage::{ObjectStoreAdapter, StorageConfig, StorageError},
+    storage::{ObjectStoreAdapter, ObjectVersion, StorageConfig, StorageError},
 };
 
 /// The schema version of `history.json` this gleon reads and writes; other versions are rejected
@@ -255,9 +255,9 @@ impl DashboardHistory {
 
     /// Adds a run to the history log (see [`Self::merge`] for runs it already has).
     ///
-    /// If `truncate_limit` is `Some(limit)` and the number of runs exceeds `limit`,
-    /// the oldest runs are dropped from the beginning.
-    pub fn append_run(&mut self, entry: RunHistoryEntry, truncate_limit: Option<NonZeroUsize>) {
+    /// If the number of runs exceeds `truncate_limit`, the oldest runs are dropped from the
+    /// beginning.
+    pub fn append_run(&mut self, entry: RunHistoryEntry, truncate_limit: NonZeroUsize) {
         self.merge(
             Self {
                 runs: vec![entry],
@@ -274,9 +274,9 @@ impl DashboardHistory {
     /// platforms (a joint run recorded again after its second platform arrived); entries of one
     /// run id on other platforms (two CI jobs that each record their own) stay.
     ///
-    /// If `truncate_limit` is `Some(limit)` and the merged collection exceeds `limit`,
-    /// the oldest runs are dropped from the beginning.
-    pub fn merge(&mut self, mut other: Self, truncate_limit: Option<NonZeroUsize>) {
+    /// If the merged collection exceeds `truncate_limit`, the oldest runs are dropped from the
+    /// beginning.
+    pub fn merge(&mut self, mut other: Self, truncate_limit: NonZeroUsize) {
         // `other` first: the stable sort keeps it ahead of an entry of `self` it ties with.
         other.runs.append(&mut self.runs);
         self.runs = other.runs;
@@ -290,10 +290,8 @@ impl DashboardHistory {
         // Finally sort chronologically by timestamp (zero allocation via Copy DateTime)
         self.runs.sort_by_key(|a| a.timestamp);
 
-        if let Some(limit) = truncate_limit
-            && self.runs.len() > limit.get()
-        {
-            let excess = self.runs.len() - limit.get();
+        if self.runs.len() > truncate_limit.get() {
+            let excess = self.runs.len() - truncate_limit.get();
             let _ = self.runs.drain(0..excess);
         }
     }
@@ -355,15 +353,29 @@ struct DashboardView<'a> {
     generated_at: String,
 }
 
+/// The most runs `history.json` keeps by default (`gleon dashboard --truncate-history`): the file
+/// is read and rewritten whole on every run, so it must not grow without bound.
+pub const DEFAULT_HISTORY_RUNS: NonZeroUsize = NonZeroUsize::new(200).unwrap();
+
 /// Execution options for [`DashboardCompiler::execute`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DashboardOptions<'a> {
     /// Explicit output path for compiled HTML dashboard.
     pub out_html: Option<&'a Path>,
-    /// Limit the maximum number of historical runs kept.
-    pub truncate_limit: Option<NonZeroUsize>,
+    /// The most runs the history keeps (the oldest are dropped).
+    pub truncate_limit: NonZeroUsize,
     /// Upload history.json and dashboard.html to remote storage.
     pub push_to_storage: bool,
+}
+
+impl Default for DashboardOptions<'_> {
+    fn default() -> Self {
+        Self {
+            out_html: None,
+            truncate_limit: DEFAULT_HISTORY_RUNS,
+            push_to_storage: false,
+        }
+    }
 }
 
 /// Static dashboard compiler for visual regression history.
@@ -558,18 +570,11 @@ where
         attempt += 1;
 
         let mut history = base_history.clone();
-        let mut expected_history_etag = None;
-        let mut expected_history_version = None;
-        let mut history_create_only = false;
-
-        let mut expected_dashboard_etag = None;
-        let mut expected_dashboard_version = None;
-        let mut dashboard_create_only = false;
-
-        if let Some(ad) = adapter.filter(|_| options.push_to_storage) {
-            if let Some(remote_obj) = ad.get_object("history.json").await? {
-                expected_history_etag = remote_obj.e_tag;
-                expected_history_version = remote_obj.version;
+        // The versions the uploads replace; `None`: the object does not exist yet.
+        let (history_version, dashboard_version) = if let Some(ad) =
+            adapter.filter(|_| options.push_to_storage)
+        {
+            let history_version = if let Some(remote_obj) = ad.get_object("history.json").await? {
                 let text = std::str::from_utf8(&remote_obj.bytes).map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -581,18 +586,15 @@ where
                     DashboardHistory::parse_or_empty(text, "history.json of the remote storage")?;
                 remote_history.merge(history, options.truncate_limit);
                 history = remote_history;
+                Some(remote_obj.version)
             } else {
-                history_create_only = true;
-            }
-
+                None
+            };
             // Only its version: the page is compiled again from the history.
-            if let Some(remote_html) = ad.head_object("dashboard.html").await? {
-                expected_dashboard_etag = remote_html.e_tag;
-                expected_dashboard_version = remote_html.version;
-            } else {
-                dashboard_create_only = true;
-            }
-        }
+            (history_version, ad.head_object("dashboard.html").await?)
+        } else {
+            (None, None)
+        };
 
         // Re-read local history immediately before saving to prevent concurrent local runs from overwriting each other
         let mut local_history = load_local_history_or_default(paths)?;
@@ -617,12 +619,8 @@ where
             ad,
             serialized_history.into_bytes(),
             html_content.into_bytes(),
-            expected_history_etag.as_deref(),
-            expected_history_version.as_deref(),
-            history_create_only,
-            expected_dashboard_etag.as_deref(),
-            expected_dashboard_version.as_deref(),
-            dashboard_create_only,
+            history_version.as_ref(),
+            dashboard_version.as_ref(),
         )
         .await;
 
@@ -638,20 +636,14 @@ where
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors the independent etag/version/create-only preconditions of the two uploads"
-)]
+/// Uploads `history.json` over `history_version` and `dashboard.html` over `dashboard_version`,
+/// each of which must still be the remote one; `None`: the object must not exist yet.
 async fn upload_history_and_dashboard(
     adapter: &ObjectStoreAdapter,
     history_json: Vec<u8>,
     html_content: Vec<u8>,
-    expected_history_etag: Option<&str>,
-    expected_history_version: Option<&str>,
-    history_create_only: bool,
-    expected_dashboard_etag: Option<&str>,
-    expected_dashboard_version: Option<&str>,
-    dashboard_create_only: bool,
+    history_version: Option<&ObjectVersion>,
+    dashboard_version: Option<&ObjectVersion>,
 ) -> Result<(), StorageError> {
     // `history.json` is the source of truth, so it goes first: when its precondition fails
     // (another run was faster), nothing is published and the caller retries on the newer history.
@@ -662,9 +654,8 @@ async fn upload_history_and_dashboard(
             "history.json",
             bytes::Bytes::from(history_json),
             Some("application/json"),
-            expected_history_etag,
-            expected_history_version,
-            history_create_only,
+            history_version,
+            history_version.is_none(),
         )
         .await?;
     adapter
@@ -672,9 +663,8 @@ async fn upload_history_and_dashboard(
             "dashboard.html",
             bytes::Bytes::from(html_content),
             Some("text/html; charset=utf-8"),
-            expected_dashboard_etag,
-            expected_dashboard_version,
-            dashboard_create_only,
+            dashboard_version,
+            dashboard_version.is_none(),
         )
         .await
 }
@@ -852,33 +842,33 @@ mod tests {
         assert_eq!(joint.platforms, [key("linux-x86_64"), key("macos-aarch64")]);
 
         let mut history = DashboardHistory::new();
-        history.append_run(macos.clone(), None);
-        history.append_run(joint.clone(), None);
+        history.append_run(macos.clone(), NonZeroUsize::MAX);
+        history.append_run(joint.clone(), NonZeroUsize::MAX);
         assert_eq!(history.runs, std::slice::from_ref(&joint));
         let mut remote = DashboardHistory::new();
-        remote.append_run(joint.clone(), None);
+        remote.append_run(joint.clone(), NonZeroUsize::MAX);
         let mut local = DashboardHistory::new();
-        local.append_run(macos.clone(), None);
-        local.merge(remote, None);
+        local.append_run(macos.clone(), NonZeroUsize::MAX);
+        local.merge(remote, NonZeroUsize::MAX);
         assert_eq!(local.runs, [joint]);
 
         let linux = joint_entry("r", &["linux-x86_64"], 3);
         let mut jobs = DashboardHistory::new();
-        jobs.append_run(macos.clone(), None);
-        jobs.append_run(linux.clone(), None);
+        jobs.append_run(macos.clone(), NonZeroUsize::MAX);
+        jobs.append_run(linux.clone(), NonZeroUsize::MAX);
         assert_eq!(jobs.runs, [macos.clone(), linux]);
         // Another run of the same platforms is another run.
         jobs.append_run(
             joint_entry("s", &["macos-aarch64", "linux-x86_64"], 9),
-            None,
+            NonZeroUsize::MAX,
         );
         assert_eq!(jobs.runs.len(), 3);
         // An older entry never replaces a newer one.
         let mut newer_first = DashboardHistory::new();
-        newer_first.append_run(joint_entry("r", &["macos-aarch64"], 10), None);
+        newer_first.append_run(joint_entry("r", &["macos-aarch64"], 10), NonZeroUsize::MAX);
         newer_first.append_run(
             joint_entry("r", &["macos-aarch64", "linux-x86_64"], 5),
-            None,
+            NonZeroUsize::MAX,
         );
         assert_eq!(newer_first.runs.len(), 2);
     }
@@ -910,8 +900,11 @@ mod tests {
         assert_eq!(failures, ["macos-aarch64/a", "linux-x86_64/b"]);
 
         let mut history = DashboardHistory::new();
-        history.append_run(entry, None);
-        history.append_run(joint_entry("other", &["windows-x86_64"], 0), None);
+        history.append_run(entry, NonZeroUsize::MAX);
+        history.append_run(
+            joint_entry("other", &["windows-x86_64"], 0),
+            NonZeroUsize::MAX,
+        );
         let html = DashboardCompiler::compile_dashboard(&history).unwrap();
         assert!(
             html.contains(r#"data-platforms="linux-x86_64 macos-aarch64""#),
@@ -1025,7 +1018,7 @@ mod tests {
                 },
                 failures: vec![],
             };
-            history.append_run(entry, None);
+            history.append_run(entry, NonZeroUsize::MAX);
         }
 
         assert_eq!(history.runs.len(), 5);
@@ -1051,7 +1044,7 @@ mod tests {
                 },
                 failures: vec![],
             };
-            history.append_run(entry, NonZeroUsize::new(3));
+            history.append_run(entry, NonZeroUsize::new(3).unwrap());
         }
 
         // Expected to keep only the newest 3 runs: run-3, run-4, run-5
@@ -1128,14 +1121,14 @@ mod tests {
         };
 
         // local has run-1 and run-2
-        local.append_run(run_1.clone(), None);
-        local.append_run(run_2_local, None);
+        local.append_run(run_1.clone(), NonZeroUsize::MAX);
+        local.append_run(run_2_local, NonZeroUsize::MAX);
 
         // remote has run-1 (duplicate) and run-3 (inserted chronologically between 1 and 2)
-        remote.append_run(run_1, None);
-        remote.append_run(run_3_remote, None);
+        remote.append_run(run_1, NonZeroUsize::MAX);
+        remote.append_run(run_3_remote, NonZeroUsize::MAX);
 
-        local.merge(remote, None);
+        local.merge(remote, NonZeroUsize::MAX);
 
         // Must contain 3 unique runs sorted by timestamp: run-1, run-3, run-2
         assert_eq!(local.runs.len(), 3);
@@ -1190,17 +1183,17 @@ mod tests {
             failures: vec![],
         };
 
-        local.append_run(run_dup_1.clone(), None);
-        local.append_run(run_middle.clone(), None);
-        remote.append_run(run_dup_2.clone(), None);
+        local.append_run(run_dup_1.clone(), NonZeroUsize::MAX);
+        local.append_run(run_middle.clone(), NonZeroUsize::MAX);
+        remote.append_run(run_dup_2.clone(), NonZeroUsize::MAX);
         let mut newer_local = remote.clone();
-        newer_local.append_run(run_middle, None);
+        newer_local.append_run(run_middle, NonZeroUsize::MAX);
         let older_remote = DashboardHistory {
             runs: vec![run_dup_1],
             ..DashboardHistory::new()
         };
 
-        local.merge(remote, None);
+        local.merge(remote, NonZeroUsize::MAX);
 
         // One entry per id, the newest one: a run compiled again replaces what the history had.
         assert_eq!(local.runs.len(), 2, "Duplicate run ID must be removed");
@@ -1208,7 +1201,7 @@ mod tests {
         assert_eq!(local.runs[1], run_dup_2);
 
         // Whichever side has it.
-        newer_local.merge(older_remote, None);
+        newer_local.merge(older_remote, NonZeroUsize::MAX);
         assert_eq!(newer_local.runs, local.runs);
 
         // Compiled again with the same timestamp (a report removed, not added): the new entry
@@ -1220,7 +1213,7 @@ mod tests {
             },
             ..run_dup_2
         };
-        local.append_run(recompiled.clone(), None);
+        local.append_run(recompiled.clone(), NonZeroUsize::MAX);
         assert_eq!(local.runs[1], recompiled);
     }
 
@@ -1244,7 +1237,7 @@ mod tests {
                 summary: RunSummary::default(),
                 failures: vec![],
             };
-            local.append_run(entry, None);
+            local.append_run(entry, NonZeroUsize::MAX);
         }
 
         for i in 4..=6 {
@@ -1258,10 +1251,10 @@ mod tests {
                 summary: RunSummary::default(),
                 failures: vec![],
             };
-            remote.append_run(entry, None);
+            remote.append_run(entry, NonZeroUsize::MAX);
         }
 
-        local.merge(remote, NonZeroUsize::new(3));
+        local.merge(remote, NonZeroUsize::new(3).unwrap());
 
         // Should be truncated to the newest 3 runs: run-4, run-5, run-6
         assert_eq!(local.runs.len(), 3);
@@ -1310,8 +1303,8 @@ mod tests {
             ],
         };
 
-        history.append_run(entry1, None);
-        history.append_run(entry2, None);
+        history.append_run(entry1, NonZeroUsize::MAX);
+        history.append_run(entry2, NonZeroUsize::MAX);
 
         let html = DashboardCompiler::compile_dashboard(&history).unwrap();
         assert!(html.contains("<!DOCTYPE html>"));
@@ -1348,7 +1341,7 @@ mod tests {
                 Some("<b>bold error</b>".to_string()),
             )],
         };
-        history.append_run(entry, None);
+        history.append_run(entry, NonZeroUsize::MAX);
 
         let html = DashboardCompiler::compile_dashboard(&history).unwrap();
         // Must escape HTML tags
@@ -1390,7 +1383,7 @@ mod tests {
                 Some("Image dimension mismatch, falling back to pixel diff".to_string()),
             )],
         };
-        history.append_run(entry, None);
+        history.append_run(entry, NonZeroUsize::MAX);
 
         let html = DashboardCompiler::compile_dashboard(&history).unwrap();
         assert!(html.contains("Diff pixels: 99"));
@@ -1418,7 +1411,7 @@ mod tests {
                 },
                 failures: vec![],
             };
-            history.append_run(entry, None);
+            history.append_run(entry, NonZeroUsize::MAX);
         }
 
         let html = DashboardCompiler::compile_dashboard(&history).unwrap();
@@ -1497,7 +1490,7 @@ mod tests {
         std::fs::create_dir_all(&remote_store_dir).unwrap();
         let storage_cfg = StorageConfig::new(format!("file://{}", remote_store_dir.display()));
         let opts_remote = DashboardOptions {
-            truncate_limit: NonZeroUsize::new(5),
+            truncate_limit: NonZeroUsize::new(5).unwrap(),
             push_to_storage: true,
             ..Default::default()
         };
@@ -1540,7 +1533,7 @@ mod tests {
                 },
                 failures: vec![],
             },
-            None,
+            NonZeroUsize::MAX,
         );
         let external_bytes = bytes::Bytes::from(
             serde_json::to_string(&external_history)
@@ -1690,7 +1683,7 @@ mod tests {
 
         // Typed entries survive a round trip through history.json.
         let mut history = DashboardHistory::new();
-        history.append_run(entry, None);
+        history.append_run(entry, NonZeroUsize::MAX);
         let json = serde_json::to_string(&history).unwrap();
         assert_eq!(
             DashboardHistory::parse_or_empty(&json, "test").unwrap(),
@@ -1752,10 +1745,18 @@ mod tests {
                 summary: RunSummary::default(),
                 failures: vec![],
             },
-            None,
+            NonZeroUsize::MAX,
         );
         let html_empty = DashboardCompiler::compile_dashboard(&history_with_empty_run).unwrap();
         assert!(html_empty.contains("—")); // Pass rates are None, rendered as dash
+    }
+
+    /// A version that names only `e_tag`.
+    fn etag(e_tag: &str) -> ObjectVersion {
+        ObjectVersion {
+            e_tag: Some(e_tag.to_owned()),
+            version: None,
+        }
     }
 
     #[tokio::test]
@@ -1770,10 +1771,6 @@ mod tests {
             b"<html></html>".to_vec(),
             None,
             None,
-            true,
-            None,
-            None,
-            true,
         )
         .await;
         assert!(res.is_ok());
@@ -1785,10 +1782,6 @@ mod tests {
             b"<html></html>".to_vec(),
             None,
             None,
-            true,
-            None,
-            None,
-            true,
         )
         .await;
         assert!(matches!(
@@ -1801,12 +1794,8 @@ mod tests {
             &adapter,
             b"{}".to_vec(),
             b"<html></html>".to_vec(),
-            Some("bad_etag"),
-            None,
-            false,
-            Some("bad_etag"),
-            None,
-            false,
+            Some(&etag("bad_etag")),
+            Some(&etag("bad_etag")),
         )
         .await;
         assert!(matches!(
@@ -1819,12 +1808,8 @@ mod tests {
             &adapter,
             b"{}".to_vec(),
             b"<html>newer</html>".to_vec(),
-            Some("mismatched_history_etag"),
+            Some(&etag("mismatched_history_etag")),
             None,
-            false,
-            None,
-            None,
-            false,
         )
         .await;
         assert!(matches!(
@@ -1840,12 +1825,8 @@ mod tests {
             &adapter,
             b"{\"runs\":[]}".to_vec(),
             b"<html>newer</html>".to_vec(),
-            history.e_tag.as_deref(),
-            None,
-            false,
-            Some("mismatched_dashboard_etag"),
-            None,
-            false,
+            Some(&history.version),
+            Some(&etag("mismatched_dashboard_etag")),
         )
         .await;
         assert!(matches!(

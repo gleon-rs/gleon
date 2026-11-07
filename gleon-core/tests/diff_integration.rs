@@ -40,7 +40,6 @@ fn test_diff_uninitialized_fails() {
 
     let options = ContextOptions {
         branch: Some("main".to_string()),
-        target_branch: "main".to_string(),
         ..Default::default()
     };
 
@@ -80,7 +79,6 @@ fn test_diff_full_flow_with_real_fixtures() {
 
     let options = ContextOptions {
         branch: Some("main".to_string()),
-        target_branch: "main".to_string(),
         ..Default::default()
     };
 
@@ -552,7 +550,6 @@ fn test_diff_missing_baseline_saved_and_approved() {
 
     let options = ContextOptions {
         branch: Some("main".to_string()),
-        target_branch: "main".to_string(),
         ..Default::default()
     };
 
