@@ -21,6 +21,8 @@ use ed25519_dalek::SigningKey;
 use gleon_core::license::{ExecutionContext, LicenseGate, LicenseValidity};
 use predicates::prelude::*;
 
+mod common;
+
 #[test]
 fn test_keygen_sign_happy_path_with_test_key() {
     let secret = [42u8; 32];
@@ -361,7 +363,7 @@ fn test_gleon_binary_with_real_master_key_unblocks_private_ci() {
     let temp_dir = tempfile::tempdir().unwrap();
     let mut gleon_cmd = Command::cargo_bin("gleon").unwrap();
     gleon_cmd.current_dir(temp_dir.path());
-    gleon_cmd.env_clear();
+    common::clear_env(&mut gleon_cmd);
     gleon_cmd.env("CI", "true");
     gleon_cmd.env("CI_PROJECT_PATH", "enterprise-customer/app");
     gleon_cmd.env("GLEON_LICENSE_KEY", &token);

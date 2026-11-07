@@ -2117,3 +2117,76 @@ fn test_cli_report_links_goldens_of_integrations_on_github_actions() {
             )));
     }
 }
+
+/// `--platform` names the platform as the context resolves it: an alias or another case reads the
+/// manifests `gleon stage` wrote under the canonical key (`macos-aarch64`).
+#[test]
+fn test_platform_filter_is_the_canonical_key() {
+    let dir = init_temp_dir();
+    let platform = dir.path().join(".gleon/manifests/macos-aarch64");
+    std::fs::create_dir_all(&platform).unwrap();
+    std::fs::copy(
+        "../gleon-core/tests/fixtures/valid_manifest.json",
+        platform.join("login.json"),
+    )
+    .unwrap();
+    for given in ["macos-arm64", "MACOS-AARCH64"] {
+        gleon()
+            .current_dir(dir.path())
+            .args(["--platform", given, "lint"])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Inspected 1 manifest file(s)"));
+    }
+}
+
+/// `gleon lint` names an entry of `.gleon/manifests/` that is no platform directory (left by an
+/// older key format): gleon never reads it, so it is a warning, not a failure.
+#[test]
+fn test_lint_warns_about_entries_that_are_no_platform_directory() {
+    let dir = init_temp_dir();
+    let stale = dir.path().join(".gleon/manifests/macos aarch64");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::copy(
+        "../gleon-core/tests/fixtures/valid_manifest.json",
+        stale.join("login.json"),
+    )
+    .unwrap();
+    gleon()
+        .current_dir(dir.path())
+        .arg("lint")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("macos aarch64"))
+        .stderr(predicate::str::contains("is no platform directory"));
+}
+
+/// `gleon resolve` scans only the platform of the global `--platform`, as `gleon lint` does.
+#[test]
+fn test_resolve_scans_the_platform_filter_only() {
+    let dir = init_temp_dir();
+    let linux = dir.path().join(".gleon/manifests/linux-x86_64");
+    std::fs::create_dir_all(&linux).unwrap();
+    std::fs::copy(
+        "../gleon-core/tests/fixtures/conflict_2way.json",
+        linux.join("login.json"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join(".gleon/manifests/macos-aarch64")).unwrap();
+    gleon()
+        .current_dir(dir.path())
+        .args(["--platform", "macos-aarch64", "resolve"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "No conflicted manifest files found.",
+        ));
+    gleon()
+        .current_dir(dir.path())
+        .args(["--platform", "linux-x86_64", "resolve"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Found 1 conflicted manifest file(s).",
+        ));
+}

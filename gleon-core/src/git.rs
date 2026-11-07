@@ -1,8 +1,8 @@
-//! Git branch resolution and gitignore validation.
+//! Git context of a run: the branch, the HEAD commit, and untracking paths from the index.
 
 use std::path::Path;
 
-use crate::env::{EnvProvider, OsEnv};
+use crate::env::EnvProvider;
 
 /// Errors that can occur during Git operations.
 #[derive(Debug, thiserror::Error)]
@@ -15,47 +15,13 @@ pub enum GitError {
     #[error("Failed to read Git HEAD reference: {0}")]
     HeadRead(String),
 
-    /// Failed to build gitignore matcher
-    #[error("Failed to build gitignore matcher: {0}")]
-    IgnoreBuild(String),
-
     /// HEAD is detached and no CI environment branch variables are set
     #[error("HEAD is detached and no CI environment branch variables are set")]
     DetachedHead,
 
-    /// Resolved branch name contains invalid characters or is empty
-    #[error("Resolved branch name contains invalid characters: '{0}'")]
-    InvalidBranchName(String),
-
-    /// Repository is a shallow clone lacking history to compute merge-base
-    #[error("Repository is a shallow clone (fetch-depth constraint): {0}")]
-    ShallowClone(String),
-
-    /// Merge base calculation failed
-    #[error("Merge base calculation failed: {0}")]
-    MergeBaseFailed(String),
-
     /// Path is outside the Git repository
     #[error("Path is outside the Git repository: {0}")]
     OutsideRepository(std::path::PathBuf),
-
-    /// Commit not found or could not be resolved
-    #[error("Commit lookup failed for '{ref_or_sha}': {reason}")]
-    CommitLookup {
-        /// The ref or SHA that was looked up.
-        ref_or_sha: String,
-        /// The underlying error reason.
-        reason: String,
-    },
-
-    /// Commit object could not be decoded
-    #[error("Failed to decode commit '{commit_sha}': {reason}")]
-    CommitDecode {
-        /// The commit SHA that failed to decode.
-        commit_sha: String,
-        /// The underlying error reason.
-        reason: String,
-    },
 
     /// IO error
     #[error("IO error: {0}")]
@@ -66,69 +32,33 @@ pub enum GitError {
 pub struct GitResolver;
 
 impl GitResolver {
-    /// Resolves the current branch name.
-    ///
-    /// Precedence:
-    /// 1. `GLEON_BRANCH` environment variable
-    /// 2. CI environment variables
-    /// 3. Discovering git and reading HEAD
-    ///
-    /// Returns `GitError::Discover` if no Git repository is found (callers like `ResolvedContext` handle offline fallback).
-    ///
-    /// # Errors
-    /// Returns `GitError::Io` if the current working directory cannot be determined,
-    /// `GitError::Discover` if no Git repository is found, `GitError::HeadRead` if
-    /// HEAD cannot be read, `GitError::DetachedHead` if HEAD is detached with no CI
-    /// branch variables set, or `GitError::InvalidBranchName` if the resolved branch
-    /// name is empty or contains invalid characters.
-    pub fn resolve_branch() -> Result<String, GitError> {
-        let env = OsEnv;
-        let current_dir = std::env::current_dir().map_err(GitError::Io)?;
-        Self::resolve_branch_impl(None, &current_dir, &env)
-    }
-
-    /// Internal implementation of branch resolution allowing dependency injection.
+    /// Resolves the branch name of a run (what `gleon dashboard` records it under): the first
+    /// one named by `cli_branch`, `GLEON_BRANCH` or the branch variables of CI providers in
+    /// `env`, else the HEAD of the repository at `base_dir`. The name is only recorded, so any
+    /// text passes (an empty one names none).
     ///
     /// # Errors
     /// Returns `GitError::Discover` if no Git repository is found, `GitError::HeadRead`
-    /// if HEAD cannot be read, `GitError::DetachedHead` if HEAD is detached with no CI
-    /// branch variables set, or `GitError::InvalidBranchName` if the resolved branch
-    /// name is empty or contains invalid characters.
-    pub fn resolve_branch_impl(
+    /// if HEAD cannot be read, or `GitError::DetachedHead` if HEAD is detached with no CI
+    /// branch variables set.
+    pub fn resolve_branch(
         cli_branch: Option<&str>,
         base_dir: &Path,
         env: &dyn EnvProvider,
     ) -> Result<String, GitError> {
-        // 1. CLI branch override
-        if let Some(branch) = cli_branch {
-            let cleaned = clean_branch_name(branch);
-            return validate_branch_name(&cleaned).map(|()| cleaned);
-        }
-
-        // 2. GLEON_BRANCH env var
-        if let Some(branch) = env
-            .get_var("GLEON_BRANCH")
-            .map(|b| clean_branch_name(&b))
-            .filter(|c| !c.is_empty())
+        let named = |branch: &str| Some(clean_branch_name(branch)).filter(|b| !b.is_empty());
+        if let Some(branch) = cli_branch
+            .and_then(named)
+            .or_else(|| env.get_var("GLEON_BRANCH").as_deref().and_then(named))
+            .or_else(|| resolve_ci_branch(env).as_deref().and_then(named))
         {
-            return validate_branch_name(&branch).map(|()| branch);
+            return Ok(branch);
         }
 
-        // 3. CI env variables (provider specific)
-        if let Some(branch) = resolve_ci_branch(env) {
-            let cleaned = clean_branch_name(&branch);
-            return validate_branch_name(&cleaned).map(|()| cleaned);
-        }
-
-        // 4. Git discovery
         match gix::discover(base_dir) {
             Ok(repo) => {
                 match repo.head_name() {
-                    Ok(Some(head_name)) => {
-                        let branch = head_name.shorten().to_string();
-                        let cleaned = clean_branch_name(&branch);
-                        validate_branch_name(&cleaned).map(|()| cleaned)
-                    }
+                    Ok(Some(head_name)) => Ok(clean_branch_name(&head_name.shorten().to_string())),
                     Ok(None) => {
                         // Detached HEAD and no env overrides
                         Err(GitError::DetachedHead)
@@ -140,231 +70,6 @@ impl GitResolver {
                 "Not a git repository (or no git installed). Please run inside a git repository, or provide the branch manually using the --branch CLI flag or the GLEON_BRANCH environment variable. Underlying error: {e}"
             ))),
         }
-    }
-
-    /// Uses the `ignore` crate to verify if screenshot paths are matched by .gitignore rules.
-    /// Returns true if all provided paths are correctly ignored.
-    /// Returns `GitError::Discover` if no Git repository is found.
-    ///
-    /// # Errors
-    /// Returns `GitError::Io` if the current working directory cannot be determined,
-    /// `GitError::Discover` if no Git repository is found, `GitError::OutsideRepository`
-    /// if a given path resolves outside the repository, or `GitError::IgnoreBuild` if
-    /// the gitignore matcher fails to build.
-    pub fn verify_ignored<P: AsRef<Path>>(paths: &[P]) -> Result<bool, GitError> {
-        let current_dir = std::env::current_dir().map_err(GitError::Io)?;
-        Self::verify_ignored_impl(paths, &current_dir)
-    }
-
-    /// Internal implementation of `verify_ignored` allowing dependency injection of search path.
-    ///
-    /// # Errors
-    /// Returns `GitError::Discover` if no Git repository is found, `GitError::OutsideRepository`
-    /// if a given path resolves outside the repository, or `GitError::IgnoreBuild` if
-    /// the gitignore matcher fails to build.
-    pub fn verify_ignored_impl<P: AsRef<Path>>(
-        paths: &[P],
-        base_dir: &Path,
-    ) -> Result<bool, GitError> {
-        let repo = gix::discover(base_dir).map_err(|e| {
-            GitError::Discover(format!(
-                "Not a git repository (or no git installed). verify_ignored requires a git repository. Underlying error: {e}"
-            ))
-        })?;
-
-        let repo_root = repo.workdir().ok_or_else(|| {
-            GitError::Discover("Bare repository has no working directory".to_string())
-        })?;
-        let repo_root = normalize_path(repo_root)?;
-
-        // Pre-process paths into absolute and relative counterparts, resolving path traversal
-        let mut processed_paths = Vec::with_capacity(paths.len());
-        for path in paths {
-            let path_ref = path.as_ref();
-            let abs_path = if path_ref.is_absolute() {
-                path_ref.to_path_buf()
-            } else {
-                base_dir.join(path_ref)
-            };
-            let abs_path = normalize_path(&abs_path)?;
-
-            // Check if the path is actually inside the repository
-            if !abs_path.starts_with(&repo_root) {
-                return Err(GitError::OutsideRepository(abs_path));
-            }
-
-            let rel_path = abs_path
-                .strip_prefix(&repo_root)
-                .map_err(|_| GitError::OutsideRepository(abs_path.clone()))?
-                .to_path_buf();
-            processed_paths.push((abs_path, rel_path));
-        }
-
-        let mut builder = ignore::gitignore::GitignoreBuilder::new(&repo_root);
-
-        // Add .git/info/exclude
-        let exclude_path = repo.git_dir().join("info/exclude");
-        if let Some(err) = builder.add(&exclude_path) {
-            tracing::debug!("Failed to add .git/info/exclude: {}", err);
-        }
-
-        let mut gitignores_to_add = std::collections::HashSet::new();
-        let mut visited_dirs = std::collections::HashSet::new();
-
-        for (abs_path, _) in &processed_paths {
-            // Traverse up to repo_root to discover all .gitignore files in the hierarchy
-            let mut current = abs_path.clone();
-            while current.pop() {
-                let dir = &current;
-                if !dir.starts_with(&repo_root) {
-                    break;
-                }
-                if visited_dirs.contains(dir) {
-                    // Already visited this directory and its parents!
-                    break;
-                }
-                visited_dirs.insert(dir.clone());
-
-                let gitignore = dir.join(".gitignore");
-                gitignores_to_add.insert(gitignore);
-                if dir == &repo_root {
-                    break;
-                }
-            }
-        }
-
-        // To match Git semantics, deeper .gitignore files must override shallower ones.
-        // The ignore crate applies later-added rules with higher precedence.
-        // Therefore, we sort the discovered files by depth (number of components)
-        // so that the root .gitignore is added first, and deeper files are added later.
-        let mut sorted_gitignores: Vec<_> = gitignores_to_add.into_iter().collect();
-        sorted_gitignores.sort_by(|a, b| {
-            a.components()
-                .count()
-                .cmp(&b.components().count())
-                .then_with(|| a.cmp(b))
-        });
-
-        for gitignore in sorted_gitignores {
-            if let Some(err) = builder.add(&gitignore) {
-                tracing::debug!("Failed to add ignore file {:?}: {}", gitignore, err);
-            }
-        }
-
-        let matcher = builder
-            .build()
-            .map_err(|e| GitError::IgnoreBuild(e.to_string()))?;
-
-        for (abs_path, rel_path) in &processed_paths {
-            // If the file/dir doesn't exist yet, we check if it matches ignore rules based on name.
-            // Under ignore crate, matched path checks can be run with is_dir flag.
-            let is_dir = abs_path.is_dir();
-            let ignore_match = matcher.matched_path_or_any_parents(rel_path, is_dir);
-            if !ignore_match.is_ignore() {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-
-    /// Computes the SHA-256 hash of the raw UTF-8 branch name for safe flat-key storage.
-    #[must_use]
-    pub fn branch_path_token(branch_name: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(branch_name.as_bytes());
-        hex::encode(hasher.finalize())
-    }
-
-    /// Resolves the merge-base between HEAD and the given target branch.
-    /// Detects shallow clones and returns a specific error for fallback logging.
-    ///
-    /// # Errors
-    /// Returns `GitError::Discover` if no Git repository is found, `GitError::ShallowClone`
-    /// if the repository is a shallow clone, `GitError::HeadRead` if HEAD cannot be
-    /// read, or `GitError::MergeBaseFailed` if the target branch cannot be resolved
-    /// or no common ancestor exists.
-    pub fn resolve_merge_base(base_dir: &Path, target_branch: &str) -> Result<String, GitError> {
-        let repo = gix::discover(base_dir).map_err(|e| GitError::Discover(e.to_string()))?;
-
-        // An unreadable shallow-file config counts as shallow: the history cannot be trusted.
-        if repo.is_shallow().unwrap_or(true) {
-            return Err(GitError::ShallowClone(
-                "Shallow clone detected (.git/shallow exists)".to_string(),
-            ));
-        }
-
-        let head_commit = repo
-            .head_commit()
-            .map_err(|e| GitError::HeadRead(e.to_string()))?;
-        let head_id = head_commit.id;
-
-        let target_id = repo.rev_parse_single(target_branch).map_err(|e| {
-            GitError::MergeBaseFailed(format!(
-                "Failed to resolve target branch '{target_branch}': {e}"
-            ))
-        })?;
-
-        repo.merge_base(head_id, target_id)
-            .map_err(|e| GitError::MergeBaseFailed(e.to_string()))?
-            .map(|base_id| base_id.to_string())
-            .ok_or_else(|| {
-                GitError::MergeBaseFailed(format!(
-                    "No common ancestor between HEAD and '{target_branch}'"
-                ))
-            })
-    }
-
-    /// Gets the author name and email of the given commit, defaulting to "unknown".
-    ///
-    /// # Errors
-    /// Returns `GitError::Discover` if no Git repository is found, `GitError::CommitLookup`
-    /// if `commit_sha` cannot be resolved to a commit, or `GitError::CommitDecode` if
-    /// the commit object cannot be decoded.
-    pub fn get_commit_author(base_dir: &Path, commit_sha: &str) -> Result<String, GitError> {
-        let repo = gix::discover(base_dir).map_err(|e| GitError::Discover(e.to_string()))?;
-
-        let id = gix::ObjectId::from_hex(commit_sha.as_bytes())
-            .or_else(|_| repo.rev_parse_single(commit_sha).map(gix::Id::detach))
-            .map_err(|e| GitError::CommitLookup {
-                ref_or_sha: commit_sha.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let commit = repo.find_commit(id).map_err(|e| GitError::CommitLookup {
-            ref_or_sha: id.to_string(),
-            reason: e.to_string(),
-        })?;
-
-        let decoded = commit.decode().map_err(|e| GitError::CommitDecode {
-            commit_sha: id.to_string(),
-            reason: e.to_string(),
-        })?;
-
-        gix::actor::SignatureRef::from_bytes(decoded.author.as_ref()).map_or_else(
-            |_| {
-                tracing::debug!(
-                    "Failed to parse author signature bytes for commit '{}'",
-                    commit_sha
-                );
-                Ok("unknown".to_string())
-            },
-            |sig| {
-                let actor = sig.actor();
-                let name = actor.name.to_string();
-                let email = actor.email.to_string();
-                if name.is_empty() && email.is_empty() {
-                    tracing::debug!(
-                        "Commit author name and email are empty for commit '{}'",
-                        commit_sha
-                    );
-                    Ok("unknown".to_string())
-                } else {
-                    Ok(format!("{name} <{email}>"))
-                }
-            },
-        )
     }
 
     /// Gets the repository's full hexadecimal object ID of HEAD (supporting both SHA-1 and SHA-256 widths).
@@ -504,18 +209,6 @@ fn clean_branch_name(name: &str) -> String {
     cleaned.trim().to_string()
 }
 
-fn validate_branch_name(name: &str) -> Result<(), GitError> {
-    if name.is_empty() {
-        return Err(GitError::InvalidBranchName(
-            "Branch name cannot be empty".to_string(),
-        ));
-    }
-    if gix::refs::PartialName::try_from(name).is_err() {
-        return Err(GitError::InvalidBranchName(name.to_string()));
-    }
-    Ok(())
-}
-
 fn is_env_truthy(val: Option<&String>) -> bool {
     val.is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
 }
@@ -617,7 +310,7 @@ fn resolve_ci_branch(env: &dyn EnvProvider) -> Option<String> {
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
-    use std::{collections::HashMap, fs::File, io::Write};
+    use std::collections::HashMap;
 
     use tempfile::tempdir;
 
@@ -648,7 +341,7 @@ mod tests {
             vars: HashMap::new(),
         };
         let result =
-            GitResolver::resolve_branch_impl(Some("refs/heads/cli-branch\r\n"), dir.path(), &env);
+            GitResolver::resolve_branch(Some("refs/heads/cli-branch\r\n"), dir.path(), &env);
         assert_eq!(result.unwrap(), "cli-branch");
     }
 
@@ -661,7 +354,7 @@ mod tests {
             "refs/heads/env-branch\r\n".to_string(),
         );
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "env-branch");
     }
 
@@ -673,7 +366,7 @@ mod tests {
         vars.insert("GITHUB_HEAD_REF".to_string(), "feature-pr".to_string());
         vars.insert("GITHUB_REF_NAME".to_string(), "main".to_string());
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "feature-pr");
     }
 
@@ -684,7 +377,7 @@ mod tests {
         vars.insert("GITHUB_ACTIONS".to_string(), "true".to_string());
         vars.insert("GITHUB_REF_NAME".to_string(), "feature-push".to_string());
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "feature-push");
     }
 
@@ -699,7 +392,7 @@ mod tests {
         );
         vars.insert("CI_COMMIT_BRANCH".to_string(), "main".to_string());
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "gitlab-mr");
     }
 
@@ -710,7 +403,7 @@ mod tests {
         vars.insert("GITLAB_CI".to_string(), "true".to_string());
         vars.insert("CI_COMMIT_BRANCH".to_string(), "gitlab-branch".to_string());
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "gitlab-branch");
     }
 
@@ -721,7 +414,7 @@ mod tests {
         let env = MockEnv {
             vars: HashMap::new(),
         };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "gix-branch");
     }
 
@@ -732,7 +425,7 @@ mod tests {
         let env = MockEnv {
             vars: HashMap::new(),
         };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert!(matches!(result, Err(GitError::DetachedHead)));
     }
 
@@ -742,7 +435,7 @@ mod tests {
         let env = MockEnv {
             vars: HashMap::new(),
         };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert!(matches!(result, Err(GitError::Discover(_))));
     }
 
@@ -756,7 +449,7 @@ mod tests {
             "generic-ci-branch".to_string(),
         );
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "generic-ci-branch");
     }
 
@@ -769,132 +462,30 @@ mod tests {
             "generic-ci-branch".to_string(),
         );
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert!(matches!(result, Err(GitError::Discover(_))));
     }
 
+    /// The branch is only recorded (`gleon dashboard`): a name Git would refuse passes as given,
+    /// and an empty one names none, so the next source decides.
     #[test]
-    fn test_validation_invalid_characters() {
+    fn test_any_branch_name_is_recorded_and_an_empty_one_names_none() {
         let dir = tempdir().unwrap();
         let env = MockEnv {
-            vars: HashMap::new(),
+            vars: HashMap::from([("GLEON_BRANCH".to_string(), "from env".to_string())]),
         };
-        let result =
-            GitResolver::resolve_branch_impl(Some("feature space branch"), dir.path(), &env);
-        assert!(matches!(result, Err(GitError::InvalidBranchName(_))));
-    }
-
-    #[test]
-    fn test_git_ref_validation_cases() {
-        // feature/xxx should be valid
-        assert!(validate_branch_name("feature/über").is_ok());
-        // foo..bar should be invalid (double dot is not allowed in git refs)
-        assert!(validate_branch_name("foo..bar").is_err());
-        // .hidden should be invalid (starts with dot)
-        assert!(validate_branch_name(".hidden").is_err());
-        // foo/ should be invalid (ends with slash)
-        assert!(validate_branch_name("foo/").is_err());
-    }
-
-    #[test]
-    fn test_verify_ignored_success() {
-        let dir = tempdir().unwrap();
-        create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
-
-        let gitignore_path = dir.path().join(".gitignore");
-        let mut file = File::create(&gitignore_path).unwrap();
-        writeln!(file, "**/goldens/**/*.png").unwrap();
-        writeln!(file, "ignored_file.txt").unwrap();
-
-        let paths = vec![
-            dir.path().join("ignored_file.txt"),
-            dir.path().join("src/goldens/test.png"),
-        ];
-
-        let result = GitResolver::verify_ignored_impl(&paths, dir.path()).unwrap();
-        assert!(result);
-
-        let non_ignored = vec![dir.path().join("src/main.rs")];
-        let result_non_ignored =
-            GitResolver::verify_ignored_impl(&non_ignored, dir.path()).unwrap();
-        assert!(!result_non_ignored);
-    }
-
-    #[test]
-    fn test_verify_ignored_fallback() {
-        let dir = tempdir().unwrap();
-        let paths = vec![dir.path().join("ignored_file.txt")];
-        let result = GitResolver::verify_ignored_impl(&paths, dir.path());
-        assert!(matches!(result, Err(GitError::Discover(_))));
-    }
-
-    #[test]
-    fn test_verify_ignored_precedence() {
-        let dir = tempdir().unwrap();
-        create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
-
-        let sub_dir = dir.path().join("sub");
-        std::fs::create_dir(&sub_dir).unwrap();
-
-        // Root gitignore: ignore all .png
-        let mut root_ignore = File::create(dir.path().join(".gitignore")).unwrap();
-        writeln!(root_ignore, "*.png").unwrap();
-
-        // Sub gitignore: un-ignore specific.png
-        let mut sub_ignore = File::create(sub_dir.join(".gitignore")).unwrap();
-        writeln!(sub_ignore, "!specific.png").unwrap();
-
-        let paths = vec![
-            dir.path().join("normal.png"),
-            sub_dir.join("normal.png"),
-            sub_dir.join("specific.png"),
-        ];
-
-        let result = GitResolver::verify_ignored_impl(&paths, dir.path()).unwrap();
-        // Result should be false because specific.png is NOT ignored.
-        assert!(!result);
-
-        // Verify individually
-        let paths1 = vec![dir.path().join("normal.png")];
-        assert!(GitResolver::verify_ignored_impl(&paths1, dir.path()).unwrap());
-
-        let paths2 = vec![sub_dir.join("normal.png")];
-        assert!(GitResolver::verify_ignored_impl(&paths2, dir.path()).unwrap());
-
-        let paths3 = vec![sub_dir.join("specific.png")];
-        assert!(!GitResolver::verify_ignored_impl(&paths3, dir.path()).unwrap());
-    }
-
-    #[test]
-    fn test_verify_ignored_relative_base_dir() {
-        let dir = tempdir().unwrap();
-        create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
-
-        let sub_dir = dir.path().join("sub");
-        std::fs::create_dir(&sub_dir).unwrap();
-
-        let mut ignore_file = File::create(dir.path().join(".gitignore")).unwrap();
-        writeln!(ignore_file, "sub/ignored.png").unwrap();
-
-        // Pass a relative path "ignored.png" and base_dir "sub".
-        // It should resolve to "sub/ignored.png" and be ignored.
-        let paths = vec![std::path::PathBuf::from("ignored.png")];
-        let result = GitResolver::verify_ignored_impl(&paths, &sub_dir).unwrap();
-        assert!(result);
-
-        // Relative path "ignored.png" from root base_dir should NOT be ignored
-        // because the rule specifies "sub/ignored.png", not "ignored.png".
-        let result2 = GitResolver::verify_ignored_impl(&paths, dir.path()).unwrap();
-        assert!(!result2);
-    }
-
-    #[test]
-    fn test_public_wrappers() {
-        let branch = GitResolver::resolve_branch();
-        assert!(branch.is_ok());
-
-        let ignored = GitResolver::verify_ignored(&["target/debug/test_dummy_file.png"]);
-        assert!(ignored.is_ok());
+        for (given, expected) in [
+            (Some("feature space branch"), "feature space branch"),
+            (Some("foo..bar"), "foo..bar"),
+            (Some(" refs/heads/ "), "from env"),
+            (None, "from env"),
+        ] {
+            assert_eq!(
+                GitResolver::resolve_branch(given, dir.path(), &env).unwrap(),
+                expected,
+                "{given:?}"
+            );
+        }
     }
 
     #[test]
@@ -942,19 +533,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(miri))]
-    fn test_verify_ignored_bare_repo() {
-        let dir = tempdir().unwrap();
-        gix::init_bare(dir.path()).unwrap();
-        let paths = vec![dir.path().join("file.png")];
-        let result = GitResolver::verify_ignored_impl(&paths, dir.path());
-        assert!(matches!(
-            result,
-            Err(GitError::Discover(ref msg)) if msg.contains("Bare repository")
-        ));
-    }
-
-    #[test]
     fn test_resolve_branch_ci_providers() {
         let dir = tempdir().unwrap();
 
@@ -963,7 +541,7 @@ mod tests {
         vars.insert("CIRCLECI".to_string(), "true".to_string());
         vars.insert("CIRCLE_BRANCH".to_string(), "circle-branch".to_string());
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "circle-branch");
 
         // Bitbucket
@@ -974,7 +552,7 @@ mod tests {
             "bitbucket-branch".to_string(),
         );
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "bitbucket-branch");
 
         // Azure DevOps
@@ -985,7 +563,7 @@ mod tests {
             "azure-branch".to_string(),
         );
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "azure-branch");
 
         // Travis
@@ -993,7 +571,7 @@ mod tests {
         vars.insert("TRAVIS".to_string(), "true".to_string());
         vars.insert("TRAVIS_BRANCH".to_string(), "travis-branch".to_string());
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "travis-branch");
 
         // Codemagic
@@ -1001,7 +579,7 @@ mod tests {
         vars.insert("CM_BUILD_ID".to_string(), "123".to_string());
         vars.insert("CM_BRANCH".to_string(), "codemagic-branch".to_string());
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "codemagic-branch");
 
         // Bitrise
@@ -1012,13 +590,8 @@ mod tests {
             "bitrise-branch".to_string(),
         );
         let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert_eq!(result.unwrap(), "bitrise-branch");
-    }
-
-    #[test]
-    fn test_validation_empty_branch() {
-        assert!(validate_branch_name("").is_err());
     }
 
     #[test]
@@ -1038,35 +611,8 @@ mod tests {
         let env = MockEnv {
             vars: HashMap::new(),
         };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
+        let result = GitResolver::resolve_branch(None, dir.path(), &env);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_verify_ignored_invalid_ignore_file() {
-        let dir = tempdir().unwrap();
-        create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
-
-        let gitignore_path = dir.path().join(".gitignore");
-        let mut file = File::create(&gitignore_path).unwrap();
-        // A double-bracket without a closing one or a consecutive wildcard like ***
-        // will cause a glob compile/parse error in the builder.
-        writeln!(file, "*[").unwrap();
-
-        let paths = vec![dir.path().join("file.png")];
-        // verify_ignored_impl returns false if the gitignore file fails parsing but other paths are checked
-        let result = GitResolver::verify_ignored_impl(&paths, dir.path()).unwrap();
-        assert!(!result);
-    }
-
-    #[test]
-    fn test_resolve_branch_invalid_env_override() {
-        let dir = tempdir().unwrap();
-        let mut vars = HashMap::new();
-        vars.insert("GLEON_BRANCH".to_string(), "invalid name space".to_string());
-        let env = MockEnv { vars };
-        let result = GitResolver::resolve_branch_impl(None, dir.path(), &env);
-        assert!(matches!(result, Err(GitError::InvalidBranchName(_))));
     }
 
     #[test]
@@ -1074,244 +620,6 @@ mod tests {
         let path = Path::new("./file.png");
         let norm = normalize_path(path).unwrap();
         assert_eq!(norm, Path::new("file.png"));
-    }
-
-    #[test]
-    fn test_branch_path_token() {
-        let token1 = GitResolver::branch_path_token("release");
-        let token2 = GitResolver::branch_path_token("release/1.0");
-        assert_ne!(token1, token2);
-        assert_eq!(token1.len(), 64);
-        assert_eq!(token2.len(), 64);
-    }
-
-    #[test]
-    fn test_get_commit_author_errors_propagated() {
-        let dir = tempdir().unwrap();
-        let result =
-            GitResolver::get_commit_author(dir.path(), "0000000000000000000000000000000000000000");
-        assert!(matches!(result, Err(GitError::Discover(_))));
-    }
-
-    #[test]
-    fn test_get_commit_author_gix() {
-        let dir = tempdir().unwrap();
-        gix::init(dir.path()).unwrap();
-        std::fs::write(
-            dir.path().join(".git/config"),
-            "[user]\n\tname = gleon Author\n\temail = author@gleon.rs\n",
-        )
-        .unwrap();
-        let repo = gix::open(dir.path()).unwrap();
-        let empty_tree_id = repo.empty_tree().id();
-        let commit_id = repo
-            .commit(
-                "HEAD",
-                "initial commit",
-                empty_tree_id,
-                gix::commit::NO_PARENT_IDS,
-            )
-            .unwrap();
-
-        let sha = commit_id.to_string();
-        let author = GitResolver::get_commit_author(dir.path(), &sha).unwrap();
-        assert_eq!(author, "gleon Author <author@gleon.rs>");
-    }
-
-    #[test]
-    fn test_resolve_merge_base_shallow_clone_error() {
-        let dir = tempdir().unwrap();
-        gix::init(dir.path()).unwrap();
-
-        // Write .git/shallow to simulate a shallow repository
-        let shallow_path = dir.path().join(".git/shallow");
-        std::fs::write(&shallow_path, "0000000000000000000000000000000000000000\n").unwrap();
-
-        let result = GitResolver::resolve_merge_base(dir.path(), "main");
-        assert!(matches!(result, Err(GitError::ShallowClone(_))));
-    }
-
-    #[test]
-    #[cfg(all(unix, not(miri)))]
-    fn test_verify_ignored_unreadable_gitignore() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempdir().unwrap();
-        create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
-        let gitignore_path = dir.path().join(".gitignore");
-        std::fs::write(&gitignore_path, "*.png").unwrap();
-        std::fs::set_permissions(&gitignore_path, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-        // If we are root, writing to 0o000 file will succeed.
-        let is_root = std::fs::write(&gitignore_path, "probe").is_ok();
-        if is_root {
-            return;
-        }
-
-        let paths = vec![dir.path().join("file.png")];
-        let result = GitResolver::verify_ignored_impl(&paths, dir.path()).unwrap();
-        assert!(!result);
-    }
-
-    #[test]
-    #[cfg(all(unix, not(miri)))]
-    fn test_verify_ignored_unreadable_info_exclude() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempdir().unwrap();
-        create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
-        let exclude_path = dir.path().join(".git/info/exclude");
-        if let Some(parent) = exclude_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&exclude_path, "*.png").unwrap();
-        std::fs::set_permissions(&exclude_path, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-        // If we are root, writing to 0o000 file will succeed.
-        let is_root = std::fs::write(&exclude_path, "probe").is_ok();
-        if is_root {
-            return;
-        }
-
-        let paths = vec![dir.path().join("file.png")];
-        // The unreadable exclude file causes builder.add() to return Some(ignore::Error),
-        // which the implementation catches and logs via tracing::debug!.
-        // This failure does NOT cause a panic. The test should succeed and return false.
-        let result = GitResolver::verify_ignored_impl(&paths, dir.path()).unwrap();
-        assert!(!result);
-    }
-
-    /// Inits a repository with a committer identity and one commit on HEAD.
-    fn init_repo_with_commit(path: &Path) -> (gix::Repository, gix::ObjectId) {
-        gix::init(path).unwrap();
-        std::fs::write(
-            path.join(".git/config"),
-            "[user]\n\tname = gleon Author\n\temail = author@gleon.rs\n",
-        )
-        .unwrap();
-        let repo = gix::open(path).unwrap();
-        let tree = repo.empty_tree().id;
-        let root = repo
-            .commit("HEAD", "root", tree, gix::commit::NO_PARENT_IDS)
-            .unwrap()
-            .detach();
-        (repo, root)
-    }
-
-    #[test]
-    fn test_resolve_merge_base_success() {
-        let dir = tempdir().unwrap();
-        let (repo, root) = init_repo_with_commit(dir.path());
-        repo.reference(
-            "refs/heads/target",
-            root,
-            gix::refs::transaction::PreviousValue::Any,
-            "branch off root",
-        )
-        .unwrap();
-        repo.commit("HEAD", "ahead", repo.empty_tree().id, [root])
-            .unwrap();
-
-        let base = GitResolver::resolve_merge_base(dir.path(), "target").unwrap();
-        assert_eq!(base, root.to_string());
-    }
-
-    #[test]
-    fn test_resolve_merge_base_no_common_ancestor() {
-        let dir = tempdir().unwrap();
-        let (repo, _) = init_repo_with_commit(dir.path());
-        repo.commit(
-            "refs/heads/orphan",
-            "unrelated root",
-            repo.empty_tree().id,
-            gix::commit::NO_PARENT_IDS,
-        )
-        .unwrap();
-
-        let err = GitResolver::resolve_merge_base(dir.path(), "orphan").unwrap_err();
-        assert!(
-            matches!(&err, GitError::MergeBaseFailed(msg) if msg.contains("No common ancestor")),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_resolve_merge_base_target_not_a_commit() {
-        let dir = tempdir().unwrap();
-        init_repo_with_commit(dir.path());
-
-        let err = GitResolver::resolve_merge_base(dir.path(), "HEAD^{tree}").unwrap_err();
-        assert!(
-            matches!(&err, GitError::MergeBaseFailed(msg)
-                if !msg.contains("No common ancestor") && !msg.starts_with("Failed to resolve")),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_resolve_merge_base_invalid_target_branch() {
-        let dir = tempdir().unwrap();
-        gix::init(dir.path()).unwrap();
-        std::fs::write(
-            dir.path().join(".git/config"),
-            "[user]\n\tname = gleon Author\n\temail = author@gleon.rs\n",
-        )
-        .unwrap();
-        let repo = gix::open(dir.path()).unwrap();
-        let empty_tree_id = repo.empty_tree().id();
-        let _ = repo
-            .commit(
-                "HEAD",
-                "initial commit",
-                empty_tree_id,
-                gix::commit::NO_PARENT_IDS,
-            )
-            .unwrap();
-
-        let result = GitResolver::resolve_merge_base(dir.path(), "non-existent");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, GitError::MergeBaseFailed(_)));
-    }
-
-    #[test]
-    fn test_get_commit_author_invalid_ref() {
-        let dir = tempdir().unwrap();
-        gix::init(dir.path()).unwrap();
-
-        let result = GitResolver::get_commit_author(dir.path(), "invalid-ref");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, GitError::CommitLookup { .. }));
-    }
-
-    #[test]
-    fn test_get_commit_author_empty_signature() {
-        use gix::prelude::Write;
-        let dir = tempdir().unwrap();
-        gix::init(dir.path()).unwrap();
-        let repo = gix::open(dir.path()).unwrap();
-
-        let commit_data = b"tree 4b825dc642cb6eb9a0ff3e4897c85c126437f451\nauthor  <> 0 +0000\ncommitter Test <test@test.com> 0 +0000\n\nempty author\n";
-        let commit_id = repo
-            .write_buf(gix::object::Kind::Commit, commit_data)
-            .unwrap();
-
-        let sha = commit_id.to_string();
-        let author = GitResolver::get_commit_author(dir.path(), &sha).unwrap();
-        assert_eq!(author, "unknown");
-    }
-
-    #[test]
-    fn test_verify_ignored_out_of_bounds_prevention() {
-        let dir = tempdir().unwrap();
-        create_mock_git_repo(dir.path(), "ref: refs/heads/main\n");
-
-        // We pass the root directory itself to simulate the pathological case where pop()
-        // would escape the repository.
-        let paths = vec![dir.path().to_path_buf()];
-
-        let result = GitResolver::verify_ignored_impl(&paths, dir.path()).unwrap();
-        // Since no ignore rules are defined that match the root itself, it should return false
-        assert!(!result);
     }
 
     #[test]

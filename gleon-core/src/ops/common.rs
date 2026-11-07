@@ -165,34 +165,23 @@ pub fn load_merged_index_with_fallback(
     Ok(workspace_index)
 }
 
-/// Resolves the manifest search directory for a `platform_filter` argument shared by
-/// `lint_workspace_manifests` and `scan_conflicts`.
+/// The manifests directory of the platform `platform_filter` names, always one entry of
+/// `manifests_root`.
 ///
-/// `manifests_root` itself when `platform_filter` is unset, or `manifests_root/<platform_filter>`
-/// when it's exactly one valid path segment.
+/// For `lint_workspace_manifests` and `scan_conflicts`: the key as
+/// [`gleon_model::platform::validate_key`] normalizes it (`MacOS` as `macos`), like
+/// `gleon pull --platform`.
 ///
 /// # Errors
-/// Returns `Err(platform_filter)` (the original string, unchanged) if it isn't a single valid
-/// segment, so callers can wrap it in their own `InvalidPlatformFilter` error variant.
-pub fn resolve_platform_filter_dir<'a>(
+/// Returns `Err(platform_filter)` (the original string, unchanged) if it is no platform key, so
+/// callers can wrap it in their own `InvalidPlatformFilter` error variant.
+pub fn platform_filter_dir<'a>(
     manifests_root: &Path,
-    platform_filter: Option<&'a str>,
+    platform_filter: &'a str,
 ) -> Result<PathBuf, &'a str> {
-    let Some(p) = platform_filter else {
-        return Ok(manifests_root.to_path_buf());
-    };
-
-    let path = Path::new(p);
-    let mut components = path.components();
-    match (components.next(), components.next()) {
-        (Some(std::path::Component::Normal(seg)), None)
-            if gleon_model::platform::validate_key(&seg.to_string_lossy())
-                .is_ok_and(|key| key == p) =>
-        {
-            Ok(manifests_root.join(p))
-        }
-        _ => Err(p),
-    }
+    gleon_model::platform::validate_key(platform_filter)
+        .map(|key| manifests_root.join(key.as_ref()))
+        .map_err(|_| platform_filter)
 }
 
 /// What a tracked screenshot is compared with, decided from its manifest and the local blob
@@ -472,57 +461,9 @@ pub fn append_missing_gitignore_lines(
     }
     buffer.push_str(&to_append);
 
-    crate::io::write_file_atomically(path, |writer| {
-        use std::io::Write as _;
-        writer
-            .write_all(buffer.as_bytes())
-            .map_err(crate::io::IoError::Io)
-    })?;
+    crate::io::save_file_atomically(path, buffer.as_bytes())?;
 
     Ok(added)
-}
-
-/// Creates the file at `path` with `content` if it does not already exist; a no-op otherwise.
-///
-/// Uses `create_new` for idempotency and durably syncs the file and `dir_to_sync` (its parent
-/// directory) to disk.
-///
-/// # Errors
-/// Returns [`CoreError::Io`] if file creation, writing, or syncing fails for a reason other
-/// than the file already existing.
-#[cfg_attr(
-    windows,
-    expect(
-        unused_variables,
-        reason = "`dir_to_sync` is only used for the directory fsync, which is skipped on Windows"
-    )
-)]
-pub fn create_new_file_with_content(
-    path: &Path,
-    content: &[u8],
-    dir_to_sync: &Path,
-) -> Result<bool, CoreError> {
-    use std::io::Write as _;
-
-    let create_res = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path);
-    match create_res {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(content).and_then(|()| f.sync_all()) {
-                let _ = std::fs::remove_file(path);
-                return Err(CoreError::Io(e));
-            }
-            #[cfg(not(windows))]
-            if let Ok(d) = std::fs::File::open(dir_to_sync) {
-                let _ = d.sync_all();
-            }
-            Ok(true)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(CoreError::Io(e)),
-    }
 }
 
 #[cfg(all(test, not(miri)))]
@@ -854,33 +795,32 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_platform_filter_dir_accepts_single_valid_segment() {
+    fn test_platform_filter_dir_is_one_entry_named_by_the_key() {
         let root = Path::new("/w/.gleon/manifests");
-
         assert_eq!(
-            resolve_platform_filter_dir(root, None).unwrap(),
-            root.to_path_buf(),
-            "no filter means the whole manifests root"
-        );
-        assert_eq!(
-            resolve_platform_filter_dir(root, Some("macos-aarch64")).unwrap(),
+            platform_filter_dir(root, "macos-aarch64").unwrap(),
             root.join("macos-aarch64")
         );
         assert_eq!(
-            resolve_platform_filter_dir(root, Some("linux-x86_64+chrome+theme=dark")).unwrap(),
+            platform_filter_dir(root, "linux-x86_64+chrome+theme=dark").unwrap(),
             root.join("linux-x86_64+chrome+theme=dark"),
             "keys with a renderer and labels"
+        );
+        // Normalized like `gleon pull --platform`: the directory is the key's.
+        assert_eq!(
+            platform_filter_dir(root, " MacOS-AArch64 ").unwrap(),
+            root.join("macos-aarch64")
         );
     }
 
     #[test]
-    fn test_resolve_platform_filter_dir_rejects_traversal_and_nesting() {
+    fn test_platform_filter_dir_rejects_traversal_and_nesting() {
         let root = Path::new("/w/.gleon/manifests");
 
         // Multi-segment, parent traversal and absolute paths must never escape the root.
-        for bad in ["macos/aarch64", "../etc", "/etc", ".", "", "a:b", "MacOS"] {
+        for bad in ["macos/aarch64", "../etc", "/etc", ".", "", "a:b", "con"] {
             assert_eq!(
-                resolve_platform_filter_dir(root, Some(bad)),
+                platform_filter_dir(root, bad),
                 Err(bad),
                 "filter {bad:?} must be rejected"
             );
@@ -918,7 +858,7 @@ mod tests {
     fn test_phash_of_and_build_manifest_roundtrip() {
         let png_bytes = include_bytes!("../../tests/fixtures/baseline_100x100.png");
         let sha256 = Sha256Hex::of(png_bytes);
-        let phash = phash_of(SingleTestManifest::load_image_from_bytes(png_bytes).unwrap());
+        let phash = phash_of(SingleTestManifest::decode_validated(png_bytes).unwrap());
 
         let manifest = build_manifest(sha256.as_str(), &phash, 100, 100).unwrap();
         assert_eq!(manifest.hash.value(), sha256.as_str());
@@ -975,19 +915,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_new_file_with_content_idempotent() {
-        let temp = tempdir().unwrap();
-        let path = temp.path().join("gleon.yaml");
-
-        assert!(create_new_file_with_content(&path, b"hello", temp.path()).unwrap());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-
-        // Already exists: no-op, content untouched.
-        assert!(!create_new_file_with_content(&path, b"world", temp.path()).unwrap());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-    }
-
-    #[test]
     fn test_core_error_from_io_error() {
         let io_err = crate::io::IoError::Io(std::io::Error::other("test io"));
         let core_err: CoreError = io_err.into();
@@ -997,16 +924,6 @@ mod tests {
         let io_json_err = crate::io::IoError::JsonParse(json_err);
         let core_json_err: CoreError = io_json_err.into();
         assert!(matches!(core_json_err, CoreError::Io(_)));
-    }
-
-    #[test]
-    fn test_create_new_file_with_content_error() {
-        let res = create_new_file_with_content(
-            Path::new("/nonexistent_dir/nested/blob.png"),
-            b"test",
-            Path::new("/nonexistent_dir"),
-        );
-        assert!(matches!(res, Err(CoreError::Io(_))));
     }
 
     #[test]

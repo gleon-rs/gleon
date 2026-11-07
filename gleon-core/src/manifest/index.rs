@@ -91,12 +91,6 @@ impl WorkspaceIndex {
         &self.entries
     }
 
-    /// Consumes the index and returns the inner entries map.
-    #[must_use]
-    pub fn into_entries(self) -> BTreeMap<String, SingleTestManifest> {
-        self.entries
-    }
-
     /// Gets a single test manifest by test case name.
     #[must_use]
     pub fn get(&self, test_name: &str) -> Option<&SingleTestManifest> {
@@ -259,6 +253,23 @@ fn listed(manifest_dir: &Path, entry: ignore::DirEntry) -> Result<Option<Listed>
     let Ok(rel_path) = path.strip_prefix(manifest_dir) else {
         return Ok(None);
     };
+    let (key, source) = manifest_names(rel_path)?;
+    Ok(Some(Listed {
+        key,
+        source,
+        path: entry.into_path(),
+    }))
+}
+
+/// The names [`WorkspaceIndex::load`] gives the manifest file at `rel_path`, also for `gleon lint`.
+///
+/// `rel_path` is relative to its platform directory. The names are its test case key, normalized
+/// ([`normalize_test_name`]) and valid ([`validate_test_path`]), and the path it was written under
+/// (without `.json`).
+///
+/// # Errors
+/// Returns [`ManifestError::Validation`] for a path that is no UTF-8 or no valid test path.
+pub fn manifest_names(rel_path: &Path) -> Result<(String, String), ManifestError> {
     let without_ext = rel_path.with_extension("");
     let source = without_ext.to_str().ok_or_else(|| {
         ManifestError::Validation(format!(
@@ -268,11 +279,7 @@ fn listed(manifest_dir: &Path, entry: ignore::DirEntry) -> Result<Option<Listed>
     })?;
     let key = normalize_test_name(source);
     validate_test_path(key.as_ref())?;
-    Ok(Some(Listed {
-        key: key.into_owned(),
-        source: source.to_owned(),
-        path: entry.into_path(),
-    }))
+    Ok((key.into_owned(), source.to_owned()))
 }
 
 fn manifest_file_path(dir: &Path, key: &str) -> PathBuf {
@@ -556,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_index_into_entries_and_validation() {
+    fn test_workspace_index_remove_and_validation() {
         let hash = ImageHash::new("sha256", "a".repeat(64)).unwrap();
         let phash = ImageHash::new("dhash", "0000000000000000").unwrap();
         let single = SingleTestManifest::new(hash, phash, 100, 200).unwrap();
@@ -569,20 +576,6 @@ mod tests {
         assert!(validate_test_path("invalid/../path").is_err());
         assert!(validate_test_path("invalid/path!").is_err());
         assert!(validate_test_path("Auth/Login").is_err());
-
-        let mut index2 = WorkspaceIndex::new();
-        index2.insert(
-            "test".to_string(),
-            SingleTestManifest::new(
-                ImageHash::new("sha256", "b".repeat(64)).unwrap(),
-                ImageHash::new("dhash", "1111111111111111").unwrap(),
-                10,
-                10,
-            )
-            .unwrap(),
-        );
-        let map = index2.into_entries();
-        assert_eq!(map.len(), 1);
     }
 
     #[test]

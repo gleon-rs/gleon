@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gleon_engine::config::{DiffConfig, Zone};
+use gleon_engine::config::{DEFAULT_COLOR_TOLERANCE, DEFAULT_MIN_SIMILARITY, Zone};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -268,7 +268,7 @@ pub struct GleonConfig {
     #[schemars(with = "item_or_vec::OneOrMany<GlobPattern>")]
     pub exclude: Vec<GlobPattern>,
     /// Per-golden comparison metrics recorded by integrations such as the Flutter package.
-    #[serde(default, skip_serializing_if = "MetricsConfig::is_default")]
+    #[serde(default, skip_serializing_if = "crate::serde_skip::is_default")]
     pub metrics: MetricsConfig,
     /// Directory of the images of failed cases (golden, candidate, diff) relative to the workspace
     /// root: `.gleon/runs/latest/artifacts` (the default) or a directory under `.gleon/runs/`
@@ -475,14 +475,6 @@ impl Default for MetricsConfig {
 }
 
 impl MetricsConfig {
-    #[expect(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "serde passes a reference to `skip_serializing_if` functions"
-    )]
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     /// Applies the [`METRICS_ENV`] override (`env_value` is its raw value, `None` when unset).
     ///
     /// # Errors
@@ -636,9 +628,10 @@ struct RuleFile {
     mode: Option<RuleMode>,
     /// The thresholds of the mode: each key belongs to one mode, and a key of another mode is an
     /// error, even at its default (it would be silently ignored).
-    // `skip_serializing_if` (never serialized) keeps a `default` out of the schema.
+    // `skip_serializing_if` (never serialized) keeps a `default` out of the schema; `with` keeps
+    // the `null` of the `Option` out of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "DiffConfig")]
+    #[schemars(with = "DiffFile")]
     diff: Option<DiffFile>,
     /// Optional zones to mask out (ignore) during verification.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -687,7 +680,7 @@ pub enum RuleError {
     )]
     MissingThreshold,
     /// A `diff` key of another mode than the rule's (at any value: it would never apply).
-    #[error("diff.{key} applies to `mode: {owner}` only")]
+    #[error("`diff.{key}` applies to `mode: {owner}` only")]
     ForeignKey {
         /// The key.
         key: &'static str,
@@ -700,16 +693,57 @@ pub enum RuleError {
     OutOfRange(ToleranceError),
 }
 
-/// The `diff` keys of a rule as written, each one there or not: a key of another mode is an
-/// error by being there, a key of the rule's mode left out is its default.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The thresholds of a rule's mode: each key belongs to one mode, a key of another mode is an
+/// error by being there (even at its default), and a key of the rule's mode left out is its
+/// default, except `threshold`, which `mode: pixel` requires (no share of differing pixels is
+/// tolerated unless it is written).
+// Every key is optional (`default`), and none has a `default` of `null` in the schema
+// (`skip_serializing_if`); `with` gives the schema the type of the value.
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "DiffConfig")]
 struct DiffFile {
+    /// Largest share [0.0, 1.0] of differing pixels in pixel mode: required by `mode: pixel`
+    /// (0: every pixel identical, the pixel options aside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "f64", range(min = 0.0, max = 1.0))]
     threshold: Option<f64>,
+    /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "f64",
+        range(min = 0.0, max = 1.0),
+        extend("default" = DEFAULT_MIN_SIMILARITY)
+    )]
     min_similarity: Option<f64>,
+    /// Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "f64",
+        range(min = 0.0, max = 255.0),
+        extend("default" = DEFAULT_COLOR_TOLERANCE)
+    )]
     color_tolerance: Option<f64>,
+    /// Pixel mode, outside text: a differing pixel counts as equal when none of its RGBA bytes
+    /// differs by more than this, `[0, 254]` (default 0: off). For GPU and color-conversion
+    /// drift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u8", range(max = 254), extend("default" = 0))]
     channel_tolerance: Option<u8>,
+    /// Pixel mode, outside text: a differing pixel counts as equal when it looks anti-aliased in
+    /// either image (the detection of pixelmatch: between a darker and a brighter neighbor that
+    /// sit in flat areas of both images). Default off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "bool", extend("default" = false))]
     anti_alias: Option<bool>,
+    /// Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the
+    /// baseline's luma there (8-bit units, unnormalized like Skia Gold's: a sharp step of 16
+    /// gives 64) exceeds this, `[0, 254]`: the edges a sub-pixel shift or another rasterizer
+    /// moves (Skia Gold's edge mask). Default 0: off. Hides every change that lies on edges too:
+    /// on the calibration corpus a missing glyph, a card moved by 1px and, at 64, a missing small
+    /// icon pass; the lower the value, the more pixels count as edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u8", range(max = 254), extend("default" = 0))]
     edge_threshold: Option<u8>,
 }
 
@@ -748,8 +782,9 @@ impl DiffFile {
         }
     }
 
-    /// The thresholds: each key written, checked against its range, else its default.
-    fn config(&self) -> Result<DiffConfig, RuleError> {
+    /// The tolerance of `mode`: its keys written, each checked against its range, else their
+    /// defaults (`pixel` has none for its threshold); a key of another mode is an error.
+    fn tolerance(&self, mode: RuleMode) -> Result<Tolerance, RuleError> {
         /// The value `written`, if it passes `check`, else `default`.
         fn checked<T>(
             written: Option<T>,
@@ -761,27 +796,36 @@ impl DiffFile {
             })
         }
 
-        let defaults = DiffConfig::default();
-        Ok(DiffConfig {
-            threshold: checked(self.threshold, defaults.threshold, |value| {
-                ToleranceError::check_ratio("diff.threshold", value)
-            })?,
-            min_similarity: checked(self.min_similarity, defaults.min_similarity, |value| {
-                ToleranceError::check_ratio("diff.min_similarity", value)
-            })?,
-            color_tolerance: checked(self.color_tolerance, defaults.color_tolerance, |value| {
-                ToleranceError::check_color_tolerance("diff.color_tolerance", value)
-            })?,
-            channel_tolerance: checked(
-                self.channel_tolerance,
-                defaults.channel_tolerance,
-                |value| ToleranceError::check_pixel_option("diff.channel_tolerance", value),
-            )?,
-            anti_alias: self.anti_alias.unwrap_or(defaults.anti_alias),
-            edge_threshold: checked(self.edge_threshold, defaults.edge_threshold, |value| {
-                ToleranceError::check_pixel_option("diff.edge_threshold", value)
-            })?,
-        })
+        if let Some((key, owner)) = self.foreign_key(mode) {
+            return Err(RuleError::ForeignKey { key, owner });
+        }
+        let tolerance = match mode {
+            RuleMode::Exact => Tolerance::Exact {},
+            RuleMode::Pixel => Tolerance::Pixel {
+                max_diff_ratio: self.threshold.ok_or(RuleError::MissingThreshold).and_then(
+                    |value| {
+                        ToleranceError::check_ratio("diff.threshold", value)
+                            .map_err(RuleError::OutOfRange)
+                    },
+                )?,
+                channel_tolerance: checked(self.channel_tolerance, 0, |value| {
+                    ToleranceError::check_pixel_option("diff.channel_tolerance", value)
+                })?,
+                anti_alias: self.anti_alias.unwrap_or_default(),
+                edge_threshold: checked(self.edge_threshold, 0, |value| {
+                    ToleranceError::check_pixel_option("diff.edge_threshold", value)
+                })?,
+            },
+            RuleMode::Ssim => Tolerance::Ssim {
+                min_similarity: checked(self.min_similarity, DEFAULT_MIN_SIMILARITY, |value| {
+                    ToleranceError::check_ratio("diff.min_similarity", value)
+                })?,
+                color_tolerance: checked(self.color_tolerance, DEFAULT_COLOR_TOLERANCE, |value| {
+                    ToleranceError::check_color_tolerance("diff.color_tolerance", value)
+                })?,
+            },
+        };
+        Ok(tolerance.without_negative_zero())
     }
 }
 
@@ -790,13 +834,7 @@ impl TryFrom<RuleFile> for ScreenshotRule {
 
     fn try_from(file: RuleFile) -> Result<Self, Self::Error> {
         let mode = file.mode.ok_or(RuleError::MissingMode)?;
-        let diff = file.diff.unwrap_or_default();
-        if let Some((key, owner)) = diff.foreign_key(mode) {
-            return Err(RuleError::ForeignKey { key, owner });
-        }
-        if mode == RuleMode::Pixel && diff.threshold.is_none() {
-            return Err(RuleError::MissingThreshold);
-        }
+        let tolerance = file.diff.unwrap_or_default().tolerance(mode)?;
         // Checked here like the `diff` keys, so an error names the line of the rule.
         let text_tolerance = file
             .text_tolerance
@@ -808,7 +846,7 @@ impl TryFrom<RuleFile> for ScreenshotRule {
             .map_err(RuleError::OutOfRange)?;
         Ok(Self {
             include: file.include,
-            tolerance: Tolerance::from_rule(mode, &diff.config()?),
+            tolerance,
             masks: file.masks,
             text_tolerance,
         })
@@ -915,27 +953,18 @@ pub struct MaskRule {
 }
 
 impl GleonConfig {
-    /// Load configuration from a YAML file.
-    ///
-    /// Performs post-deserialization validation to catch semantically invalid
-    /// configurations that serde alone cannot enforce (e.g. empty screenshot rules).
+    /// Loads the configuration from the YAML file at `path`, validated after parsing for what
+    /// serde alone cannot enforce (e.g. empty screenshot rules). With the `cli_version` of a CLI,
+    /// its `required_version` is checked first ([`Self::check_required_version`]), so a config for
+    /// a newer CLI says so instead of failing on what that CLI added; `None` checks no version.
     ///
     /// # Errors
     /// Returns [`ConfigError::NotFound`] if `path` does not exist, [`ConfigError::Io`] for
-    /// other I/O failures, [`ConfigError::YamlParse`] if the file is not valid YAML matching
+    /// other I/O failures, [`ConfigError::IncompatibleVersion`] if `cli_version` does not meet
+    /// `required_version`, [`ConfigError::YamlParse`] if the file is not valid YAML matching
     /// the schema, or [`ConfigError::Validation`] / [`ConfigError::InvalidPlatform`] if the parsed
     /// configuration is semantically invalid.
-    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        Self::load_for_cli(path, None)
-    }
-
-    /// [`Self::load_from_file`] for the CLI of `cli_version`: its `required_version` is checked
-    /// first ([`Self::check_required_version`]), so a config for a newer CLI says so instead of
-    /// failing on what that CLI added.
-    ///
-    /// # Errors
-    /// As [`Self::load_from_file`], plus [`ConfigError::IncompatibleVersion`].
-    pub fn load_for_cli<P: AsRef<Path>>(
+    pub fn load<P: AsRef<Path>>(
         path: P,
         cli_version: Option<&semver::Version>,
     ) -> Result<Self, ConfigError> {
@@ -1181,7 +1210,7 @@ mod tests {
     fn test_load_config_success() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixture_path = manifest_dir.join("tests/fixtures/gleon.yaml");
-        let config = GleonConfig::load_from_file(fixture_path).unwrap();
+        let config = GleonConfig::load(fixture_path, None).unwrap();
 
         assert_eq!(
             config.required_version,
@@ -1220,7 +1249,7 @@ mod tests {
     fn test_load_config_unknown_fields_rejected() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixture_path = manifest_dir.join("tests/fixtures/gleon_unknown_fields.yaml");
-        let result = GleonConfig::load_from_file(fixture_path);
+        let result = GleonConfig::load(fixture_path, None);
         assert!(
             result.is_err(),
             "Unknown fields should be rejected with deny_unknown_fields"
@@ -1230,7 +1259,7 @@ mod tests {
     #[test]
     fn test_load_config_not_found() {
         let path = PathBuf::from("nonexistent_config_file.yaml");
-        let result = GleonConfig::load_from_file(&path);
+        let result = GleonConfig::load(&path, None);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::NotFound(p) if p == path));
     }
@@ -1446,7 +1475,7 @@ screenshots:
             let err = GleonConfig::from_yaml_str(&yaml).unwrap_err().to_string();
             assert!(
                 err.contains(&format!(
-                    "diff.{key} applies to `mode: {owner}` only at line 2"
+                    "`diff.{key}` applies to `mode: {owner}` only at line 2"
                 )),
                 "{err}"
             );
@@ -1456,7 +1485,7 @@ screenshots:
         let yaml = "screenshots:\n  - include: 'a/*.png'\n    mode: exact\n    diff: { threshold: 0.01 }\n";
         let err = GleonConfig::from_yaml_str(yaml).unwrap_err().to_string();
         assert!(
-            err.contains("diff.threshold applies to `mode: pixel` only"),
+            err.contains("`diff.threshold` applies to `mode: pixel` only"),
             "{err}"
         );
         let yaml = "screenshots:\n  - include: 'a/*.png'\n    mode: exact\n    diff: {}\n";
@@ -1660,7 +1689,7 @@ screenshots:
             let err = GleonConfig::from_yaml_str(&yaml(other, diff)).unwrap_err();
             assert!(
                 err.to_string()
-                    .contains(&format!("diff.{key} applies to `mode: {owner}` only")),
+                    .contains(&format!("`diff.{key}` applies to `mode: {owner}` only")),
                 "{err}"
             );
             // `pixel` names its threshold too.
@@ -1683,7 +1712,10 @@ screenshots:
             let err = GleonConfig::from_yaml_str(&yaml(mode, defaults))
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains(&format!("diff.{foreign} applies to")), "{err}");
+            assert!(
+                err.contains(&format!("`diff.{foreign}` applies to")),
+                "{err}"
+            );
         }
         let own = [
             (
@@ -1698,6 +1730,108 @@ screenshots:
                 "{mode}"
             );
         }
+    }
+
+    /// A rule's `diff` keys become its tolerance in one step: the keys of its mode, each checked
+    /// against its range, a key left out at its default, `-0.0` as `0.0`, and a key of another
+    /// mode an error.
+    #[test]
+    fn test_diff_file_tolerance_per_mode() {
+        let pixel = DiffFile {
+            threshold: Some(0.05),
+            channel_tolerance: Some(4),
+            anti_alias: Some(true),
+            edge_threshold: Some(64),
+            ..DiffFile::default()
+        };
+        assert_eq!(
+            pixel.tolerance(RuleMode::Pixel),
+            Ok(Tolerance::Pixel {
+                max_diff_ratio: 0.05,
+                channel_tolerance: 4,
+                anti_alias: true,
+                edge_threshold: 64,
+            })
+        );
+        let ssim = DiffFile {
+            min_similarity: Some(0.7),
+            color_tolerance: Some(12.0),
+            ..DiffFile::default()
+        };
+        assert_eq!(
+            ssim.tolerance(RuleMode::Ssim),
+            Ok(Tolerance::Ssim {
+                min_similarity: 0.7,
+                color_tolerance: 12.0
+            })
+        );
+        assert_eq!(
+            DiffFile::default().tolerance(RuleMode::Exact),
+            Ok(Tolerance::Exact {})
+        );
+        // A key of another mode never applies: an error, also without the caller checking.
+        for (diff, mode, key, owner) in [
+            (&pixel, RuleMode::Ssim, "threshold", "pixel"),
+            (&ssim, RuleMode::Pixel, "min_similarity", "ssim"),
+            (&ssim, RuleMode::Exact, "min_similarity", "ssim"),
+        ] {
+            assert_eq!(
+                diff.tolerance(mode),
+                Err(RuleError::ForeignKey { key, owner }),
+                "{mode:?}"
+            );
+        }
+
+        let unwritten = DiffFile::default();
+        assert_eq!(
+            unwritten.tolerance(RuleMode::Ssim),
+            Ok(Tolerance::Ssim {
+                min_similarity: 0.8,
+                color_tolerance: 8.0
+            })
+        );
+        assert_eq!(
+            unwritten.tolerance(RuleMode::Pixel),
+            Err(RuleError::MissingThreshold)
+        );
+        let threshold_only = DiffFile {
+            threshold: Some(0.0),
+            ..DiffFile::default()
+        };
+        assert_eq!(
+            threshold_only.tolerance(RuleMode::Pixel),
+            Ok(Tolerance::pixel(0.0))
+        );
+
+        let pixel_zero = DiffFile {
+            threshold: Some(-0.0),
+            ..DiffFile::default()
+        };
+        assert!(matches!(
+            pixel_zero.tolerance(RuleMode::Pixel),
+            Ok(Tolerance::Pixel { max_diff_ratio, .. }) if max_diff_ratio.is_sign_positive()
+        ));
+        let ssim_zeros = DiffFile {
+            min_similarity: Some(-0.0),
+            color_tolerance: Some(-0.0),
+            ..DiffFile::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&ssim_zeros.tolerance(RuleMode::Ssim).unwrap()).unwrap(),
+            r#"{"kind":"ssim","min_similarity":0.0,"color_tolerance":0.0}"#
+        );
+
+        let out_of_range = DiffFile {
+            min_similarity: Some(1.5),
+            ..DiffFile::default()
+        };
+        assert_eq!(
+            out_of_range.tolerance(RuleMode::Ssim),
+            Err(RuleError::OutOfRange(ToleranceError::Ratio {
+                name: "diff.min_similarity",
+                value: 1.5
+            }))
+        );
     }
 
     /// `text_tolerance` is a share, for pixel and SSIM rules alike, checked when parsed (with the
@@ -2166,7 +2300,7 @@ screenshots:
     fn test_config_roundtrip() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixture_path = manifest_dir.join("tests/fixtures/gleon.yaml");
-        let original_config = GleonConfig::load_from_file(fixture_path).unwrap();
+        let original_config = GleonConfig::load(fixture_path, None).unwrap();
 
         // Serialize to YAML string
         let serialized = serde_yaml::to_string(&original_config).unwrap();
@@ -2195,7 +2329,7 @@ screenshots:
             return;
         }
 
-        let err = GleonConfig::load_from_file(&file_path).unwrap_err();
+        let err = GleonConfig::load(&file_path, None).unwrap_err();
         assert!(matches!(
             err,
             ConfigError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied
@@ -2212,7 +2346,7 @@ screenshots:
         )
         .unwrap();
 
-        let err = GleonConfig::load_from_file(&file_path).unwrap_err();
+        let err = GleonConfig::load(&file_path, None).unwrap_err();
         assert!(matches!(err, ConfigError::Validation(_)));
     }
 }

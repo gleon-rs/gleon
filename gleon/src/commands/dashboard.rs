@@ -54,7 +54,7 @@ async fn run_dashboard_inner(
 
     let options = DashboardOptions {
         out_html: out,
-        truncate_limit: Some(truncate_history),
+        truncate_limit: truncate_history,
         push_to_storage: push,
     };
 

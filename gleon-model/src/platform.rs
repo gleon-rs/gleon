@@ -577,19 +577,20 @@ fn known_name<'a>(
 /// Whether `c` may appear in a platform key ([`PlatformInfo::key`]): a segment character
 /// (`[a-z0-9_.-]`) or one of its separators `+` and `=`.
 #[must_use]
-pub const fn is_key_char(c: char) -> bool {
+const fn is_key_char(c: char) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-' | '+' | '=')
 }
 
-/// Validates a platform key given by a user (a `--platform` filter), trimmed and lowercased.
+/// Validates a platform key (the name of a manifests directory, or one given to a library
+/// call), trimmed and lowercased.
 ///
-/// It is made of [`is_key_char`] characters only, its parts between `+` and `=` valid segments
-/// (see [`validate_segment`]: no empty part, no `.`/`..`, no Windows device name, no trailing
-/// `.`).
+/// It is made of `[a-z0-9_.+=-]` characters only: components joined by `+`, each a valid segment
+/// or one `name=value` pair of them (see [`validate_segment`]: no empty part, no `.`/`..`, no
+/// Windows device name, no trailing `.`), as [`PlatformInfo::key`] writes them.
 ///
 /// # Errors
-/// Returns `PlatformError::InvalidSegment` if the key is empty, contains other characters, or
-/// has a part that is not a valid segment.
+/// Returns `PlatformError::InvalidSegment` if the key is empty, contains other characters, has a
+/// part that is not a valid segment, or a component with more than one `=`.
 pub fn validate_key(s: &str) -> Result<Cow<'_, str>, PlatformError> {
     let trimmed = s.trim();
     let lowered = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -598,12 +599,16 @@ pub fn validate_key(s: &str) -> Result<Cow<'_, str>, PlatformError> {
         Cow::Borrowed(trimmed)
     };
     let is_valid = lowered.chars().all(is_key_char)
-        && lowered
-            .split(['+', '='])
-            .all(|part| !part.is_empty() && is_portable_segment(part));
+        && lowered.split('+').all(|component| {
+            component.matches('=').count() <= 1
+                && component
+                    .split('=')
+                    .all(|part| !part.is_empty() && is_portable_segment(part))
+        });
     if !is_valid {
         return Err(PlatformError::InvalidSegment(format!(
-            "'{s}' is not a platform key: use [a-z0-9_.-] segments joined by '+' and '='"
+            "'{s}' is not a platform key: use [a-z0-9_.-] segments joined by '+', each at most \
+             one name=value pair"
         )));
     }
     Ok(lowered)
@@ -675,8 +680,8 @@ pub fn validate_segment(s: &str) -> Result<Cow<'_, str>, PlatformError> {
 }
 
 impl PlatformInfo {
-    /// The key of this platform, which names its manifests directory, made of [`is_key_char`]
-    /// characters (valid file names on every OS):
+    /// The key of this platform, which names its manifests directory, made of `[a-z0-9_.-]`
+    /// segments and the separators `+` and `=` (valid file names on every OS):
     /// - `<os>-<arch>` (`macos-aarch64`, the key of an integration's process), or `<os>` without
     ///   an architecture;
     /// - `os=<os>+arch=<arch>` when the OS or architecture contains `-` (`os=ios-sim+arch=arm`),
@@ -1177,6 +1182,11 @@ labels:
         );
         for bad in ["", "..", "linux:x86_64", "a/b", "a b"] {
             assert!(validate_key(bad).is_err(), "{bad:?}");
+        }
+        // A component is a segment or one `name=value` pair, as `PlatformInfo::key` writes it.
+        for bad in ["a=b=c", "os=linux=x86_64", "linux-x86_64+theme=dark=high"] {
+            assert!(validate_key(bad).is_err(), "{bad:?}");
+            assert!(PlatformKey::parse(bad).is_err(), "{bad:?}");
         }
     }
 

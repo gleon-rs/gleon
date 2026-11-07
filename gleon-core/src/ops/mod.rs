@@ -15,10 +15,6 @@ pub(crate) mod sync;
 pub use approve::{ApproveError, ApproveResult, ApprovedCase, ListedCases, approve_workspace};
 pub use clean::{CleanError, CleanOptions, CleanResult, clean_workspace};
 pub use diff::{DiffOpError, DiffReportResult, run_diff};
-pub use gc::{
-    GcError, GcMode, GcOptions, GcResult, collect_all_referenced_hashes, garbage_collect,
-    partition_remote_blobs,
-};
 pub use init::{InitError, InitResult, Template, init_workspace};
 pub use lint::{LintError, LintReport, lint_workspace_manifests};
 pub use pull::{PullError, PullResult, pull_blobs};

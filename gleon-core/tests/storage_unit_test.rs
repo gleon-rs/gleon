@@ -17,6 +17,9 @@ use gleon_core::storage::{BlobMetadata, ObjectStoreAdapter, StorageConfig, Stora
 use object_store::Attribute;
 use tempfile::tempdir;
 
+mod common;
+use common::blob_exists;
+
 #[test]
 fn test_storage_config_secret_masking() {
     let mut config =
@@ -72,19 +75,9 @@ async fn test_memory_store_blob_and_manifest_lifecycle() {
 
     assert!(matches!(not_found, Err(StorageError::BlobNotFound(_))));
 
-    // 5. Check blob_exists
-    assert!(
-        adapter
-            .blob_exists(&blob_hash)
-            .await
-            .expect("blob_exists ok")
-    );
-    assert!(
-        !adapter
-            .blob_exists(&missing_hash)
-            .await
-            .expect("blob_exists false ok")
-    );
+    // 5. Check the blob exists
+    assert!(blob_exists(&adapter, &blob_hash).await);
+    assert!(!blob_exists(&adapter, &missing_hash).await);
 
     // 6. Upload missing local file -> StorageError::Io
     let missing_local = dir.path().join("non_existent_file.png");
@@ -355,7 +348,7 @@ async fn test_local_file_system_skips_attributes_for_file_scheme() {
         .await
         .expect("upload on LocalFileSystem should succeed directly via put");
 
-    assert!(adapter.blob_exists(&hash).await.unwrap());
+    assert!(blob_exists(&adapter, &hash).await);
     let attrs = adapter.get_blob_attributes(&hash).await.unwrap().unwrap();
     assert!(attrs.is_empty());
 }
@@ -499,15 +492,12 @@ async fn test_adapter_delete_blob_lifecycle() {
         .expect("upload blob ok");
 
     // 2. Delete existing blob
-    let del_res = adapter.delete_blob(&blob_hash).await;
-    assert!(del_res.is_ok(), "delete_blob must succeed on existing blob");
+    let deleted = adapter.delete_blobs([&blob_hash]).await.unwrap();
+    assert_eq!((deleted.deleted, deleted.failed), (1, 0));
 
     // 3. Delete non-existent blob (idempotent NotFound tolerance)
-    let del_missing = adapter.delete_blob(&blob_hash).await;
-    assert!(
-        del_missing.is_ok(),
-        "delete_blob must tolerate NotFound and return Ok"
-    );
+    let missing = adapter.delete_blobs([&blob_hash]).await.unwrap();
+    assert_eq!((missing.deleted, missing.failed), (1, 0));
 }
 
 #[test]
@@ -558,7 +548,7 @@ async fn test_upload_refuses_content_that_does_not_match_its_hash() {
         "{err}"
     );
     assert!(
-        !adapter.blob_exists(&claimed).await.unwrap(),
+        !blob_exists(&adapter, &claimed).await,
         "nothing is uploaded"
     );
 
@@ -566,5 +556,5 @@ async fn test_upload_refuses_content_that_does_not_match_its_hash() {
         .upload_blob(&claimed, &fixtures.join("baseline_100x100.png"))
         .await
         .unwrap();
-    assert!(adapter.blob_exists(&claimed).await.unwrap());
+    assert!(blob_exists(&adapter, &claimed).await);
 }

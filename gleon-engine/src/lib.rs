@@ -76,7 +76,7 @@ impl<'a> Pixels<'a> {
     /// # Panics
     /// Never: the length was checked when the view was made.
     #[must_use]
-    pub fn to_image(self) -> RgbaImage {
+    pub(crate) fn to_image(self) -> RgbaImage {
         #[expect(
             clippy::expect_used,
             reason = "the length was checked when the view was made"

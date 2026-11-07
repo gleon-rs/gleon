@@ -22,13 +22,8 @@ pub struct PlatformEnv {
 }
 
 impl PlatformEnv {
-    /// Production constructor — reads from the OS process environment.
-    #[must_use]
-    pub fn from_env() -> Self {
-        Self::from_provider(&crate::env::OsEnv)
-    }
-
-    /// Injectable constructor — reads from any `EnvProvider`.
+    /// The platform variables of `env` (the process environment, merged with `.env` files, in
+    /// the CLI).
     pub fn from_provider(env: &dyn crate::env::EnvProvider) -> Self {
         Self {
             platform: env.get_var("GLEON_PLATFORM"),

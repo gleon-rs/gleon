@@ -2,12 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
+use gleon_model::fs::{Durability, create_new};
 use thiserror::Error;
 
 use crate::{
     config::{Baselines, GleonConfig},
     context::ContextError,
-    ops::common::{CoreError, append_missing_gitignore_lines, create_new_file_with_content},
+    ops::common::{CoreError, append_missing_gitignore_lines},
     paths::GleonPaths,
     platform::{PlatformConfig, PlatformError, PlatformInfo},
 };
@@ -123,17 +124,20 @@ pub fn init_workspace(
             AWS_SECRET_ACCESS_KEY=\n\
             # For Cloudflare R2:\n\
             # R2_ACCOUNT_ID=\n";
-        create_new_file_with_content(
+        create_new(
             &gleon_dir.join(".env.template"),
             env_template_content.as_bytes(),
-            &gleon_dir,
-        )?;
+            Durability::Durable,
+        )
+        .map_err(CoreError::Io)?;
     }
 
     let mut created = None;
     if let Some((template, config)) = new_config {
         let yaml_content = serde_yaml::to_string(&config).map_err(InitError::Yaml)?;
-        if create_new_file_with_content(&config_path, yaml_content.as_bytes(), &gleon_dir)? {
+        if create_new(&config_path, yaml_content.as_bytes(), Durability::Durable)
+            .map_err(CoreError::Io)?
+        {
             created = Some(template);
         }
     }

@@ -129,11 +129,12 @@ fn read_candidate(candidate: &Candidate<'_>) -> Result<Vec<u8>, ApproveError> {
 
 /// Writes `blob`, the blob of `candidate` (read again), unless the cache holds it already.
 ///
-/// Blobs are named by their content and written atomically: one that exists is this one (cases
-/// often share a candidate), and a durable write costs an fsync. A symbolic link is no blob
-/// (`storage::is_usable_blob`): it is replaced, never written through.
+/// Blobs are named by their content and written atomically: one that holds the bytes its name
+/// says is this one (cases often share a candidate), and a durable write costs an fsync. A
+/// symbolic link or a file of other bytes (a changed cache) is no blob
+/// (`storage::holds_blob`, as `gleon stage` checks): it is replaced, never written through.
 fn save_candidate_blob(blob: &Path, candidate: &Candidate<'_>) -> Result<(), ApproveError> {
-    if crate::storage::is_usable_blob(blob) {
+    if crate::storage::holds_blob(blob, candidate.sha256) {
         return Ok(());
     }
     crate::storage::save_blob(blob, &read_candidate(candidate)?).map_err(|source| {
@@ -1298,7 +1299,7 @@ mod tests {
         assert!(blob.is_dir());
     }
 
-    /// A blob that is a symbolic link is no blob (`storage::is_usable_blob`): approving writes the
+    /// A blob that is a symbolic link is no blob (`storage::holds_blob`): approving writes the
     /// candidate's bytes in its place instead of trusting the link.
     #[cfg(unix)]
     #[test]
@@ -1316,6 +1317,23 @@ mod tests {
         approve_workspace(&ctx, &[], &[], None).unwrap();
         let meta = std::fs::symlink_metadata(&blob).unwrap();
         assert!(meta.is_file() && !meta.file_type().is_symlink());
+        assert_eq!(std::fs::read(&blob).unwrap(), png(1));
+    }
+
+    /// A blob is kept only when it holds the bytes its name says (`storage::holds_blob`), as
+    /// `gleon stage` keeps one: a changed cache is healed by approving, not trusted for being a
+    /// regular file.
+    #[test]
+    fn test_approve_replaces_a_blob_holding_other_bytes() {
+        let (temp, ctx) = workspace();
+        let latest = runs_latest(&ctx);
+        failed_case(&latest, "a", CLI_TOOL, CaseOutcome::Mismatch, &png(1));
+        let blobs = temp.path().join(".gleon/blobs/sha256");
+        std::fs::create_dir_all(&blobs).unwrap();
+        let blob = blobs.join(Sha256Hex::of(&png(1)).as_str());
+        std::fs::write(&blob, png(2)).unwrap();
+
+        approve_workspace(&ctx, &[], &[], None).unwrap();
         assert_eq!(std::fs::read(&blob).unwrap(), png(1));
     }
 

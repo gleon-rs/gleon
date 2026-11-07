@@ -376,7 +376,7 @@ impl ObjectStoreAdapter {
         tokio::io::AsyncReadExt::read_to_end(&mut file, &mut bytes).await?;
         // Checked like a download (`write_verified`): other schemes cannot be checked there
         // either.
-        if hash.scheme() == "sha256" {
+        if hash.scheme() == gleon_model::hash::SHA256_SCHEME {
             let actual = gleon_model::case::Sha256Hex::of(&bytes);
             if !actual.as_str().eq_ignore_ascii_case(hash.value()) {
                 return Err(StorageError::LocalHashMismatch {
@@ -512,15 +512,13 @@ fn build_blob_attributes(metadata: Option<&BlobMetadata>) -> object_store::Attri
     attributes
 }
 
-/// Returned object payload with version and `ETag` from remote storage.
+/// An object of remote storage with its version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteObject {
     /// Object binary contents.
     pub bytes: bytes::Bytes,
-    /// `ETag` identifier from remote storage, if supported.
-    pub e_tag: Option<String>,
-    /// Version identifier from remote storage, if supported.
-    pub version: Option<String>,
+    /// Its version, for a conditional put over it.
+    pub version: ObjectVersion,
 }
 
 /// The version of a remote object (no contents), for a conditional put over it.
@@ -533,27 +531,11 @@ pub struct ObjectVersion {
 }
 
 impl ObjectStoreAdapter {
-    /// Checks if a blob exists on remote storage without downloading it.
-    ///
-    /// # Errors
-    /// Returns [`StorageError`] if the remote existence check fails for a reason other than
-    /// the object simply not being found.
-    pub async fn blob_exists(
-        &self,
-        hash: &crate::manifest::ImageHash,
-    ) -> Result<bool, StorageError> {
-        let key = blob_key(hash);
-        match self.store.head(&key).await {
-            Ok(_) => Ok(true),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(e) => Err(StorageError::Store { source: e }),
-        }
-    }
-
     /// Downloads a single blob from remote storage at `blob_key(hash)` to `dest_path` atomically
-    /// and durably in place of whatever is there ([`gleon_model::fs::replace_atomically_with`]: a
-    /// symbolic link is replaced, never written through), streamed: a large blob never sits in
-    /// memory whole. The content is checked against its hash before it is kept, so a truncated
+    /// in place of whatever is there ([`gleon_model::fs::replace_atomically_with`]: a symbolic
+    /// link is replaced, never written through), streamed: a large blob never sits in memory
+    /// whole. The file is flushed before it is renamed ([`Durability::File`]); the caller commits
+    /// the directory entries of its downloads once ([`super::sync_downloaded_blobs`]). The content is checked against its hash before it is kept, so a truncated
     /// or wrong download never becomes a baseline; a blob of a scheme that cannot be checked
     /// (only `sha256` can) is not downloaded.
     ///
@@ -568,7 +550,7 @@ impl ObjectStoreAdapter {
         hash: &crate::manifest::ImageHash,
         dest_path: &Path,
     ) -> Result<(), StorageError> {
-        if hash.scheme() != "sha256" {
+        if hash.scheme() != gleon_model::hash::SHA256_SCHEME {
             return Err(StorageError::UnsupportedHashScheme(
                 hash.scheme().to_owned(),
             ));
@@ -648,19 +630,6 @@ impl ObjectStoreAdapter {
         }
 
         Ok(entries)
-    }
-
-    /// Deletes a single blob from remote storage at `blob_key(hash)`.
-    ///
-    /// # Errors
-    /// Returns [`StorageError`] if remote deletion fails.
-    #[instrument(skip(self), level = "debug")]
-    pub async fn delete_blob(&self, hash: &crate::manifest::ImageHash) -> Result<(), StorageError> {
-        let key = blob_key(hash);
-        match self.store.delete(&key).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(source) => Err(StorageError::Store { source }),
-        }
     }
 
     /// Batch deletes multiple blobs from remote storage using `delete_stream`.
@@ -744,17 +713,15 @@ impl ObjectStoreAdapter {
         let key = ObjPath::from(relative_path);
         match self.store.get(&key).await {
             Ok(res) => {
-                let e_tag = res.meta.e_tag.clone();
-                let version = res.meta.version.clone();
+                let version = ObjectVersion {
+                    e_tag: res.meta.e_tag.clone(),
+                    version: res.meta.version.clone(),
+                };
                 let bytes = res
                     .bytes()
                     .await
                     .map_err(|source| StorageError::Store { source })?;
-                Ok(Some(RemoteObject {
-                    bytes,
-                    e_tag,
-                    version,
-                }))
+                Ok(Some(RemoteObject { bytes, version }))
             }
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(source) => Err(StorageError::Store { source }),
@@ -783,9 +750,10 @@ impl ObjectStoreAdapter {
 
     /// Uploads raw bytes to remote storage at `relative_path` with optional optimistic concurrency check.
     ///
-    /// If `expected_e_tag` or `expected_version` is provided and the storage adapter supports conditional put,
-    /// an atomic conditional update is performed (`PutMode::Update`).
-    /// If a precondition failure occurs, returns [`StorageError::PreconditionFailed`].
+    /// With `create_only` the object must not exist yet (`PutMode::Create`). Else, with an
+    /// `expected` version that names an `ETag` or a version, an atomic conditional update is
+    /// performed (`PutMode::Update`); a version that names neither (a backend without them) or
+    /// none overwrites. If a precondition fails, returns [`StorageError::PreconditionFailed`].
     /// For storage schemes that do not support conditional updates (such as `file://`), falls back to overwrite.
     ///
     /// # Errors
@@ -797,8 +765,7 @@ impl ObjectStoreAdapter {
         relative_path: &str,
         data: bytes::Bytes,
         content_type: Option<&str>,
-        expected_e_tag: Option<&str>,
-        expected_version: Option<&str>,
+        expected: Option<&ObjectVersion>,
         create_only: bool,
     ) -> Result<(), StorageError> {
         let key = ObjPath::from(relative_path);
@@ -814,14 +781,16 @@ impl ObjectStoreAdapter {
             );
         }
 
-        let is_conditional = expected_e_tag.is_some() || expected_version.is_some();
+        let expected =
+            expected.filter(|version| version.e_tag.is_some() || version.version.is_some());
+        let is_conditional = expected.is_some();
 
         let mode = if create_only {
             object_store::PutMode::Create
-        } else if is_conditional {
+        } else if let Some(expected) = expected {
             object_store::PutMode::Update(object_store::UpdateVersion {
-                e_tag: expected_e_tag.map(ToString::to_string),
-                version: expected_version.map(ToString::to_string),
+                e_tag: expected.e_tag.clone(),
+                version: expected.version.clone(),
             })
         } else {
             object_store::PutMode::Overwrite
@@ -882,13 +851,13 @@ impl ObjectStoreAdapter {
         data: bytes::Bytes,
         content_type: Option<&str>,
     ) -> Result<(), StorageError> {
-        self.put_object_conditional(relative_path, data, content_type, None, None, false)
+        self.put_object_conditional(relative_path, data, content_type, None, false)
             .await
     }
 }
 
-/// Streams `chunks` into `dest` atomically and durably (a link there replaced, not followed),
-/// kept only if the stream ends and its content hashes to `expected` (sha256).
+/// Streams `chunks` into `dest` atomically, the file flushed (a link there replaced, not
+/// followed), kept only if the stream ends and its content hashes to `expected` (sha256).
 async fn write_verified(
     mut chunks: impl futures::Stream<Item = object_store::Result<bytes::Bytes>> + Unpin,
     dest: &Path,
@@ -902,7 +871,7 @@ async fn write_verified(
     let (dest, expected) = (dest.to_path_buf(), expected.to_owned());
     let writer = tokio::task::spawn_blocking(move || {
         let mut actual = None;
-        let written = replace_atomically_with(&dest, Durability::Durable, |file| {
+        let written = replace_atomically_with(&dest, Durability::File, |file| {
             let mut digest = sha2::Sha256::new();
             while let Some(chunk) = chunks_rx.blocking_recv() {
                 let Some(chunk) = chunk else {
@@ -1180,7 +1149,13 @@ mod tests {
             .await
             .expect("fallback to plain put should succeed");
 
-        assert!(adapter.blob_exists(&hash).await.unwrap());
+        assert!(
+            adapter
+                .head_object(blob_key(&hash).as_ref())
+                .await
+                .unwrap()
+                .is_some()
+        );
         let attrs = adapter.get_blob_attributes(&hash).await.unwrap().unwrap();
         assert!(attrs.is_empty());
     }
@@ -1264,10 +1239,7 @@ mod tests {
         assert_eq!(retrieved.bytes, content);
         assert_eq!(
             adapter.head_object("history.json").await.unwrap(),
-            Some(ObjectVersion {
-                e_tag: retrieved.e_tag,
-                version: retrieved.version,
-            }),
+            Some(retrieved.version),
             "the version without the contents"
         );
         assert_eq!(adapter.head_object("missing.json").await.unwrap(), None);
@@ -1297,8 +1269,7 @@ mod tests {
                 "history.json",
                 content,
                 Some("application/json"),
-                Some("mismatched_etag"),
-                None,
+                Some(&etag("mismatched_etag")),
                 false,
             )
             .await;
@@ -1325,7 +1296,6 @@ mod tests {
                 content,
                 Some("application/json"),
                 None,
-                None,
                 true,
             )
             .await;
@@ -1343,10 +1313,36 @@ mod tests {
 
         let content = bytes::Bytes::from_static(b"data");
         let res = adapter
-            .put_object_conditional("test.json", content, None, Some("etag1"), None, false)
+            .put_object_conditional("test.json", content, None, Some(&etag("etag1")), false)
             .await;
 
         assert!(res.is_ok());
+    }
+
+    /// A version that names neither an `ETag` nor a version (a backend without them) cannot be
+    /// checked: the put overwrites, as without one.
+    #[tokio::test]
+    #[cfg(not(miri))]
+    async fn test_put_object_conditional_without_a_version_overwrites() {
+        let adapter = ObjectStoreAdapter::from_config(&StorageConfig::new("memory://")).unwrap();
+        let old = bytes::Bytes::from_static(b"old");
+        adapter.put_object("a.json", old, None).await.unwrap();
+
+        let new = bytes::Bytes::from_static(b"new");
+        adapter
+            .put_object_conditional("a.json", new, None, Some(&ObjectVersion::default()), false)
+            .await
+            .unwrap();
+        let stored = adapter.get_object("a.json").await.unwrap().unwrap();
+        assert_eq!(&stored.bytes[..], b"new");
+    }
+
+    /// A version that names only `e_tag`.
+    fn etag(e_tag: &str) -> ObjectVersion {
+        ObjectVersion {
+            e_tag: Some(e_tag.to_owned()),
+            version: None,
+        }
     }
 
     #[tokio::test]
@@ -1362,14 +1358,7 @@ mod tests {
 
         let content = bytes::Bytes::from_static(b"test");
         let res = adapter
-            .put_object_conditional(
-                "conflict_dir_file/nested.json",
-                content,
-                None,
-                None,
-                None,
-                false,
-            )
+            .put_object_conditional("conflict_dir_file/nested.json", content, None, None, false)
             .await;
         assert!(matches!(res, Err(StorageError::Store { .. })));
     }
@@ -1391,8 +1380,7 @@ mod tests {
                 "conflict_fb_file/nested.json",
                 content,
                 None,
-                Some("etag"),
-                None,
+                Some(&etag("etag")),
                 false,
             )
             .await;

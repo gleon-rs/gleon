@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use cli::{Cli, Commands};
-use exit_code::ExitCode;
 use gleon_core::env::EnvProvider;
 use tracing::info;
 
@@ -97,6 +96,20 @@ fn resolve_context(
     .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// The platform the global `--platform` names, as the context resolved it: its canonical key
+/// (lowercase, `macos-arm64` as `macos-aarch64`), the directory `gleon stage` writes, for the
+/// commands that read the manifests of one platform (`lint`, `resolve`, `pull`, `push`); `None`
+/// without the flag.
+fn platform_filter(
+    cli: &Cli,
+    ctx: &gleon_core::context::ResolvedContext,
+) -> anyhow::Result<Option<String>> {
+    if cli.platform.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ctx.platform.key()?.as_str().to_owned()))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "top-level subcommand dispatch: one match arm per command"
@@ -124,12 +137,13 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         }
         Commands::LintManifests => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            commands::lint::run_lint(&ctx, cli.platform.as_deref())
+            commands::lint::run_lint(&ctx, platform_filter(cli, &ctx)?.as_deref())
         }
         Commands::Resolve { test_path, fetch } => {
             let ctx = resolve_context(cli, current_dir, env)?;
             commands::resolve::run_resolve(
                 &ctx,
+                platform_filter(cli, &ctx)?.as_deref(),
                 test_path.as_deref(),
                 *fetch,
                 get_storage_config(env),
@@ -146,7 +160,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
                 &ctx,
                 storage.as_ref(),
                 *all_platforms,
-                cli.platform.as_deref(),
+                platform_filter(cli, &ctx)?.as_deref(),
                 *require_storage,
             )
             .await
@@ -161,7 +175,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
                 &ctx,
                 storage.as_ref(),
                 *all_platforms,
-                cli.platform.as_deref(),
+                platform_filter(cli, &ctx)?.as_deref(),
                 *require_storage,
             )
             .await
@@ -194,16 +208,16 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
             truncate_history,
             push,
         } => {
-            handle_dashboard_command(
-                cli,
-                current_dir,
-                env,
+            let ctx = resolve_context(cli, current_dir, env)?;
+            commands::dashboard::run_dashboard(
+                &ctx,
+                get_storage_config(env),
                 from.as_deref(),
                 out.as_deref(),
                 *truncate_history,
                 *push,
             )
-            .await?
+            .await
         }
         Commands::Clean {
             dry_run,
@@ -244,18 +258,4 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
     };
 
     Ok(code.into())
-}
-
-async fn handle_dashboard_command(
-    cli: &Cli,
-    current_dir: &Path,
-    env: &dyn EnvProvider,
-    from: Option<&Path>,
-    out: Option<&Path>,
-    truncate_history: std::num::NonZeroUsize,
-    push: bool,
-) -> anyhow::Result<ExitCode> {
-    let ctx = resolve_context(cli, current_dir, env)?;
-    let storage = get_storage_config(env);
-    Ok(commands::dashboard::run_dashboard(&ctx, storage, from, out, truncate_history, push).await)
 }

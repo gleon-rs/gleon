@@ -175,15 +175,6 @@ impl SingleTestManifest {
             })
     }
 
-    /// Safely decodes an image with enforced resource and dimension limits.
-    ///
-    /// # Errors
-    /// Returns [`ManifestError::Validation`] if [`Self::validate_image_bytes`] rejects the
-    /// declared dimensions, or [`ManifestError::Image`] if the image cannot be decoded.
-    pub fn load_image_from_bytes(bytes: &[u8]) -> Result<image::DynamicImage, ManifestError> {
-        Self::validate_image_bytes(bytes).and_then(|_| Self::decode_validated(bytes))
-    }
-
     /// Decodes `bytes` whose header [`Self::validate_image_bytes`] accepted, without reading the
     /// header again (the reader keeps the decoder limits all the same).
     ///
@@ -307,11 +298,11 @@ mod tests {
             (1, 1)
         );
 
-        let decoded = SingleTestManifest::load_image_from_bytes(&img_bytes).unwrap();
+        let decoded = SingleTestManifest::decode_validated(&img_bytes).unwrap();
         assert_eq!(decoded.width(), 1);
         assert_eq!(decoded.height(), 1);
 
-        assert!(SingleTestManifest::load_image_from_bytes(invalid_png_bytes).is_err());
+        assert!(SingleTestManifest::decode_validated(invalid_png_bytes).is_err());
     }
 
     #[test]

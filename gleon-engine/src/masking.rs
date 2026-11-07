@@ -90,7 +90,7 @@ fn row_spans(regions: &[Region], row_bytes: usize) -> impl Iterator<Item = std::
 
 /// Whether `a` and `b` (of the same size) differ anywhere inside `regions` (inside the images).
 #[must_use]
-pub fn differ_inside(a: Pixels<'_>, b: Pixels<'_>, regions: &[Region]) -> bool {
+pub(crate) fn differ_inside(a: Pixels<'_>, b: Pixels<'_>, regions: &[Region]) -> bool {
     let row_bytes = a.dimensions().0 as usize * 4;
     row_spans(regions, row_bytes).any(|span| a.raw()[span.clone()] != b.raw()[span])
 }
@@ -103,7 +103,7 @@ pub fn differ_inside(a: Pixels<'_>, b: Pixels<'_>, regions: &[Region]) -> bool {
 ///
 /// # Panics
 /// Panics if a region reaches beyond the images or the sizes differ.
-pub fn copy_regions(image: &mut RgbaImage, source: Pixels<'_>, regions: &[Region]) {
+pub(crate) fn copy_regions(image: &mut RgbaImage, source: Pixels<'_>, regions: &[Region]) {
     assert_eq!(
         image.dimensions(),
         source.dimensions(),

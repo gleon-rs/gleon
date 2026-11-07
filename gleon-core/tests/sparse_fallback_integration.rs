@@ -86,7 +86,7 @@ async fn test_sparse_multi_platform_fallback_full_lifecycle() {
 
     common::copy_config(base_path, "macos_fallback");
     let config_file = gleon_dir.join("gleon.yaml");
-    let config = GleonConfig::load_from_file(&config_file).unwrap();
+    let config = GleonConfig::load(&config_file, None).unwrap();
 
     let mut macos_ctx = ResolvedContext::default();
     macos_ctx.platform = macos_platform;

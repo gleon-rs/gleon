@@ -30,6 +30,9 @@ use gleon_core::{
 };
 use tempfile::tempdir;
 
+mod common;
+use common::blob_exists;
+
 fn file_url(path: &Path) -> String {
     let url = url::Url::from_directory_path(path)
         .unwrap_or_else(|_| url::Url::from_file_path(path).expect("valid file path"));
@@ -188,8 +191,8 @@ async fn test_gc_full_lifecycle_with_storage() {
     seed_blob(&adapter, &h1, &temp_blob_file).await;
     seed_blob(&adapter, &h2, &temp_blob_file).await;
 
-    assert!(adapter.blob_exists(&h1).await.unwrap());
-    assert!(adapter.blob_exists(&h2).await.unwrap());
+    assert!(blob_exists(&adapter, &h1).await);
+    assert!(blob_exists(&adapter, &h2).await);
 
     // Backdate h2 on disk so it is older than the 24-hour grace period
     let h2_file = remote_temp
@@ -217,8 +220,8 @@ async fn test_gc_full_lifecycle_with_storage() {
     assert_eq!(dry_res.orphans[0].hash, h2);
 
     // Both blobs still exist after dry-run
-    assert!(adapter.blob_exists(&h1).await.unwrap());
-    assert!(adapter.blob_exists(&h2).await.unwrap());
+    assert!(blob_exists(&adapter, &h1).await);
+    assert!(blob_exists(&adapter, &h2).await);
 
     // 4. Real GC with grace_period = 24 and force = true -> deletes h2, keeps h1
     let real_opts = GcOptions::new(false, 24, true);
@@ -234,11 +237,11 @@ async fn test_gc_full_lifecycle_with_storage() {
 
     // h1 is preserved, h2 is deleted!
     assert!(
-        adapter.blob_exists(&h1).await.unwrap(),
+        blob_exists(&adapter, &h1).await,
         "Referenced blob h1 must be preserved"
     );
     assert!(
-        !adapter.blob_exists(&h2).await.unwrap(),
+        !blob_exists(&adapter, &h2).await,
         "Orphan blob h2 must be deleted"
     );
 }
@@ -311,9 +314,9 @@ async fn test_gc_integration_real_data_mtime() {
     seed_blob(&adapter, &h_recent, &temp_png).await;
     seed_blob(&adapter, &h_old, &temp_png).await;
 
-    assert!(adapter.blob_exists(&h_ref).await.unwrap());
-    assert!(adapter.blob_exists(&h_recent).await.unwrap());
-    assert!(adapter.blob_exists(&h_old).await.unwrap());
+    assert!(blob_exists(&adapter, &h_ref).await);
+    assert!(blob_exists(&adapter, &h_recent).await);
+    assert!(blob_exists(&adapter, &h_old).await);
 
     // 4. Backdate h_old on disk in remote_temp
     let old_blob_file = remote_temp
@@ -343,16 +346,13 @@ async fn test_gc_integration_real_data_mtime() {
     assert_eq!(result.orphans[0].hash, h_old);
 
     // Verify remote storage state:
+    assert!(blob_exists(&adapter, &h_ref).await, "h_ref must exist");
     assert!(
-        adapter.blob_exists(&h_ref).await.unwrap(),
-        "h_ref must exist"
-    );
-    assert!(
-        adapter.blob_exists(&h_recent).await.unwrap(),
+        blob_exists(&adapter, &h_recent).await,
         "h_recent must exist (protected by grace period)"
     );
     assert!(
-        !adapter.blob_exists(&h_old).await.unwrap(),
+        !blob_exists(&adapter, &h_old).await,
         "h_old must be deleted"
     );
 }
@@ -859,11 +859,11 @@ async fn test_gc_s3_prefix_isolation() {
     seed_blob(&adapter_b, &h_b, &dummy_file).await;
 
     // Both blobs exist in their respective adapters
-    assert!(adapter_a.blob_exists(&h_a).await.unwrap());
-    assert!(!adapter_a.blob_exists(&h_b).await.unwrap());
+    assert!(blob_exists(&adapter_a, &h_a).await);
+    assert!(!blob_exists(&adapter_a, &h_b).await);
 
-    assert!(!adapter_b.blob_exists(&h_a).await.unwrap());
-    assert!(adapter_b.blob_exists(&h_b).await.unwrap());
+    assert!(!blob_exists(&adapter_b, &h_a).await);
+    assert!(blob_exists(&adapter_b, &h_b).await);
 
     // Listing on A only returns A's blob
     let blobs_a = adapter_a.list_all_blobs().await.unwrap();
@@ -899,5 +899,5 @@ async fn test_delete_blobs_batch_with_not_found() {
     assert_eq!(summary.failed, 0);
     assert!(summary.deleted_hashes.contains(&h1));
     assert!(summary.deleted_hashes.contains(&h2));
-    assert!(!adapter.blob_exists(&h1).await.unwrap());
+    assert!(!blob_exists(&adapter, &h1).await);
 }

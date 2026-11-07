@@ -3,6 +3,10 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// The scheme of content addresses (`sha256:<64 hex>`): the one hash gleon can check against
+/// the bytes, so the only one blobs are downloaded or verified under.
+pub const SHA256_SCHEME: &str = "sha256";
+
 /// A string that is not a valid [`ImageHash`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidImageHash {
@@ -57,7 +61,7 @@ fn validate_hash_parts(scheme: &str, value: &str) -> Result<(), InvalidImageHash
     }
 
     // Strict Cryptographic Digest Checks
-    if scheme == "sha256" {
+    if scheme == SHA256_SCHEME {
         if value.len() != 64 {
             return Err(InvalidImageHash::Sha256Length);
         }

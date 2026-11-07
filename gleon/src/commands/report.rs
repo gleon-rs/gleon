@@ -114,15 +114,7 @@ async fn run_report_inner(
     };
 
     if let Some(out_path) = out {
-        let parent = out_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create parent directory for report output '{}'",
-                parent.display()
-            )
-        })?;
+        // Creates missing parent directories too.
         gleon_core::io::save_file_atomically(out_path, report_content.as_bytes())
             .with_context(|| format!("Failed to write output to '{}'", out_path.display()))?;
         tracing::info!("Generated the report at {}", out_path.display());

@@ -1,7 +1,5 @@
 //! Pull operation for downloading missing baseline blobs from remote storage.
 
-use std::path::Path;
-
 use thiserror::Error;
 
 use crate::{
@@ -11,6 +9,7 @@ use crate::{
         common::{CoreError, ensure_initialized},
         sync::{active_storage_config, resolve_platform_dirs, short_hash, transfer_with_progress},
     },
+    paths::GleonPaths,
     storage::{ObjectStoreAdapter, StorageConfig, StorageError},
 };
 
@@ -55,34 +54,26 @@ pub struct PullResult {
 /// absent from the current platform's index (sparse-platform support).
 fn register_current_platform_with_fallback(
     context: &ResolvedContext,
-    manifests_root: &Path,
+    paths: &GleonPaths,
     register_blob: &mut impl FnMut(&ImageHash, &str),
 ) -> Result<(), CoreError> {
     let platform_key = crate::ops::common::platform_key(context)?;
-    let plat_dir = manifests_root.join(&platform_key);
-    let plat_idx = WorkspaceIndex::load(&plat_dir).map_err(CoreError::Manifest)?;
+    let fallback_key = context.fallback_platform_key.as_ref();
+    let (plat_idx, fb_idx) =
+        crate::ops::common::load_index_with_fallback(paths, &platform_key, fallback_key)?;
 
     for manifest in plat_idx.entries().values() {
         register_blob(&manifest.hash, platform_key.as_str());
     }
 
-    if let Some(fallback_key) = context
-        .fallback_platform_key
-        .as_ref()
-        .filter(|&k| *k != platform_key)
+    // A fallback index exists only for a fallback platform other than this one.
+    if let (Some(fb_idx), Some(fallback_key)) = (fb_idx, fallback_key)
+        && !fb_idx.is_empty()
     {
-        let fb_dir = manifests_root.join(fallback_key);
-        let fb_idx = WorkspaceIndex::load(&fb_dir).map_err(CoreError::Manifest)?;
-        if !fb_idx.is_empty() {
-            tracing::info!(
-                "Using fallback platform '{}' for missing blobs on platform '{}'.",
-                fallback_key,
-                platform_key
-            );
-            for (test_name, manifest) in fb_idx.entries() {
-                if !plat_idx.entries().contains_key(test_name) {
-                    register_blob(&manifest.hash, fallback_key.as_str());
-                }
+        tracing::info!("Missing blobs of '{platform_key}' come from fallback '{fallback_key}'.");
+        for (test_name, manifest) in fb_idx.entries() {
+            if !plat_idx.entries().contains_key(test_name) {
+                register_blob(&manifest.hash, fallback_key.as_str());
             }
         }
     }
@@ -140,7 +131,7 @@ pub async fn pull_blobs(
             }
         }
     } else {
-        register_current_platform_with_fallback(context, &manifests_root, &mut register_blob)?;
+        register_current_platform_with_fallback(context, &paths, &mut register_blob)?;
     }
 
     let total_manifest_blobs = referenced_hashes.len();
@@ -158,7 +149,7 @@ pub async fn pull_blobs(
 
     let missing_count = missing_blobs.len();
 
-    transfer_with_progress(
+    let transferred = transfer_with_progress(
         missing_blobs,
         adapter.concurrency(),
         |(hash, origin_platform), pb| {
@@ -179,7 +170,11 @@ pub async fn pull_blobs(
             }
         },
     )
-    .await?;
+    .await;
+    // Each blob was flushed as it was written (`Durability::File`), their directory entries are
+    // committed once for the pull: also when a later download failed, for the ones written.
+    crate::storage::sync_downloaded_blobs(&blobs_root);
+    transferred?;
 
     Ok(PullResult {
         total_manifest_blobs,
@@ -208,7 +203,11 @@ mod tests {
 
     /// Writes `content` to `dir/<name>` and returns the file with its content address: downloads
     /// check it.
-    fn blob_file(dir: &Path, name: &str, content: &str) -> (std::path::PathBuf, ImageHash) {
+    fn blob_file(
+        dir: &std::path::Path,
+        name: &str,
+        content: &str,
+    ) -> (std::path::PathBuf, ImageHash) {
         use sha2::Digest as _;
         let file = dir.join(name);
         std::fs::write(&file, content).unwrap();

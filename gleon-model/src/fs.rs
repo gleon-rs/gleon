@@ -68,6 +68,11 @@ pub enum Durability {
     /// the rename and its directory entry afterwards. Costly (`F_FULLFSYNC` on macOS, around
     /// 5 ms per flush).
     Durable,
+    /// Content-addressed files written in a batch (the blobs `gleon pull` downloads): the file is
+    /// flushed before the rename as with [`Self::Durable`], its directory entry is not; the caller
+    /// flushes the directory once for the batch ([`sync_dir`]). A power loss before that may lose
+    /// the newest entries, never leave a partial file under a name.
+    File,
     /// Output the next run recreates (case reports, failure artifacts): atomic, but left to the OS
     /// cache. A power loss may lose the newest version, never corrupt it.
     Atomic,
@@ -169,7 +174,7 @@ fn persist_with(
         writer.flush()?;
     }
     set_mode(&temp, target)?;
-    if durability == Durability::Durable {
+    if durability != Durability::Atomic {
         temp.as_file().sync_all()?;
     }
     temp.persist(target).map_err(|e| e.error)?;
@@ -179,33 +184,51 @@ fn persist_with(
     Ok(())
 }
 
-/// Creates `path` with `bytes` unless it already exists; an existing file is never touched, and
-/// one created concurrently by another process is not an error.
+/// Creates `path` with `bytes` unless it already exists, and says whether it did: an existing
+/// file is never touched, and one created concurrently by another process is not an error.
 ///
-/// Meant for small scaffold files (`.gleon/.gitignore`): an exclusive create, without a temporary
-/// file or a flush.
+/// Meant for small files written once (`.gleon/.gitignore`, the config of `gleon init`): an
+/// exclusive create without a temporary file, flushed as `durability` says.
 ///
 /// # Errors
-/// Returns the I/O error of creating or writing the file.
-pub fn create_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    create_new_with(path, |file| file.write_all(bytes))
+/// Returns the I/O error of creating, writing or flushing the file.
+pub fn create_new(path: &Path, bytes: &[u8], durability: Durability) -> io::Result<bool> {
+    create_new_with(path, durability, |file| file.write_all(bytes))
 }
 
-/// [`create_new`] with the content from `write`. A failed write removes the file: a partial one
-/// would never be completed, since the next call keeps it.
+/// [`create_new`] with the content from `write`. A failed write or flush removes the file: a
+/// partial one would never be completed, since the next call keeps it.
 fn create_new_with(
     path: &Path,
+    durability: Durability,
     write: impl FnOnce(&mut fs::File) -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
     {
-        Ok(mut file) => write(&mut file).inspect_err(|_| {
-            let _ = fs::remove_file(path);
-        }),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Ok(mut file) => write(&mut file)
+            .and_then(|()| {
+                if durability == Durability::Atomic {
+                    Ok(())
+                } else {
+                    file.sync_all()
+                }
+            })
+            .inspect_err(|_| {
+                let _ = fs::remove_file(path);
+            })
+            .map(|()| {
+                // The file was created, so `path` has a parent (`.` for a bare name).
+                if durability == Durability::Durable
+                    && let Ok(dir) = parent(path)
+                {
+                    sync_dir(dir);
+                }
+                true
+            }),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -241,9 +264,11 @@ fn parent(path: &Path) -> io::Result<&Path> {
     }
 }
 
-/// Commits the directory entry of a rename, best effort: Windows cannot sync directories, and
-/// NFS/SMB/FUSE mounts (Docker volumes, WSL) reject it; the file itself is already durable.
-fn sync_dir(dir: &Path) {
+/// Commits the directory entries of renames and creates in `dir`, best effort.
+///
+/// Called once per batch after [`Durability::File`] writes. Windows cannot sync directories, and
+/// NFS/SMB/FUSE mounts (Docker volumes, WSL) reject it; the files themselves are already durable.
+pub fn sync_dir(dir: &Path) {
     if let Err(e) = fs::File::open(dir).and_then(|dir| dir.sync_all()) {
         tracing::debug!("Directory fsync not supported for {dir:?} ({e}); the file is durable");
     }
@@ -327,7 +352,7 @@ mod tests {
     fn test_writes_creating_parents_and_leaves_no_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a/b/c.bin");
-        for durability in [Durability::Durable, Durability::Atomic] {
+        for durability in [Durability::Durable, Durability::File, Durability::Atomic] {
             write_atomically(&path, &[1, 2, 3], durability).unwrap();
             write_atomically(&path, &[4, 5], durability).unwrap();
             assert_eq!(fs::read(&path).unwrap(), [4, 5]);
@@ -469,24 +494,26 @@ mod tests {
 
     #[test]
     fn test_create_new_never_replaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".gitignore");
-        create_new(&path, b"runs/\n").unwrap();
-        create_new(&path, b"other\n").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"runs/\n");
+        for durability in [Durability::Durable, Durability::Atomic] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(".gitignore");
+            assert!(create_new(&path, b"runs/\n", durability).unwrap());
+            assert!(!create_new(&path, b"other\n", durability).unwrap());
+            assert_eq!(fs::read(&path).unwrap(), b"runs/\n");
+        }
     }
 
     #[test]
     fn test_create_new_removes_a_partial_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".gitignore");
-        let result = create_new_with(&path, |file| {
+        let result = create_new_with(&path, Durability::Durable, |file| {
             file.write_all(b"ru")?;
             Err(io::Error::other("disk full"))
         });
         assert_eq!(result.unwrap_err().to_string(), "disk full");
         assert!(!path.exists());
-        create_new(&path, b"runs/\n").unwrap();
+        assert!(create_new(&path, b"runs/\n", Durability::Durable).unwrap());
         assert_eq!(fs::read(&path).unwrap(), b"runs/\n");
     }
 
@@ -503,6 +530,6 @@ mod tests {
         fs::write(&blocker, b"").unwrap();
         // A parent that is a file cannot be created.
         assert!(write_atomically(&blocker.join("x.png"), b"x", Durability::Atomic).is_err());
-        assert!(create_new(&blocker.join("x.png"), b"x").is_err());
+        assert!(create_new(&blocker.join("x.png"), b"x", Durability::Atomic).is_err());
     }
 }

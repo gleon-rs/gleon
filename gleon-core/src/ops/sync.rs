@@ -12,7 +12,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use futures::{StreamExt as _, TryStreamExt as _};
+use futures::StreamExt as _;
+use gleon_model::platform::PlatformKey;
 use indicatif::ProgressBar;
 
 use crate::{
@@ -30,42 +31,68 @@ pub fn short_hash(hash: &ImageHash) -> &str {
     &value[..8.min(value.len())]
 }
 
-/// Discovers valid platform directories under `.gleon/manifests/`.
+/// The entries of `.gleon/manifests/` ([`read_manifests_root`]).
+#[derive(Debug, Default)]
+pub struct ManifestsRoot {
+    /// The platform directories, named by a platform key ([`PlatformKey::parse`]), by name.
+    pub platforms: Vec<(String, PathBuf)>,
+    /// The other entries that are not hidden, sorted: directories of an older key format
+    /// (`5:…`), stray files. gleon never reads them.
+    pub foreign: Vec<PathBuf>,
+}
+
+/// Reads the entries of `manifests_root` (`.gleon/manifests/`); hidden ones (`.DS_Store`,
+/// `.gitkeep`) are neither platform directories nor foreign.
 ///
-/// A "valid" entry is a directory whose name doesn't start with `.` and contains only
-/// `[a-zA-Z0-9_.:-]` characters (the same alphabet accepted by platform key segments).
-/// Returns an empty list (not an error) if `manifests_root` doesn't exist yet.
+/// # Errors
+/// Returns the I/O error of reading the directory (`NotFound` only if it does not exist) or the
+/// metadata of an entry; an entry whose target is missing (a dangling link) is foreign.
+pub fn read_manifests_root(manifests_root: &Path) -> std::io::Result<ManifestsRoot> {
+    let mut root = ManifestsRoot::default();
+    for entry in std::fs::read_dir(manifests_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        // A name that is no UTF-8 is no platform key either.
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        // `NotFound` here is the entry's own (a dangling link, or one removed meanwhile): it
+        // must not read as a missing `manifests_root`, which callers take for no platforms.
+        let is_platform = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata.is_dir() && PlatformKey::parse(&name).is_ok(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e),
+        };
+        if is_platform {
+            root.platforms.push((name.into_owned(), path));
+        } else {
+            root.foreign.push(path);
+        }
+    }
+    root.platforms.sort_by(|a, b| a.0.cmp(&b.0));
+    root.foreign.sort();
+    Ok(root)
+}
+
+/// The platform directories under `.gleon/manifests/` ([`read_manifests_root`]), by name, with a
+/// warning for each entry that is none; empty (not an error) if `manifests_root` does not exist
+/// yet.
+///
+/// # Errors
+/// Returns the I/O error of reading the directory or the metadata of an entry.
 pub fn list_platform_dirs(manifests_root: &Path) -> Result<Vec<(String, PathBuf)>, std::io::Error> {
-    let entries = match std::fs::read_dir(manifests_root) {
-        Ok(e) => e,
+    let root = match read_manifests_root(manifests_root) {
+        Ok(root) => root,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-
-    let mut platforms = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let is_dir = std::fs::metadata(&path)?.is_dir();
-        let valid_name = entry
-            .file_name()
-            .to_str()
-            .filter(|_| is_dir)
-            .filter(|n| !n.starts_with('.'))
-            .and_then(|n| {
-                if n.chars().all(gleon_model::platform::is_key_char) {
-                    Some(n.to_string())
-                } else {
-                    None
-                }
-            });
-
-        if let Some(name) = valid_name {
-            platforms.push((name, path));
-        }
+    for path in &root.foreign {
+        let path = path.display();
+        tracing::warn!("Skipping {path}: it is no platform directory (see `gleon lint`)");
     }
-    platforms.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(platforms)
+    Ok(root.platforms)
 }
 
 /// Resolves the platform manifest directories a `push`/`pull` invocation should operate on:
@@ -171,8 +198,9 @@ pub fn active_storage_config(storage_config: Option<&StorageConfig>) -> Option<&
 }
 
 /// Runs `task` for each item in `items` with up to `concurrency` transfers in flight, tracked by
-/// a shared progress bar, short-circuiting on the first error (remaining in-flight tasks are
-/// still drained by `buffer_unordered`, but no further items are started).
+/// a shared progress bar. After the first error no further task starts, and the running ones
+/// finish before this returns: a dropped download would leave its blocking writer renaming a
+/// blob after the caller's one directory flush.
 ///
 /// # Errors
 /// Returns the first `E` produced by any invocation of `task`.
@@ -187,23 +215,28 @@ where
     Fut: Future<Output = Result<(), E>> + Send,
 {
     let progress_bar = crate::ui::create_progress_bar(items.len() as u64);
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    let (task, failed_ref, bar) = (&task, &failed, &progress_bar);
 
-    let concurrency = concurrency.max(1);
-    let mut stream = futures::stream::iter(
-        items
-            .into_iter()
-            .map(|item| task(item, progress_bar.clone())),
-    )
-    .buffer_unordered(concurrency);
+    let mut results = futures::stream::iter(items.into_iter().map(|item| async move {
+        // Checked when the task would start: one that started already runs to its end.
+        if failed_ref.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        task(item, bar.clone()).await
+    }))
+    .buffer_unordered(concurrency.max(1));
 
-    let result = async {
-        while stream.try_next().await? == Some(()) {}
-        Ok::<(), E>(())
+    let mut first_error = None;
+    while let Some(result) = results.next().await {
+        if let Err(e) = result {
+            failed.store(true, std::sync::atomic::Ordering::Relaxed);
+            first_error.get_or_insert(e);
+        }
     }
-    .await;
 
     progress_bar.finish_and_clear();
-    result
+    first_error.map_or(Ok(()), Err)
 }
 
 #[cfg(all(test, not(miri)))]
@@ -245,11 +278,36 @@ mod tests {
         std::fs::create_dir_all(manifests.join("linux-x86_64+chrome+theme=dark")).unwrap();
         std::fs::create_dir_all(manifests.join("invalid platform space")).unwrap();
         std::fs::create_dir_all(manifests.join("5:linux-6:x86_64")).unwrap();
+        // Key characters, but no platform key (`PlatformKey::parse`), and a hidden directory.
+        for not_a_key in ["a==b", "linux.", "con", ".hidden"] {
+            std::fs::create_dir_all(manifests.join(not_a_key)).unwrap();
+        }
         std::fs::write(manifests.join("some_file.txt"), "hello").unwrap();
 
         let res = list_platform_dirs(&manifests).unwrap();
         let names: Vec<_> = res.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["linux-x86_64+chrome+theme=dark", "valid-platform"]);
+    }
+
+    /// A dangling link under `.gleon/manifests/` is a foreign entry: its `NotFound` must not read
+    /// as a missing root, which would hide every platform from `push`/`pull --all` and `gc`.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_dangling_link_is_foreign_not_a_missing_root() {
+        let temp = tempdir().unwrap();
+        let manifests = temp.path().join("manifests");
+        std::fs::create_dir_all(manifests.join("macos-aarch64")).unwrap();
+        let link = manifests.join("old-link");
+        std::os::unix::fs::symlink(temp.path().join("gone"), &link).unwrap();
+
+        let root = read_manifests_root(&manifests).unwrap();
+        assert_eq!(root.foreign, [link]);
+        let names: Vec<_> = list_platform_dirs(&manifests)
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["macos-aarch64"]);
     }
 
     #[test]
@@ -353,6 +411,36 @@ mod tests {
         })
         .await;
         assert!(res.is_err());
+    }
+
+    /// After the first error no task starts, and a running one ends before the call returns
+    /// (a dropped download would rename its blob after the caller's directory flush); the error
+    /// returned is the first.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_transfer_with_progress_finishes_running_tasks_after_an_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (started, finished) = (&AtomicUsize::new(0), &AtomicUsize::new(0));
+        let res = transfer_with_progress(vec![0, 1, 2, 3], 2, |item, _| async move {
+            started.fetch_add(1, Ordering::Relaxed);
+            // Both running tasks start before either ends.
+            tokio::task::yield_now().await;
+            if item == 0 {
+                return Err(format!("failed on {item}"));
+            }
+            tokio::task::yield_now().await;
+            finished.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .await;
+        assert_eq!(res, Err("failed on 0".to_owned()));
+        assert_eq!(
+            (
+                started.load(Ordering::Relaxed),
+                finished.load(Ordering::Relaxed)
+            ),
+            (2, 1)
+        );
     }
 
     #[tokio::test]

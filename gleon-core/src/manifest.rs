@@ -6,8 +6,8 @@ pub mod single;
 
 pub use conflict::{ConflictManifest, ConflictParseError, parse_conflict_manifest};
 pub use gleon_model::hash::{ImageHash, InvalidImageHash};
-pub use index::{WorkspaceIndex, validate_test_path};
-pub use single::{SUPPORTED_SINGLE_MANIFEST_SCHEMA_VERSION, SingleTestManifest};
+pub use index::WorkspaceIndex;
+pub use single::SingleTestManifest;
 
 use crate::io::IoError;
 

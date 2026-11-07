@@ -5,10 +5,6 @@ pub use adapter::{
 };
 use object_store::path::Path as ObjPath;
 
-pub use crate::ops::gc::{
-    GcError, GcMode, GcOptions, GcResult, collect_all_referenced_hashes, garbage_collect,
-};
-
 /// Optional metadata attached to an uploaded blob in cloud storage.
 ///
 /// When multiple test cases or platforms reference the exact same content hash, the metadata
@@ -139,6 +135,15 @@ pub fn has_usable_local_blob(
     hash: &crate::manifest::ImageHash,
 ) -> bool {
     is_usable_blob(&local_blob_path(blobs_root, hash))
+}
+
+/// Commits the directory entries of the blobs downloaded into `blobs_root`, once per batch.
+///
+/// [`ObjectStoreAdapter::download_blob`] flushes each file, not its directory; this flush is best
+/// effort ([`gleon_model::fs::sync_dir`]). Downloads are of the one checkable scheme only
+/// ([`gleon_model::hash::SHA256_SCHEME`]).
+pub fn sync_downloaded_blobs(blobs_root: &std::path::Path) {
+    gleon_model::fs::sync_dir(&blobs_root.join(gleon_model::hash::SHA256_SCHEME));
 }
 
 /// Writes the blob `path` atomically and durably in place of whatever is there
