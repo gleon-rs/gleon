@@ -75,6 +75,21 @@ pub fn get_trimmed_var(env: &dyn EnvProvider, key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Whether the flag variable `key` of `env` is on.
+///
+/// It is on when set to anything but a false-like value (`0`, `false`, `no`, `n`, `f`, `off`, any
+/// case) or blank. Read through `env`, so a [`MergedEnv`] takes it from the process environment,
+/// else from `.gleon/.env` and `.gleon/.env.local`.
+#[must_use]
+pub fn is_flag_on(env: &dyn EnvProvider, key: &str) -> bool {
+    get_trimmed_var(env, key).is_some_and(|value| {
+        !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "n" | "f" | "off"
+        )
+    })
+}
+
 /// The home directory of the user ([`gleon_model::workspace::HOME_VAR`] of `env`), resolved like
 /// the paths the CLI walks; never the root of a workspace.
 #[must_use]
@@ -180,6 +195,33 @@ mod tests {
         assert_eq!(get_trimmed_var(&env, "PADDED").as_deref(), Some("padded"));
         assert_eq!(get_trimmed_var(&env, "BLANK"), None);
         assert_eq!(get_trimmed_var(&env, "MISSING"), None);
+    }
+
+    #[test]
+    fn test_is_flag_on_reads_false_like_values_as_off() {
+        let env = MapEnv(
+            [
+                ("ONE", "1"),
+                ("TRUE", " TRUE "),
+                ("ANY", "yes please"),
+                ("ZERO", "0"),
+                ("FALSE", "False"),
+                ("NO", "no"),
+                ("N", "N"),
+                ("F", "f"),
+                ("OFF", " off "),
+                ("BLANK", "  "),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        );
+        for on in ["ONE", "TRUE", "ANY"] {
+            assert!(is_flag_on(&env, on), "{on}");
+        }
+        for off in ["ZERO", "FALSE", "NO", "N", "F", "OFF", "BLANK", "MISSING"] {
+            assert!(!is_flag_on(&env, off), "{off}");
+        }
     }
 
     #[test]

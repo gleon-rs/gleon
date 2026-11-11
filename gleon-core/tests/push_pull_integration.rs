@@ -11,7 +11,7 @@
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 
-//! Integration tests for Phase 3.5 push and pull operations.
+//! Integration tests of `gleon push` and `gleon pull`.
 
 use std::fs;
 

@@ -141,7 +141,7 @@ impl super::ReportGenerator {
         let warnings: String = cases.warnings().iter().map(|w| quote(w)).collect();
 
         if total_failed == 0 {
-            let passed = "### ✅ Gleon Visual Regression: All tests passed!\n";
+            let passed = "### ✅ gleon: all visual tests passed\n";
             return if warnings.is_empty() {
                 passed.to_owned()
             } else {
@@ -211,7 +211,7 @@ impl super::ReportGenerator {
         )]
         writeln!(
             out,
-            "# gleon Visual Regression Summary\n\n**Total Tests:** {total}\n**Failed:** {failed}\n"
+            "# gleon visual regression summary\n\n**Total Tests:** {total}\n**Failed:** {failed}\n"
         )
         .expect("write infallible");
         for warning in cases.warnings() {
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(
             ReportGenerator::render_pr_comment(&cases, &options),
             format!(
-                "### ❌ Gleon Visual Regression Failure (4 diffs)\n\
+                "### ❌ gleon: visual regression failure (4 diffs)\n\
                  \n\
                  | Test Name | Result |\n\
                  | :--- | :--- |\n\
@@ -380,10 +380,14 @@ mod tests {
 
     #[test]
     fn test_render_pr_comment_truncation_keeps_the_most_telling() {
-        let mut reports: Vec<_> = (0..15)
-            .map(|i| report(&format!("missing_{i:02}"), CaseOutcome::Missing))
-            .collect();
-        reports.push(report("zz_mismatch", CaseOutcome::Mismatch));
+        let reports_again = || {
+            let mut reports: Vec<_> = (0..15)
+                .map(|i| report(&format!("missing_{i:02}"), CaseOutcome::Missing))
+                .collect();
+            reports.push(report("zz_mismatch", CaseOutcome::Mismatch));
+            reports
+        };
+        let reports = reports_again();
         let options = MarkdownReportOptions {
             html_artifact_url: Some("https://artifact.url/report.html"),
             ..Default::default()
@@ -397,6 +401,15 @@ mod tests {
             "a mismatch outranks missing goldens"
         );
         assert!(comment.contains("missing_08") && !comment.contains("missing_09"));
+
+        // Without the run's artifact (a local run, another CI), the HTML report is rendered.
+        let local = ReportGenerator::render_pr_comment(
+            &Cases::new("runs/latest", reports_again()),
+            &MarkdownReportOptions::default(),
+        );
+        assert!(local.contains("Truncated 6 additional diffs"));
+        assert!(local.contains("`gleon report html --out report.html`"));
+        assert!(!local.contains("GitHub Actions"));
     }
 
     #[test]
@@ -404,12 +417,12 @@ mod tests {
         let passing = Cases::new("runs/latest", vec![report("a", CaseOutcome::Match)]);
         assert_eq!(
             ReportGenerator::render_pr_comment(&passing, &MarkdownReportOptions::default()),
-            "### ✅ Gleon Visual Regression: All tests passed!\n"
+            "### ✅ gleon: all visual tests passed\n"
         );
         let warned = passing.with_warnings(vec!["mixed".to_owned()]);
         assert_eq!(
             ReportGenerator::render_pr_comment(&warned, &MarkdownReportOptions::default()),
-            "### ✅ Gleon Visual Regression: All tests passed!\n\n> ⚠️ mixed\n"
+            "### ✅ gleon: all visual tests passed\n\n> ⚠️ mixed\n"
         );
 
         let failing = Cases::new("runs/latest", vec![report("a", CaseOutcome::Mismatch)]);
@@ -441,7 +454,7 @@ mod tests {
         let md = ReportGenerator::generate_markdown(&cases);
         assert_eq!(
             md,
-            "# gleon Visual Regression Summary\n\n**Total Tests:** 7\n**Failed:** 4\n\n\
+            "# gleon visual regression summary\n\n**Total Tests:** 7\n**Failed:** 4\n\n\
              > ⚠️ use `gleon test -- &lt;command&gt;`\n\n\
              | Test Case | Screenshot | Status |\n|---|---|---|\n\
              | test/dimension_mismatch | test/dimension_mismatch.png | ❌ Dimension Mismatch |\n\

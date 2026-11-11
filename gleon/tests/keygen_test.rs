@@ -371,5 +371,5 @@ fn test_gleon_binary_with_real_master_key_unblocks_private_ci() {
     let assert = gleon_cmd.arg("--strict").arg("status").assert().success();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
 
-    assert!(!stderr.contains("[GLEON COMPLIANCE ERROR] Execution blocked."));
+    assert!(!stderr.contains("[gleon license]"));
 }

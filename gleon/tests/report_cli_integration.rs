@@ -41,14 +41,14 @@ fn test_cli_report_supports_all_formats() {
     report("markdown")
         .assert()
         .success()
-        .stdout(predicate::str::contains("All tests passed!"));
+        .stdout(predicate::str::contains("all visual tests passed"));
 
     let html_out = temp.path().join("report.html");
     report("html").arg("-o").arg(&html_out).assert().success();
     assert!(
         std::fs::read_to_string(&html_out)
             .unwrap()
-            .contains("All tests passed!")
+            .contains("all visual tests passed")
     );
 
     for format in ["junit", "junit.xml", "xml"] {
@@ -79,5 +79,5 @@ fn test_cli_report_supports_all_formats() {
         .env("GLEON_RUN_ID", "another-run")
         .assert()
         .success()
-        .stdout(predicate::str::contains("All tests passed!"));
+        .stdout(predicate::str::contains("all visual tests passed"));
 }

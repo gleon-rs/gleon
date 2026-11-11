@@ -92,7 +92,7 @@ fn test_reports_of_a_real_flutter_run() {
     assert!(!downloaded.join("report.html").exists(), "nothing failed");
     assert_eq!(
         ReportGenerator::render_pr_comment(&cases, &MarkdownReportOptions::default()),
-        "### ✅ Gleon Visual Regression: All tests passed!\n"
+        "### ✅ gleon: all visual tests passed\n"
     );
 
     let entry = RunHistoryEntry::from_cases(

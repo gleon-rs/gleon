@@ -1,10 +1,10 @@
-name: Gleon Approve
+name: gleon approve
 
 on:
   workflow_call:
     inputs:
       version:
-        description: "gleon version tag to use (e.g. v0.3.0 or latest)"
+        description: "gleon version tag to use (e.g. v0.4.0 or latest)"
         type: string
         default: "latest"
       checksum:
@@ -27,6 +27,9 @@ on:
         required: false
         default: ""
     secrets:
+      # The license key for the CI of a private repository (`secrets: inherit` passes it).
+      GLEON_LICENSE_KEY:
+        required: false
       R2_ACCOUNT_ID:
         required: false
       GLEON_STORAGE_URL:
@@ -97,9 +100,11 @@ jobs:
         env:
           HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          # The checkout keeps no credentials: a private repository needs the token to fetch.
+          FETCH_TOKEN: ${{ inputs.pat-token || github.token }}
         run: |
           set -eo pipefail
-          git fetch origin "$HEAD_SHA"
+          git fetch "https://x-access-token:${FETCH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$HEAD_SHA"
           # Clear base manifests so deleted PR manifests are not retained
           rm -rf "$WORKING_DIRECTORY/.gleon/manifests"
           if git ls-tree -d "$HEAD_SHA" "$WORKING_DIRECTORY/.gleon/manifests" 2>/dev/null | grep -q .; then
@@ -122,6 +127,7 @@ jobs:
         uses: gleon-rs/gleon@main
         with:
           version: ${{ inputs.version }}
+          license-key: ${{ secrets.GLEON_LICENSE_KEY }}
           checksum: ${{ inputs.checksum }}
           command: "pull"
           working-directory: ${{ inputs.working-directory }}
@@ -188,10 +194,11 @@ jobs:
           touch "$RUNNER_TEMP/gleon-approve.stamp"
           sleep 1
 
-      - name: Run Gleon Approve
+      - name: Run gleon approve
         uses: gleon-rs/gleon@main
         with:
           version: ${{ inputs.version }}
+          license-key: ${{ secrets.GLEON_LICENSE_KEY }}
           checksum: ${{ inputs.checksum }}
           command: "approve"
           args: ${{ steps.runs.outputs.args }}
@@ -209,6 +216,7 @@ jobs:
         uses: gleon-rs/gleon@main
         with:
           version: ${{ inputs.version }}
+          license-key: ${{ secrets.GLEON_LICENSE_KEY }}
           checksum: ${{ inputs.checksum }}
           command: "push"
           working-directory: ${{ inputs.working-directory }}

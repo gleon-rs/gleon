@@ -126,7 +126,7 @@ mod tests {
             .collect();
         let expected: Vec<_> = [
                 r#"<?xml version="1.0" encoding="UTF-8"?>"#,
-                r#"<testsuites name="gleon Tests" tests="7" failures="3" errors="1">"#,
+                r#"<testsuites name="gleon tests" tests="7" failures="3" errors="1">"#,
                 r#"<testsuite name="gleon" tests="7" failures="3" errors="1">"#,
                 r#"<testcase name="test&#x2f;dimension_mismatch" classname="{host}" file="test&#x2f;dimension_mismatch.png">"#,
                 r#"<failure message="Dimension Mismatch: golden is 10x10px, test image is 20x10px">Dimension Mismatch: golden is 10x10px, test image is 20x10px</failure>"#,

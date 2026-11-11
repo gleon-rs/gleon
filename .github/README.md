@@ -29,6 +29,8 @@ To build from source (contributors), install [rustup](https://rustup.rs): the to
 cargo install --path gleon --bin gleon --force
 ```
 
+A binary built from source is not an official release: in the CI of a private repository it runs only with a license key (see [License](#-license)). Use a release binary in CI.
+
 ### 2. Initialize your Project
 
 In the root of your repository, run:
@@ -49,7 +51,7 @@ This creates the `.gleon/` workspace scaffold:
 Edit `.gleon/gleon.yaml` to point to where your test framework outputs golden screenshots. For example:
 
 ```yaml
-required_version: ">=0.1.0"
+required_version: ">=0.4.0"
 
 screenshots:
   - include: "test/**/goldens/**/*.png"
@@ -138,7 +140,7 @@ Run run-20261020T101500Z-1a2b3c4d: 128 case(s): 125 passed, 3 failed (2 mismatch
 Next: `gleon report html --out .gleon/runs/latest/report.html` shows each failure with its golden, candidate and diff; `gleon approve` accepts the candidates
 ```
 
-Its exit code is always that of the tests; an interrupted run (Ctrl-C, `SIGTERM`, `SIGHUP`, all passed on to the tests) is not summed up. A package with a workspace of its own (`gleon init` in `packages/app/` of a monorepo) records its goldens there: `gleon test` at the root records the run in every workspace below it and sums them all up, and its hint names the package's config (`gleon --config packages/app/.gleon/gleon.yaml report html …`). `gleon dashboard` keeps the history of the runs.
+Its exit code is that of the tests (see [Exit codes](#exit-codes)); an interrupted run (Ctrl-C, `SIGTERM`, `SIGHUP`, all passed on to the tests) is not summed up. A package with a workspace of its own (`gleon init` in `packages/app/` of a monorepo) records its goldens there: `gleon test` at the root records the run in every workspace below it and sums them all up, and its hint names the package's config (`gleon --config packages/app/.gleon/gleon.yaml report html …`). `gleon dashboard` keeps the history of the runs.
 
 In a goldens workspace the commands that work with manifests do not apply:
 
@@ -178,8 +180,8 @@ jobs:
 The Action reports and uploads the workspace of its `working-directory`; for packages with
 workspaces of their own, use one step (and one `artifact-name`) per package.
 
-Public repositories and local runs need no license; private repositories need one in CI (see
-[License](#-license)).
+The CLI is free for individuals, hobbyists, non-commercial open-source repositories and local
+development, and free for all users until December 31, 2026 (see [License](#-license)).
 
 ---
 
@@ -197,6 +199,7 @@ Public repositories and local runs need no license; private repositories need on
 | `gleon approve [NAMES...]` | Accepts the candidates of failed cases as new baselines.                                    | `gleon approve`<br>`gleon approve auth/login`                                   |
 | `gleon pull`               | Downloads missing baseline blobs from remote object storage (`--require-storage` or `GLEON_REQUIRE_STORAGE=1`: fail without one). | `gleon pull`<br>`gleon pull --all`                                     |
 | `gleon push`               | Uploads locally staged baseline blobs to remote object storage (`--require-storage` likewise). | `gleon push`                                                                 |
+| `gleon gc`                 | Deletes remote blobs that no manifest names, after a grace period (`--grace-period-hours`, 24 at least); `--dry-run` lists them. Needs a full clone (see [CI/CD Prerequisites](#cicd-prerequisites-shallow-clone-constraint)). | `gleon gc --dry-run`<br>`gleon gc --grace-period-hours 72` |
 | `gleon clean`              | Removes `.gleon/runs/`; `--screenshots` also deletes, untracks and ignores screenshots.     | `gleon clean`<br>`gleon clean --screenshots --dry-run`                          |
 | `gleon lint`               | Verifies integrity and schema compliance of all manifests, and names entries of `.gleon/manifests/` that are no platform directory (gleon never reads them). | `gleon lint`                                                                    |
 | `gleon resolve`            | Interactively resolves Git merge conflicts in baseline manifests (of one platform with `--platform`). | `gleon resolve`                                                                 |
@@ -205,12 +208,45 @@ Public repositories and local runs need no license; private repositories need on
 
 All commands support the following global options:
 
-- `--config <PATH>`: Specify an explicit path to the configuration file (default: `.gleon/gleon.yaml`, searched upwards from the current directory, no further than the repository root (the first directory with `.git`, `.hg`, `.jj` or `.sl`) and never in the home directory or above unless that is a repository root itself: a `~/.gleon/gleon.yaml` is no workspace, and neither is its `.env`). Integrations search upwards from each golden the same way.
-- `--platform <STRING>`: Override platform context with one opaque name (e.g. `--platform my-custom-env`; aliases such as `macos-arm64` read as `macos-aarch64`). `lint`, `resolve`, `pull` and `push` then read the manifests of this platform only. A key with a renderer or labels comes from `--os`/`--arch`/`--renderer`/`--label`.
+- `-c, --config <PATH>`: Specify an explicit path to the configuration file (default: `.gleon/gleon.yaml`, searched upwards from the current directory, no further than the repository root (the first directory with `.git`, `.hg`, `.jj` or `.sl`) and never in the home directory or above unless that is a repository root itself: a `~/.gleon/gleon.yaml` is no workspace, and neither is its `.env`). Integrations search upwards from each golden the same way.
+- `-p, --platform <STRING>`: Override platform context with one opaque name (e.g. `--platform my-custom-env`; aliases such as `macos-arm64` read as `macos-aarch64`). `lint`, `resolve`, `pull` and `push` then read the manifests of this platform only. A key with a renderer or labels comes from `--os`/`--arch`/`--renderer`/`--label`.
 - `--os <OS>` / `--arch <ARCH>` / `--renderer <RENDERER>`: Override individual platform context dimensions.
 - `--label <KEY=VALUE>`: Add custom isolation labels (e.g. `--label theme=dark`).
-- `--verbose`: Enable debug logging output (routed to `stderr`).
-- `--quiet`: Suppress informational output (only display warnings and errors).
+- `-b, --branch <BRANCH>`: The branch `gleon dashboard` records the run under (default: `GLEON_BRANCH`, the branch of CI, else the checked-out branch).
+- `--strict`: Stop with exit code 42 instead of a warning when a CI run has no valid license key (also `GLEON_STRICT=1`; see [License](#-license)).
+- `-v, --verbose`: Enable debug logging output (routed to `stderr`).
+- `-q, --quiet`: Suppress informational output (only display warnings and errors).
+
+### Environment Variables
+
+gleon reads these from the process environment and, as defaults, from `.gleon/.env` and `.gleon/.env.local` of the workspace (`GLEON_RUN_ID` from the process environment only).
+
+| Variable | Meaning |
+| :--- | :--- |
+| `GLEON_LICENSE_KEY` | The license key for the CI of a private repository (see [License](#-license)). |
+| `GLEON_STRICT` | `1` or `true`: the same as `--strict`. |
+| `GLEON_PROJECT_PATH` | The repository (`owner/name`) a license key is checked against, on a CI provider other than GitHub Actions, GitLab, Travis CI, Bitbucket and CircleCI. |
+| `GLEON_PLATFORM`, `GLEON_OS`, `GLEON_ARCH`, `GLEON_RENDERER` | The platform of the CLI, like `--platform`, `--os`, `--arch` and `--renderer`. |
+| `GLEON_FALLBACK_PLATFORM` | Replaces `fallback_platform` of `.gleon/gleon.yaml` for the CLI. |
+| `GLEON_BRANCH` | The branch of the run, like `--branch`. |
+| `GLEON_STORAGE_URL` | Remote blob storage: `s3://…`, `r2://…` or `gs://…`. The credentials are `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_ENDPOINT_URL`, `R2_ACCOUNT_ID` and `GOOGLE_SERVICE_ACCOUNT_KEY`; each also with a `GLEON_` prefix, which wins. |
+| `GLEON_CONCURRENCY` | Parallel transfers to and from remote storage (default: 8). |
+| `GLEON_REQUIRE_STORAGE` | `1` or `true`: `pull` and `push` fail without remote storage (`--require-storage`). |
+| `GLEON_RUN_ID` | The run that `gleon test` records and that `report`, `dashboard` and `approve` read (see [Case reports](#case-reports-metrics)). |
+| `GLEON_METRICS`, `GLEON_ARTIFACTS_DIR` | Override `metrics.enabled` and `artifacts` of `.gleon/gleon.yaml`. |
+| `GLEON_REQUIRE_CANONICAL` | `1`: integrations compare goldens recorded elsewhere as goldens of the `fallback_platform` (see [Goldens of integrations on several platforms](#goldens-of-integrations-on-several-platforms)). |
+| `GLEON_HTML_ARTIFACT_URL` | The link to the full HTML report in a PR comment with more failures than it lists (the Action sets it). |
+
+### Exit Codes
+
+| Code | Meaning |
+| :--- | :--- |
+| `0` | The command succeeded. |
+| `1` | The command ran and found a failure (for example a failed case of `gleon diff`), or it could not run. |
+| `2` | Invalid arguments. |
+| `42` | The license check stopped gleon before the command ran (see [License](#-license)). |
+
+`gleon test` exits with the code of its test command: `127` when the command is not found, `128 + N` when signal `N` ended it. The license check runs before the tests, so `gleon test` can also exit with `42`.
 
 ---
 
@@ -221,7 +257,7 @@ Below is a complete, annotated `.gleon/gleon.yaml` reference. Unknown keys are r
 ```yaml
 # Optional: enforce a minimum CLI version across the team and CI (`gleon init` writes its own).
 # A workspace of an integration alone needs none.
-required_version: ">=0.1.0"
+required_version: ">=0.4.0"
 
 # Optional: where the baselines live. `manifests` (the default): `.gleon/manifests/` and blobs,
 # recorded by `gleon stage` and compared by `gleon diff`. `goldens`: the golden files an
@@ -229,6 +265,13 @@ required_version: ">=0.1.0"
 # reads their case reports (`gleon test`, `report`, `approve`) and refuses `status`, `stage`,
 # `diff` and `clean --screenshots`. `gleon init` writes `goldens` next to a `pubspec.yaml`.
 baselines: manifests
+
+# Optional: the platform the CLI runs as, instead of the detected OS and architecture: one opaque
+# name (`my-custom-env`) or fields (`os`, `arch`, `renderer`, `labels`) over the detected ones.
+# `GLEON_PLATFORM` and the platform flags override it. Integrations do not read it: they run as
+# their process's OS and architecture.
+platform:
+  renderer: impeller
 
 # Rules for discovering and comparing screenshots (optional: a workspace may name only its
 # `fallback_platform`). A file is excluded if it matches `exclude`;
@@ -333,7 +376,7 @@ steps:
   - if: failure() && github.event_name == 'pull_request'
     run: gleon report markdown --pr-number ${{ github.event.pull_request.number }} > gleon-report.md
   - if: failure() && github.event_name == 'pull_request'
-    uses: actions/upload-artifact@v7
+    uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
     with:
       name: gleon-artifacts-${{ github.event.pull_request.number }}-${{ runner.os }}
       path: .gleon/runs/
@@ -427,7 +470,7 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04 # the Linux binary needs the glibc of Ubuntu 26.04 or newer
     permissions:
       contents: read
       pull-requests: write # Required to post diff reports as PR comments
@@ -449,14 +492,19 @@ jobs:
 
 | Input               | Description                                                                                           | Default                       |
 | :------------------ | :---------------------------------------------------------------------------------------------------- | :---------------------------- |
-| `version`           | Release version tag to download (e.g. `'v0.3.0'` or `'latest'`)                                       | `'latest'`                    |
+| `version`           | Release version tag to download (e.g. `'v0.4.0'` or `'latest'`)                                       | `'latest'`                    |
 | `command`           | Execution mode: `'verify'` (pull + diff + report) or single command (`'diff'`, `'pull'`, `'approve'`) | `'diff'`                      |
-| `github-token`      | Token (`${{ secrets.GITHUB_TOKEN }}`) for release downloads and PR comments                           | `${{ github.token }}`         |
+| `github-token`      | Token (`${{ secrets.GITHUB_TOKEN }}`) for the PR comment of `verify`                                    | `${{ github.token }}`         |
 | `working-directory` | Working directory to run gleon from (useful for monorepos)                                            | `'.'`                         |
-| `args`              | Additional flags for the selected command                                                             | `''`                          |
+| `args`              | Additional flags for the selected command (whitespace-separated, or a JSON array of strings)          | `''`                          |
 | `test-command`      | For `verify`: the tests of an integration (`flutter test`), run as `gleon test -- <command>` instead of `pull` + `diff` | `''`         |
-| `license-key`       | Commercial BSL license key for private enterprise repositories                                        | `''`                          |
-| `strict`            | Fail build immediately on license violation (`'true'` / `'false'`)                                    | `'false'`                     |
+| `artifact-name`     | For `verify`: the name of the uploaded run; `/gleon approve` needs `gleon-artifacts-<PR number>-<unique per job>` | `gleon-artifacts-<PR number>-default` |
+| `pr-number`         | For `verify`: the pull request that gets the comment                                                  | the event's pull request      |
+| `license-key`       | The license key (`GLEON_LICENSE_KEY`) for the CI of private repositories (see [License](#-license))   | `''`                          |
+| `strict`            | Stop with exit code 42 instead of a warning when the run has no valid license key (`'true'` / `'false'`) | `'false'`                  |
+| `checksum`          | The expected SHA-256 of the binary. The binary is always checked against `SHA256SUMS.txt` of its release; this pins it independently of the release | `''` |
+
+The Action downloads the binary of `version`; on Linux it needs the glibc of Ubuntu 26.04 or newer (`runs-on: ubuntu-26.04`). `gleon-rs/gleon@main` always runs the newest Action; to pin it, reference a release tag instead (`gleon-rs/gleon@v0.4.0`, releases are immutable) and set `version` to the same tag.
 
 ---
 
@@ -481,10 +529,10 @@ To accept the new visual changes as the updated baseline:
 
 ### Enabling `/gleon approve` Comments
 
-To enable comment-based approvals, add `.github/workflows/gleon-approve.yml` referencing the reusable workflow. It approves the cases of the PR head's latest runs and commits the new baselines to the PR branch: golden PNGs in a goldens workspace (no storage secrets needed), manifests otherwise (their blobs need the `GLEON_STORAGE_URL` secret and the provider credentials; without them it fails). It runs gleon from the default branch with the PR's own `.gleon/gleon.yaml` and manifests (never the PR's code), so a PR that adds `.gleon/` or switches to `baselines: goldens` is approved as it will be merged. A CI job that failed before comparing any golden uploads an empty run, which is read as one:
+To enable comment-based approvals, add `.github/workflows/gleon-approve.yml` referencing the reusable workflow. It approves the cases of the PR head's latest runs and commits the new baselines to the PR branch: golden PNGs in a goldens workspace (no storage secrets needed), manifests otherwise (their blobs need the `GLEON_STORAGE_URL` secret and the provider credentials; without them it fails). It runs gleon from the default branch with the PR's own `.gleon/gleon.yaml` and manifests (never the PR's code), so a PR that adds `.gleon/` or switches to `baselines: goldens` is approved as it will be merged. A CI job that failed before comparing any golden uploads an empty run, which is read as one. In a private repository it passes the `GLEON_LICENSE_KEY` secret to gleon (`secrets: inherit` does that):
 
 ```yaml
-name: Gleon Approve
+name: gleon approve
 
 on:
   issue_comment:
@@ -567,4 +615,14 @@ cargo fmt --all
 
 The crates shared with other integrations — `gleon-engine` (comparison engine), `gleon-model` (configuration, naming, platform keys and case reports) and `gleon-ffi` (C ABI for the Flutter package) — are licensed `MIT OR Apache-2.0`.
 
-The rest of Gleon — the `gleon` CLI and `gleon-core` — is licensed under the [Business Source License 1.1](../LICENSE) (BUSL-1.1), converting to Apache 2.0 after 4 years. Free for non-commercial use, open-source projects, and evaluation.
+The `gleon` CLI and `gleon-core` are licensed under the [Business Source License 1.1](../LICENSE) (BUSL-1.1). Its Additional Use Grant makes them free for individuals, hobbyists, non-commercial open-source repositories and unlimited local development; commercial CI/CD use needs a commercial license. Each version becomes Apache-2.0 four years after its release, or on July 13, 2030, if that date is earlier.
+
+gleon is free for all users until December 31, 2026. Commercial licenses and their prices come in 2027 (see [gleon.rs](https://gleon.rs/#pricing)).
+
+What the CLI checks, before every command:
+
+- Local runs and the CI of public GitHub repositories need no key. Every other CI run counts as private: a private GitHub repository, and every other CI provider.
+- Set the key in `GLEON_LICENSE_KEY` (the `license-key` input of the Action). On a CI provider other than GitHub Actions, GitLab, Travis CI, Bitbucket and CircleCI, also set `GLEON_PROJECT_PATH` to the repository (`owner/name`) the key names.
+- In private CI without a valid key, an official release less than 90 days old prints a warning and continues. With `--strict` (`GLEON_STRICT=1`, the `strict` input of the Action) it stops with exit code 42 instead.
+- In private CI without a valid key, a binary built from source or an official release more than 90 days old stops with exit code 42.
+- An expired key keeps working for 14 days, with a warning.

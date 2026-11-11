@@ -34,7 +34,7 @@ reviews:
     - label: "fix"
       instructions: "Bug fix — corrects incorrect behavior or a regression."
     - label: "documentation"
-      instructions: "Documentation-only changes (README, AGENTS.md, doc comments, etc.)."
+      instructions: "Documentation-only changes (README, doc comments, etc.)."
     - label: "refactor"
       instructions: "Code restructuring with no change in external behavior."
     - label: "test"

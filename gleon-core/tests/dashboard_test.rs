@@ -111,7 +111,7 @@ async fn test_dashboard_compilation_and_history_lifecycle() {
     // Verify dashboard HTML content and visual assets
     let html1 = std::fs::read_to_string(paths.dashboard_file()).unwrap();
     assert!(html1.contains("<!DOCTYPE html>"));
-    assert!(html1.contains("Gleon Regression History"));
+    assert!(html1.contains("gleon regression history"));
     assert!(html1.contains("<svg class=\"svg-chart\""));
     assert!(html1.contains("feature&#x2f;checkout"));
     assert!(html1.contains("test&#x2f;goldens&#x2f;counter_three_taps"));
