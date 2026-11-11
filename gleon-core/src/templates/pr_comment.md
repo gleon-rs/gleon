@@ -9,7 +9,7 @@
 > ⚠️ **Truncated {{ remaining }} additional diffs.** {% if html_artifact_url -%}
 Download the full [gleon HTML report]({{ html_artifact_url }}) to inspect.
 {%- else -%}
-Download the full HTML report from the artifacts of the GitHub Actions run to inspect it.
+Render all of them with `gleon report html --out report.html` to inspect them.
 {%- endif %}
 {% endif -%}
 {{ footer }}

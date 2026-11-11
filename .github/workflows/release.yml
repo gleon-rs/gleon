@@ -175,7 +175,7 @@ jobs:
 
       # The Action trusts a binary by the checksum list of the same release: only an immutable
       # release keeps both from being replaced later. A mutable one fails (enable immutability,
-      # delete and re-create the release); an answer without the field only warns.
+      # delete and re-create the release), and so does an answer that does not say.
       - name: Check the release is immutable
         env:
           GH_TOKEN: ${{ github.token }}
@@ -189,5 +189,8 @@ jobs:
               echo "::error::release $GITHUB_REF_NAME is mutable: enable release immutability in the repository settings, then delete and re-create the release"
               exit 1
               ;;
-            *) echo "::warning::could not tell whether release $GITHUB_REF_NAME is immutable (got '$immutable')" ;;
+            *)
+              echo "::error::could not tell whether release $GITHUB_REF_NAME is immutable (got '$immutable'): check it in the release settings"
+              exit 1
+              ;;
           esac

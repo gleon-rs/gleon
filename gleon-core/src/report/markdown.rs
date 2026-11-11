@@ -380,10 +380,14 @@ mod tests {
 
     #[test]
     fn test_render_pr_comment_truncation_keeps_the_most_telling() {
-        let mut reports: Vec<_> = (0..15)
-            .map(|i| report(&format!("missing_{i:02}"), CaseOutcome::Missing))
-            .collect();
-        reports.push(report("zz_mismatch", CaseOutcome::Mismatch));
+        let reports_again = || {
+            let mut reports: Vec<_> = (0..15)
+                .map(|i| report(&format!("missing_{i:02}"), CaseOutcome::Missing))
+                .collect();
+            reports.push(report("zz_mismatch", CaseOutcome::Mismatch));
+            reports
+        };
+        let reports = reports_again();
         let options = MarkdownReportOptions {
             html_artifact_url: Some("https://artifact.url/report.html"),
             ..Default::default()
@@ -397,6 +401,15 @@ mod tests {
             "a mismatch outranks missing goldens"
         );
         assert!(comment.contains("missing_08") && !comment.contains("missing_09"));
+
+        // Without the run's artifact (a local run, another CI), the HTML report is rendered.
+        let local = ReportGenerator::render_pr_comment(
+            &Cases::new("runs/latest", reports_again()),
+            &MarkdownReportOptions::default(),
+        );
+        assert!(local.contains("Truncated 6 additional diffs"));
+        assert!(local.contains("`gleon report html --out report.html`"));
+        assert!(!local.contains("GitHub Actions"));
     }
 
     #[test]
