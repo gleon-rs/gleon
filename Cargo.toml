@@ -11,7 +11,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-authors = ["tsinis"]
+authors = ["Roman Cinis"]
 edition = "2024"
 license = "BUSL-1.1"
 version = "0.4.0"
@@ -81,7 +81,7 @@ panic = "deny"
 pedantic = { level = "deny", priority = -1 }
 todo = "deny"
 unwrap_used = "deny"
-# Selected `restriction` lints that enforce rules from `.agents/AGENTS.md`.
+# Selected `restriction` lints that enforce the coding rules of this repository.
 # Every `#[allow]`/`#[expect]` must say why; point suppression use `#[expect]` so stale ones fail.
 allow_attributes_without_reason = "deny"
 dbg_macro = "deny"

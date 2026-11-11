@@ -1308,7 +1308,7 @@ mod tests {
 
         let html = DashboardCompiler::compile_dashboard(&history).unwrap();
         assert!(html.contains("<!DOCTYPE html>"));
-        assert!(html.contains("Gleon Regression History"));
+        assert!(html.contains("gleon regression history"));
         assert!(html.contains("main"));
         assert!(html.contains("feature&#x2f;cart"));
         assert!(html.contains("macos-aarch64"));
@@ -1895,6 +1895,6 @@ mod tests {
             .expect("remote dashboard.html must be present in storage");
         let html_text = std::str::from_utf8(&remote_html.bytes).unwrap();
         assert_ne!(html_text, "<html>concurrent</html>");
-        assert!(html_text.contains("Gleon History Dashboard"));
+        assert!(html_text.contains("gleon history dashboard"));
     }
 }

@@ -1,4 +1,4 @@
-### ❌ Gleon Visual Regression Failure ({{ total_failed }} diffs)
+### ❌ gleon: visual regression failure ({{ total_failed }} diffs)
 
 | Test Name |{% if has_baselines %} Baseline |{% endif %} Result |
 | :--- |{% if has_baselines %} :---: |{% endif %} :--- |
@@ -7,9 +7,9 @@
 {% endfor %}
 {% if remaining > 0 %}
 > ⚠️ **Truncated {{ remaining }} additional diffs.** {% if html_artifact_url -%}
-Download the full [Gleon HTML Report]({{ html_artifact_url }}) to inspect.
+Download the full [gleon HTML report]({{ html_artifact_url }}) to inspect.
 {%- else -%}
-Download the full HTML Report from GitHub Action Artifacts to inspect.
+Download the full HTML report from the artifacts of the GitHub Actions run to inspect it.
 {%- endif %}
 {% endif -%}
 {{ footer }}

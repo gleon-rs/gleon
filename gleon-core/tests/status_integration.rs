@@ -120,7 +120,7 @@ fn test_status_with_mask_rules_is_clean_after_staging() {
     // Stage screenshot
     stage_workspace(&ctx, None).expect("stage_workspace should succeed");
 
-    // Check status post-staging in Phase 3.3: status is clean
+    // After staging, status is clean
     let report = check_status(&ctx).expect("check_status should succeed");
     assert!(report.is_clean());
 }

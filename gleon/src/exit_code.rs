@@ -1,18 +1,20 @@
-//! Shared process exit code for CLI subcommand handlers.
+//! The process exit codes of the CLI (`gleon test` exits with the code of its test command
+//! instead, and clap with 2 for a usage error).
 
-/// Process exit code a subcommand handler reports once its operation has run to completion —
-/// as opposed to an unexpected error, which every handler now reports identically via
-/// [`crate::commands::report_failure`] instead of letting it bubble in its own format.
+/// The exit code of a gleon command.
 ///
-/// Distinguishes "the operation ran fine and determined an unsuccessful outcome" (a failed
-/// diff, a bad lint report, a non-interactive terminal, ...) from "the operation itself broke".
+/// An unexpected error is reported by [`crate::commands::report_failure`] and also exits with
+/// [`ExitCode::Failure`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ExitCode {
     /// The operation completed and succeeded.
     Success = 0,
-    /// The operation completed but determined a failure.
+    /// The operation completed but determined a failure (a failed diff, a bad lint report, a
+    /// non-interactive terminal, ...), or it could not run.
     Failure = 1,
+    /// The license check stopped gleon before the command ran (see `gleon_core::license`).
+    LicenseBlocked = 42,
 }
 
 impl From<ExitCode> for i32 {

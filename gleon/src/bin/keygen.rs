@@ -1,4 +1,4 @@
-//! Standalone entitlement key generator for Gleon.
+//! Standalone entitlement key generator for gleon.
 //!
 //! Generates and signs Ed25519 license tokens offline for commercial visual regression
 //! entitlements.
@@ -20,7 +20,7 @@ use zeroize::{Zeroize, Zeroizing};
 #[derive(Parser, Debug)]
 #[command(
     name = "keygen",
-    about = "Generate signed Ed25519 entitlement keys for Gleon",
+    about = "Generate signed Ed25519 entitlement keys for gleon",
     version
 )]
 struct KeygenArgs {

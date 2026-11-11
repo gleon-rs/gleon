@@ -267,7 +267,7 @@ fn test_diff_command() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_pull_placeholder() -> Result<(), Box<dyn std::error::Error>> {
+fn test_pull_without_storage_runs_locally() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
     let mut cmd = gleon();
     cmd.current_dir(dir.path())
@@ -282,7 +282,7 @@ fn test_pull_placeholder() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_push_placeholder() -> Result<(), Box<dyn std::error::Error>> {
+fn test_push_without_storage_runs_locally() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_temp_dir();
     let mut cmd = gleon();
     cmd.current_dir(dir.path())
@@ -400,6 +400,11 @@ fn test_invalid_subcommand() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The debug line every command starts with.
+fn starting_line() -> String {
+    format!("gleon {} starting", env!("CARGO_PKG_VERSION"))
+}
+
 #[test]
 fn test_verbose_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
     let dir = init_with_config("platform/minimal");
@@ -410,8 +415,22 @@ fn test_verbose_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
         .arg("status")
         .assert()
         .success()
-        .stderr(predicates::str::contains("INFO"))
-        .stderr(predicates::str::contains("gleon CLI starting up..."));
+        .stderr(predicates::str::contains("DEBUG"))
+        .stderr(predicates::str::contains(starting_line()));
+    Ok(())
+}
+
+#[test]
+fn test_default_output_has_no_debug_lines() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = init_with_config("platform/minimal");
+
+    let mut cmd = gleon();
+    cmd.current_dir(dir.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("DEBUG").not())
+        .stderr(predicates::str::contains(starting_line()).not());
     Ok(())
 }
 
@@ -425,7 +444,8 @@ fn test_quiet_flag_coverage() -> Result<(), Box<dyn std::error::Error>> {
         .arg("status")
         .assert()
         .success()
-        .stderr(predicates::str::contains("gleon CLI starting up...").not());
+        .stderr(predicates::str::contains("INFO").not())
+        .stderr(predicates::str::contains(starting_line()).not());
     Ok(())
 }
 
@@ -2016,6 +2036,33 @@ fn test_pull_and_push_require_storage() {
             .failure()
             .stderr(predicate::str::contains("gleon init"))
             .stderr(predicate::str::contains("no remote storage").not());
+    }
+}
+
+/// `GLEON_REQUIRE_STORAGE` in `.gleon/.env` applies like every other variable there, and the
+/// process environment beats it.
+#[test]
+fn test_require_storage_from_the_workspace_env_file() {
+    let dir = init_temp_dir();
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/env/require_storage.env"),
+        dir.path().join(".gleon/.env"),
+    )
+    .unwrap();
+    for command in ["pull", "push"] {
+        gleon()
+            .current_dir(dir.path())
+            .arg(command)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("no remote storage is configured"));
+        gleon()
+            .current_dir(dir.path())
+            .env("GLEON_REQUIRE_STORAGE", "0")
+            .arg(command)
+            .assert()
+            .success();
     }
 }
 

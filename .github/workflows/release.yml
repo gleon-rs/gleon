@@ -1,15 +1,55 @@
+# Push a tag `vX.Y.Z` equal to the workspace `version` in Cargo.toml to release. Each binary is
+# built natively, checked to be an official build of that version, attested, and attached with
+# `SHA256SUMS.txt` to an immutable GitHub Release (enable "release immutability" in the repository
+# settings). The Action (`action.yml`) and `approve.yml` download from it.
 name: Release
 
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+*"
 
 permissions: {}
 
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a half-published release.
+  cancel-in-progress: false
+
 jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The history of main, to check the tagged commit belongs to it.
+          fetch-depth: 0
+      # A release is immutable: never one of a commit that was not reviewed into main.
+      - name: Tagged commit must be on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not a commit of main"
+            exit 1
+          fi
+      # The `version` of `[workspace.package]` only: a dependency table may have a `version` too.
+      - name: Tag must match the workspace version
+        run: |
+          version="$(awk '/^\[/ { in_package = ($0 == "[workspace.package]") }
+            in_package && /^version *=/ { gsub(/^version *= *"|".*$/, ""); print; exit }' Cargo.toml)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version of Cargo.toml"
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: check
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -39,6 +79,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust (pinned nightly from rust-toolchain.toml)
         run: |
@@ -46,17 +88,27 @@ jobs:
           rustup target add ${{ matrix.target }}
           rustc --version
 
+      # GLEON_REQUIRE_OFFICIAL fails the build when the secret is missing or wrong, instead of
+      # releasing binaries that private CI without a license key refuses.
       - name: Build release binary
         env:
           GLEON_OFFICIAL_SECRET: ${{ secrets.GLEON_OFFICIAL_SECRET }}
+          GLEON_REQUIRE_OFFICIAL: "1"
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
-          if [ -z "${GLEON_OFFICIAL_SECRET}" ]; then
-            echo "::error::GLEON_OFFICIAL_SECRET is not configured"
-            exit 1
-          fi
           export GLEON_BUILD_TIMESTAMP=$(date +%s)
           cargo build --locked --release --bin gleon --target ${{ matrix.target }}
+
+      - name: Check the binary runs and names this version
+        env:
+          BINARY: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+        run: |
+          reported="$("$BINARY" --version)"
+          echo "$reported"
+          if [ "$reported" != "gleon ${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::the binary reports '$reported', the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
 
       - name: Prepare asset
         run: |
@@ -73,12 +125,14 @@ jobs:
         with:
           name: build-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: error
           retention-days: 1
 
   release:
-    name: Create Release
+    name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -96,8 +150,44 @@ jobs:
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Release
-        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
-        with:
-          files: |
-            dist/*
+      # Assets go onto a draft first: an immutable release rejects uploads once published.
+      - name: Create and publish the release
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag \
+            --title "$GITHUB_REF_NAME" --generate-notes
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+
+      # A draft left by a failed upload or publish would make a rerun's `gh release create` fail:
+      # it goes, the tag stays. A published release is never touched.
+      - name: Remove the draft of a failed publish
+        if: ${{ failure() && steps.publish.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
+            gh release delete "$GITHUB_REF_NAME" --yes
+          fi
+
+      # The Action trusts a binary by the checksum list of the same release: only an immutable
+      # release keeps both from being replaced later. A mutable one fails (enable immutability,
+      # delete and re-create the release); an answer without the field only warns.
+      - name: Check the release is immutable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          immutable=$(gh api "repos/$GH_REPO/releases/tags/$GITHUB_REF_NAME" --jq '.immutable')
+          case "$immutable" in
+            true) echo "release $GITHUB_REF_NAME is immutable" ;;
+            false)
+              echo "::error::release $GITHUB_REF_NAME is mutable: enable release immutability in the repository settings, then delete and re-create the release"
+              exit 1
+              ;;
+            *) echo "::warning::could not tell whether release $GITHUB_REF_NAME is immutable (got '$immutable')" ;;
+          esac

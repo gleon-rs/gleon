@@ -64,13 +64,9 @@ pub struct Cli {
     #[arg(short = 'c', long = "config", global = true)]
     pub config: Option<std::path::PathBuf>,
 
-    /// Enforce strict licensing compliance (hard fail with exit code 42 on violations)
-    #[arg(
-        long = "strict",
-        global = true,
-        env = "GLEON_STRICT",
-        value_parser = clap::builder::FalseyValueParser::new()
-    )]
+    /// Stop with exit code 42 instead of a warning when a CI run has no valid license key (also
+    /// `GLEON_STRICT=1`, from the environment or `.gleon/.env`)
+    #[arg(long = "strict", global = true)]
     pub strict: bool,
 
     /// The subcommand to execute
@@ -245,13 +241,10 @@ pub enum Commands {
         /// Pull blobs for all platforms under .gleon/manifests/ instead of only the active platform
         #[arg(short = 'a', long = "all", conflicts_with = "platform")]
         all_platforms: bool,
-        /// Fail instead of working in local mode when no remote storage is configured (CI steps
-        /// that must sync blobs, such as the approve workflow, set `GLEON_REQUIRE_STORAGE`)
-        #[arg(
-            long,
-            env = "GLEON_REQUIRE_STORAGE",
-            value_parser = clap::builder::FalseyValueParser::new()
-        )]
+        /// Fail instead of working in local mode when no remote storage is configured (also
+        /// `GLEON_REQUIRE_STORAGE=1`, from the environment or `.gleon/.env`, which CI steps that
+        /// must sync blobs set, such as the approve workflow)
+        #[arg(long)]
         require_storage: bool,
     },
     /// Push staged changes and report to remote storage
@@ -259,13 +252,10 @@ pub enum Commands {
         /// Push blobs for all platforms under .gleon/manifests/ instead of only the active platform
         #[arg(short = 'a', long = "all", conflicts_with = "platform")]
         all_platforms: bool,
-        /// Fail instead of working in local mode when no remote storage is configured (CI steps
-        /// that must sync blobs, such as the approve workflow, set `GLEON_REQUIRE_STORAGE`)
-        #[arg(
-            long,
-            env = "GLEON_REQUIRE_STORAGE",
-            value_parser = clap::builder::FalseyValueParser::new()
-        )]
+        /// Fail instead of working in local mode when no remote storage is configured (also
+        /// `GLEON_REQUIRE_STORAGE=1`, from the environment or `.gleon/.env`, which CI steps that
+        /// must sync blobs set, such as the approve workflow)
+        #[arg(long)]
         require_storage: bool,
     },
     /// Clean up unreferenced baseline blobs from remote storage

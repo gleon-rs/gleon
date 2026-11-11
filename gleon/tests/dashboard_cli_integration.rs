@@ -86,7 +86,7 @@ fn test_cli_dashboard_end_to_end() {
         .stdout(predicate::str::contains("dashboard.html"))
         .stderr(predicate::str::contains("Dashboard compiled successfully"));
     let html_content = std::fs::read_to_string(workspace.join(".gleon/dashboard.html")).unwrap();
-    assert!(html_content.contains("Gleon Regression History"));
+    assert!(html_content.contains("gleon regression history"));
     assert!(html_content.contains("2</strong> / 2 passed"));
     let first = history(workspace);
     assert_eq!(first.runs.len(), 1);

@@ -6,15 +6,15 @@ branding:
 
 inputs:
   version:
-    description: "gleon version tag to download (e.g. 'v0.3.0' or 'latest')"
+    description: "gleon version tag to download (e.g. 'v0.4.0' or 'latest')"
     required: false
     default: "latest"
   license-key:
-    description: "gleon BSL License Key for private repositories"
+    description: "gleon license key (GLEON_LICENSE_KEY) for the CI of private repositories"
     required: false
     default: ""
   strict:
-    description: "Fail build on license violation ('true' or 'false')"
+    description: "Stop with exit code 42 instead of a warning when the CI run has no valid license key ('true' or 'false'). Binaries that are not official releases, or official releases more than 90 days old, stop in private CI without a key anyway"
     required: false
     default: "false"
   command:
@@ -34,11 +34,11 @@ inputs:
     required: false
     default: ""
   github-token:
-    description: "GitHub token to prevent API rate limits when downloading releases (optional)"
+    description: "GitHub token for the PR comment of 'verify' (release assets download without one)"
     required: false
     default: "${{ github.token }}"
   checksum:
-    description: "Expected SHA256 checksum of the binary for independent trust verification (optional)"
+    description: "Expected SHA256 checksum of the binary (optional). The binary is always checked against SHA256SUMS.txt of its release; this pins it independently of the release"
     required: false
     default: ""
   pr-number:
@@ -97,9 +97,10 @@ runs:
       shell: bash
       env:
         GLEON_VERSION: ${{ inputs.version }}
-        GITHUB_TOKEN: ${{ inputs.github-token }}
         CHECKSUM: ${{ inputs.checksum }}
+        ASSET_NAME: gleon-${{ steps.resolve.outputs.target }}
         BIN_PATH: "${{ steps.resolve.outputs.setup_dir }}/${{ steps.resolve.outputs.bin_name }}"
+        SUMS_PATH: "${{ steps.resolve.outputs.setup_dir }}/SHA256SUMS.txt"
       run: |
         VERSION="$GLEON_VERSION"
         if [ "$VERSION" = "latest" ] || [ -z "$VERSION" ]; then
@@ -111,49 +112,62 @@ runs:
           BASE_URL="https://github.com/gleon-rs/gleon/releases/download/${VERSION}"
         fi
 
-        ASSET_NAME="gleon-${{ steps.resolve.outputs.target }}"
-        SETUP_DIR="${{ steps.resolve.outputs.setup_dir }}"
-        BIN_PATH="${SETUP_DIR}/${{ steps.resolve.outputs.bin_name }}"
-
         echo "Downloading ${BASE_URL}/${ASSET_NAME}..."
 
-        CURL_ARGS=("-fsSL")
-        if [ -n "$GITHUB_TOKEN" ]; then
-          CURL_ARGS+=("-H" "Authorization: token $GITHUB_TOKEN")
-        fi
+        # Release assets of a public repository need no token; a token of the caller's repository
+        # could even be refused there. A dropped connection is retried.
+        CURL_ARGS=("-fsSL" "--retry" "3" "--retry-all-errors")
 
         curl "${CURL_ARGS[@]}" "${BASE_URL}/${ASSET_NAME}" -o "$BIN_PATH"
+        if ! curl "${CURL_ARGS[@]}" "${BASE_URL}/SHA256SUMS.txt" -o "$SUMS_PATH"; then
+          echo "::error::the release at ${BASE_URL} has no SHA256SUMS.txt: use a newer version"
+          exit 1
+        fi
 
+        # The binary must match the checksum list of its release (an immutable release keeps both
+        # as they were published), and the `checksum` input when it is given.
         node -e "
         const fs = require('fs');
         const crypto = require('crypto');
-
-        const binPath = process.env.BIN_PATH;
-        let expected = process.env.CHECKSUM ? process.env.CHECKSUM.trim() : '';
-
-        if (!expected) {
-          console.log('No SHA256 checksum provided, skipping checksum verification.');
-          process.exit(0);
-        }
-
-        const colonIdx = expected.indexOf(':');
-        if (colonIdx !== -1) {
-          expected = expected.substring(colonIdx + 1);
-        }
-
-        const actual = crypto.createHash('sha256').update(fs.readFileSync(binPath)).digest('hex');
-
-        if (expected.toLowerCase() !== actual.toLowerCase()) {
-          console.error(\`SHA256 mismatch! Expected: \${expected}, Got: \${actual}\`);
+        const asset = process.env.ASSET_NAME;
+        const actual = crypto.createHash('sha256').update(fs.readFileSync(process.env.BIN_PATH)).digest('hex');
+        const listed = fs.readFileSync(process.env.SUMS_PATH, 'utf8').split(/\r?\n/)
+          .map((line) => line.match(/^([0-9a-fA-F]{64}) [ *](.+)/))
+          .find((match) => match && match[2] === asset);
+        if (!listed) {
+          console.error('::error::' + asset + ' is not listed in SHA256SUMS.txt of the release');
           process.exit(1);
         }
+        if (listed[1].toLowerCase() !== actual) {
+          console.error('::error::SHA256 mismatch for ' + asset + ': SHA256SUMS.txt lists ' + listed[1] + ', the download is ' + actual);
+          process.exit(1);
+        }
+        const expected = (process.env.CHECKSUM || '').trim().replace(/^sha256:\s*/i, '').toLowerCase();
+        if (expected) {
+          if (expected !== actual) {
+            console.error('::error::SHA256 mismatch for ' + asset + ': the checksum input is ' + expected + ', the download is ' + actual);
+            process.exit(1);
+          }
+        }
+        console.log(asset + ': SHA256 ' + actual + ', as SHA256SUMS.txt lists' + (expected ? ' and the checksum input names' : ''));
         "
 
     - name: Add gleon Binary to PATH
       shell: bash
+      env:
+        SETUP_DIR: ${{ steps.resolve.outputs.setup_dir }}
+        BIN_NAME: ${{ steps.resolve.outputs.bin_name }}
       run: |
-        chmod +x "${{ steps.resolve.outputs.setup_dir }}/${{ steps.resolve.outputs.bin_name }}"
-        echo "${{ steps.resolve.outputs.setup_dir }}" >> $GITHUB_PATH
+        chmod +x "$SETUP_DIR/$BIN_NAME"
+        if ! "$SETUP_DIR/$BIN_NAME" --version; then
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "::error::gleon does not run on this runner: the Linux binary needs the glibc of Ubuntu 26.04 or newer (runs-on: ubuntu-26.04)"
+          else
+            echo "::error::gleon does not run on this runner"
+          fi
+          exit 1
+        fi
+        echo "$SETUP_DIR" >> "$GITHUB_PATH"
 
     # `args` and `test-command`, each whitespace-separated or a JSON array of strings, as
     # NUL-separated files the later steps read into bash arrays (no word splitting or pattern
@@ -251,6 +265,7 @@ runs:
       shell: bash
       env:
         GLEON_LICENSE_KEY: ${{ inputs.license-key }}
+        GLEON_STRICT: ${{ inputs.strict }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
       run: |
         cd "$GLEON_WORKING_DIRECTORY"
@@ -297,6 +312,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        GLEON_LICENSE_KEY: ${{ inputs.license-key }}
+        GLEON_STRICT: ${{ inputs.strict }}
         GLEON_HTML_ARTIFACT_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         PR_NUMBER: ${{ inputs.pr-number }}
         GLEON_WORKING_DIRECTORY: ${{ inputs.working-directory }}
@@ -313,7 +330,7 @@ runs:
           tail -n 30 "$VERIFY_LOG" 2>/dev/null || echo "(no output recorded)"
           echo "::endgroup::"
           {
-            echo "### ⚠️ Gleon Visual Regression Failed"
+            echo "### ⚠️ gleon: visual regression failed"
             echo "This run recorded no case reports: the tests failed before comparing, or no screenshot matched a rule. See the end of the run's output in the [job log](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
           } > gleon-report.md
         fi

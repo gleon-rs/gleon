@@ -102,7 +102,9 @@ async fn run_report_inner(
                 .unwrap_or_else(|| std::path::Path::new(""));
             ReportGenerator::generate_html(&cases, report_dir)
                 .with_context(|| "Failed to generate HTML report")?
-                .unwrap_or_else(|| "<html><body>All tests passed!</body></html>".to_string())
+                .unwrap_or_else(|| {
+                    "<html><body>gleon: all visual tests passed</body></html>".to_string()
+                })
         }
         // JUnit XML strictly conforms to the standard CI runner schema (Jenkins, GitLab CI,
         // GitHub Actions test-reporters), omitting non-standard visual image links.

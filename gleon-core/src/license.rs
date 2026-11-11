@@ -15,10 +15,12 @@ const OFFICIAL_PUBLIC_KEYS: &[(u8, [u8; 32])] = &[(
     ],
 )];
 
-const OFFICIAL_SECRET_HASH: [u8; 32] = [
-    0xa4, 0x9c, 0x93, 0x96, 0x4b, 0x0c, 0x70, 0x7c, 0x82, 0x8a, 0xa3, 0xf4, 0x09, 0x11, 0xb8, 0xf5,
-    0x17, 0x99, 0xcc, 0xd9, 0x91, 0x80, 0x30, 0xa4, 0xb3, 0x7e, 0x23, 0xb0, 0x0c, 0x93, 0xe6, 0xfc,
-];
+/// Where commercial licenses are offered.
+const PRICING_URL: &str = "https://gleon.rs/#pricing";
+/// The official releases of the CLI.
+const RELEASES_URL: &str = "https://github.com/gleon-rs/gleon/releases";
+/// The first and last line of a notice, so it stands out in a CI log.
+const RULE: &str = "====================================================";
 
 #[cfg(not(test))]
 /// Get the public key for a given kid.
@@ -60,7 +62,7 @@ pub struct LicensePayload {
     pub repo_pattern: String,
     /// Unix timestamp (seconds) after which the license is no longer valid without grace period.
     pub expires_at: u64,
-    /// Unique identifier for this license, used for tracking/revocation.
+    /// Unique identifier of this license.
     pub license_id: String,
 }
 
@@ -266,20 +268,15 @@ pub fn identify_context(env_provider: &dyn crate::env::EnvProvider) -> Execution
 /// Entry point for license verification.
 pub struct LicenseGate;
 
-pub(crate) fn is_official_secret(secret: &str) -> bool {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(secret.as_bytes());
-    digest.as_slice() == OFFICIAL_SECRET_HASH
-}
-
 impl LicenseGate {
     /// Verifies the license/compliance status for the current process environment.
+    ///
+    /// Whether this is an official build is decided when it is compiled (`build.rs` sets the
+    /// `gleon_official` cfg), so nothing of that check is part of the binary.
     pub fn verify(env_provider: &dyn crate::env::EnvProvider) -> LicenseStatus {
-        let is_official = option_env!("GLEON_OFFICIAL_SECRET").is_some_and(is_official_secret);
         let build_timestamp_str = option_env!("GLEON_BUILD_TIMESTAMP").unwrap_or("0");
         let build_timestamp: u64 = build_timestamp_str.trim().parse().unwrap_or(0);
-
-        Self::verify_internal(env_provider, is_official, build_timestamp)
+        Self::verify_internal(env_provider, cfg!(gleon_official), build_timestamp)
     }
 
     fn verify_internal(
@@ -455,10 +452,6 @@ impl LicenseGate {
         context: &ExecutionContext,
         now: u64,
     ) -> Result<LicenseValidity, LicenseError> {
-        if payload.v != 1 {
-            return Err(LicenseError::UnsupportedVersion(payload.v));
-        }
-
         let repo_to_check = match context {
             ExecutionContext::GitHubActions { repo, .. } => Some(repo),
             ExecutionContext::GenericCI { repo } => {
@@ -484,11 +477,19 @@ impl LicenseGate {
             }
         }
 
-        let fourteen_days = 14 * 24 * 60 * 60;
+        let day = 24 * 60 * 60;
         if now > payload.expires_at {
-            if now <= payload.expires_at.saturating_add(fourteen_days) {
+            let grace_ends = payload.expires_at.saturating_add(14 * day);
+            if now <= grace_ends {
+                let expired = match (now - payload.expires_at) / day {
+                    0 => "less than a day ago".to_owned(),
+                    days => format!("{days} day(s) ago"),
+                };
                 return Ok(LicenseValidity::GracePeriod {
-                    reason: "License expired within the last 14 days (grace period)".to_string(),
+                    reason: format!(
+                        "it expired {expired} and stops working in {} day(s)",
+                        (grace_ends - now).div_ceil(day)
+                    ),
                 });
             }
             return Err(LicenseError::Expired);
@@ -581,78 +582,97 @@ pub fn enforce_policy(
     strict_mode: bool,
     env_provider: &dyn crate::env::EnvProvider,
 ) -> PolicyDecision {
+    let in_github = env_provider.has_var("GITHUB_ACTIONS");
     match status {
         LicenseStatus::Valid | LicenseStatus::PublicOrGrantedUse => PolicyDecision {
             action: EnforcementAction::Allow,
             message: Vec::new(),
             gha_annotation: None,
         },
-        LicenseStatus::GracePeriod { reason } => {
-            let message = vec![
-                "====================================================".to_string(),
-                "[GLEON COMPLIANCE NOTICE] License is in 14-day grace period.".to_string(),
-                format!("Reason: {reason}"),
-                "Please renew your commercial license at https://gleon.rs".to_string(),
-                "====================================================".to_string(),
-            ];
-            let gha_annotation = env_provider.has_var("GITHUB_ACTIONS").then(|| {
-                format!("::warning title=Gleon Compliance::License in grace period ({reason}).")
-            });
-            PolicyDecision {
-                action: EnforcementAction::Warn,
-                message,
-                gha_annotation,
-            }
-        }
+        LicenseStatus::GracePeriod { reason } => PolicyDecision {
+            action: EnforcementAction::Warn,
+            message: framed(vec![
+                format!("[gleon license] The license key has expired: {reason}."),
+                format!("Renew the license: {PRICING_URL}"),
+            ]),
+            gha_annotation: in_github.then(|| {
+                format!("::warning title=gleon license::The license key has expired: {reason}.")
+            }),
+        },
         LicenseStatus::UnlicensedSoft { reason } => {
-            let message = vec![
-                "====================================================".to_string(),
-                "[GLEON COMPLIANCE NOTICE] Unlicensed production use detected.".to_string(),
+            let mut lines = vec![
+                "[gleon license] This CI run has no valid license key (GLEON_LICENSE_KEY)."
+                    .to_owned(),
                 format!("Reason: {reason}"),
-                "This may fall outside the BSL Additional Use Grant.".to_string(),
-                "Get a commercial license at https://gleon.rs".to_string(),
-                "====================================================".to_string(),
+                format!(
+                    "gleon is free for all users until December 31, 2026. After that, commercial CI/CD use needs a commercial license: {PRICING_URL}"
+                ),
             ];
-            let gha_annotation = env_provider.has_var("GITHUB_ACTIONS").then(|| {
-                if strict_mode {
-                    format!("::error title=Gleon Compliance::Unlicensed usage detected ({reason}).")
-                } else {
-                    format!(
-                        "::warning title=Gleon Compliance::Unlicensed usage detected ({reason})."
-                    )
-                }
-            });
+            if strict_mode {
+                lines.push(
+                    "--strict (GLEON_STRICT) is set, so gleon stops here with exit code 42."
+                        .to_owned(),
+                );
+            }
             PolicyDecision {
                 action: if strict_mode {
                     EnforcementAction::Block
                 } else {
                     EnforcementAction::Warn
                 },
-                message,
-                gha_annotation,
+                message: framed(lines),
+                gha_annotation: in_github.then(|| {
+                    if strict_mode {
+                        format!(
+                            "::error title=gleon license::This CI run has no valid license key ({reason}). --strict stops gleon with exit code 42."
+                        )
+                    } else {
+                        format!(
+                            "::warning title=gleon license::This CI run has no valid license key ({reason}). gleon is free for all users until December 31, 2026."
+                        )
+                    }
+                }),
             }
         }
-        LicenseStatus::UnofficialBuildInPrivateCI { reason }
-        | LicenseStatus::ExpiredUnlicensedBinary { reason } => {
-            let message = vec![
-                "====================================================".to_string(),
-                "[GLEON COMPLIANCE ERROR] Execution blocked.".to_string(),
-                "Self-compiled or expired official binaries (>3 months) cannot run in unlicensed private CI."
-                    .to_string(),
-                format!("Reason: {}", reason),
-                "Get a valid commercial license at https://gleon.rs".to_string(),
-                "====================================================".to_string(),
-            ];
-            let gha_annotation = env_provider.has_var("GITHUB_ACTIONS").then(|| {
-                "::error title=Gleon Compliance::Execution blocked. Self-compiled or expired official binaries cannot run in unlicensed private CI."
-                    .to_string()
-            });
-            PolicyDecision {
-                action: EnforcementAction::Block,
-                message,
-                gha_annotation,
-            }
-        }
+        LicenseStatus::UnofficialBuildInPrivateCI { reason } => blocked(
+            "This gleon binary is not an official release",
+            &reason,
+            in_github,
+        ),
+        LicenseStatus::ExpiredUnlicensedBinary { reason } => blocked(
+            "This official release of gleon is more than 90 days old",
+            &reason,
+            in_github,
+        ),
+    }
+}
+
+/// `lines` between two [`RULE`]s.
+fn framed(lines: Vec<String>) -> Vec<String> {
+    std::iter::once(RULE.to_owned())
+        .chain(lines)
+        .chain(std::iter::once(RULE.to_owned()))
+        .collect()
+}
+
+/// The decision for a binary that cannot run in private CI without a key: `binary` says why.
+fn blocked(binary: &str, reason: &str, in_github: bool) -> PolicyDecision {
+    let advice = format!(
+        "Without a key, private CI needs an official release less than 90 days old: {RELEASES_URL}"
+    );
+    PolicyDecision {
+        action: EnforcementAction::Block,
+        gha_annotation: in_github.then(|| {
+            format!(
+                "::error title=gleon license::{binary}, and this CI run has no valid license key. {advice}"
+            )
+        }),
+        message: framed(vec![
+            "[gleon license] gleon stops here with exit code 42.".to_owned(),
+            format!("{binary}, and this CI run has no valid license key (GLEON_LICENSE_KEY)."),
+            format!("Reason: {reason}"),
+            advice,
+        ]),
     }
 }
 
@@ -995,7 +1015,60 @@ mod tests {
             repo: "foo/bar".to_string(),
         };
         let res = LicenseGate::verify_key(&token, &ctx, now).unwrap();
-        assert!(matches!(res, LicenseValidity::GracePeriod { .. }));
+        assert_eq!(
+            res,
+            LicenseValidity::GracePeriod {
+                reason: "it expired 5 day(s) ago and stops working in 9 day(s)".to_string()
+            }
+        );
+        // Part of a day left counts as a day.
+        let res = LicenseGate::verify_key(&token, &ctx, now + 3600).unwrap();
+        assert_eq!(
+            res,
+            LicenseValidity::GracePeriod {
+                reason: "it expired 5 day(s) ago and stops working in 9 day(s)".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_verify_key_grace_period_bounds() {
+        let day = 24 * 60 * 60;
+        let expires_at = 20 * day;
+        let token = generate_test_license("foo/*", expires_at);
+        let ctx = ExecutionContext::GenericCI {
+            repo: "foo/bar".to_string(),
+        };
+        let at = |now: u64| LicenseGate::verify_key(&token, &ctx, now).ok();
+        let grace = |reason: &str| {
+            Some(LicenseValidity::GracePeriod {
+                reason: reason.to_owned(),
+            })
+        };
+        assert_eq!(
+            at(expires_at + 1),
+            grace("it expired less than a day ago and stops working in 14 day(s)")
+        );
+        assert_eq!(
+            at(expires_at + day - 1),
+            grace("it expired less than a day ago and stops working in 14 day(s)")
+        );
+        assert_eq!(
+            at(expires_at + day),
+            grace("it expired 1 day(s) ago and stops working in 13 day(s)")
+        );
+        assert_eq!(
+            at(expires_at + 14 * day),
+            grace("it expired 14 day(s) ago and stops working in 0 day(s)")
+        );
+        assert!(matches!(
+            LicenseGate::verify_key(&token, &ctx, expires_at),
+            Ok(LicenseValidity::Valid)
+        ));
+        assert!(matches!(
+            LicenseGate::verify_key(&token, &ctx, expires_at + 14 * day + 1),
+            Err(LicenseError::Expired)
+        ));
     }
 
     #[test]
@@ -1126,9 +1199,20 @@ mod tests {
         );
         assert_eq!(soft_warn.action, EnforcementAction::Warn);
         assert!(soft_warn.message.iter().any(|l| l.contains("soft test")));
+        assert!(
+            soft_warn
+                .message
+                .iter()
+                .any(|l| l.contains("free for all users until December 31, 2026"))
+        );
+        assert!(!soft_warn.message.iter().any(|l| l.contains("exit code 42")));
+        assert_eq!(soft_warn.message.first().map(String::as_str), Some(RULE));
+        assert_eq!(soft_warn.message.last().map(String::as_str), Some(RULE));
         assert_eq!(
             soft_warn.gha_annotation.as_deref(),
-            Some("::warning title=Gleon Compliance::Unlicensed usage detected (soft test).")
+            Some(
+                "::warning title=gleon license::This CI run has no valid license key (soft test). gleon is free for all users until December 31, 2026."
+            )
         );
 
         let soft_block = enforce_policy(
@@ -1139,9 +1223,17 @@ mod tests {
             &env,
         );
         assert_eq!(soft_block.action, EnforcementAction::Block);
+        assert!(
+            soft_block
+                .message
+                .iter()
+                .any(|l| l.contains("exit code 42"))
+        );
         assert_eq!(
             soft_block.gha_annotation.as_deref(),
-            Some("::error title=Gleon Compliance::Unlicensed usage detected (strict test).")
+            Some(
+                "::error title=gleon license::This CI run has no valid license key (strict test). --strict stops gleon with exit code 42."
+            )
         );
 
         let unofficial = enforce_policy(
@@ -1152,18 +1244,38 @@ mod tests {
             &env,
         );
         assert_eq!(unofficial.action, EnforcementAction::Block);
-        assert!(unofficial.gha_annotation.is_some());
-
+        assert!(
+            unofficial
+                .message
+                .iter()
+                .any(|l| l.contains("not an official release"))
+        );
+        assert!(
+            unofficial
+                .message
+                .iter()
+                .any(|l| l == "Reason: test reason")
+        );
         assert_eq!(
-            enforce_policy(
-                LicenseStatus::ExpiredUnlicensedBinary {
-                    reason: "test reason".to_string()
-                },
-                false,
-                &env
+            unofficial.gha_annotation.as_deref(),
+            Some(
+                "::error title=gleon license::This gleon binary is not an official release, and this CI run has no valid license key. Without a key, private CI needs an official release less than 90 days old: https://github.com/gleon-rs/gleon/releases"
             )
-            .action,
-            EnforcementAction::Block
+        );
+
+        let expired = enforce_policy(
+            LicenseStatus::ExpiredUnlicensedBinary {
+                reason: "test reason".to_string(),
+            },
+            false,
+            &env,
+        );
+        assert_eq!(expired.action, EnforcementAction::Block);
+        assert!(
+            expired
+                .message
+                .iter()
+                .any(|l| l.contains("more than 90 days old"))
         );
 
         // Non-GitHub environment: no annotation, but still a printable message.
@@ -1359,11 +1471,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_official_secret() {
-        assert!(!is_official_secret("wrong_secret"));
-    }
-
-    #[test]
     fn test_verify_internal_with_valid_and_grace_period_license() {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         PUBLIC_KEYS
@@ -1434,7 +1541,7 @@ mod tests {
         );
         assert_eq!(
             decision_gha.gha_annotation.as_deref(),
-            Some("::warning title=Gleon Compliance::License in grace period (expired recently).")
+            Some("::warning title=gleon license::The license key has expired: expired recently.")
         );
 
         let env_non_gha = MockEnv {
@@ -1473,12 +1580,6 @@ mod tests {
         let token = generate_license_token(255, &payload, &signing_key).unwrap();
         let err = LicenseGate::verify_key(&token, &ExecutionContext::LocalDev, 0).unwrap_err();
         assert!(matches!(err, LicenseError::UnsupportedVersion(2)));
-
-        let res = LicenseGate::verify_parsed_payload(&payload, &ExecutionContext::LocalDev, 0);
-        assert!(matches!(
-            res.unwrap_err(),
-            LicenseError::UnsupportedVersion(2)
-        ));
     }
 
     #[test]

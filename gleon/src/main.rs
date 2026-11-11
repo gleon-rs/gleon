@@ -4,7 +4,7 @@ use std::path::Path;
 
 use cli::{Cli, Commands};
 use gleon_core::env::EnvProvider;
-use tracing::info;
+use tracing::debug;
 
 mod cli;
 mod exit_code;
@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(log_level)
         .init();
 
-    info!("gleon CLI starting up...");
+    debug!("gleon {} starting", env!("CARGO_PKG_VERSION"));
 
     let current_dir = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to determine current directory: {e}"))?;
@@ -47,9 +47,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let env = gleon_core::env::MergedEnv::new(dotenv);
 
-    // Run License/Compliance Check
+    // The license check runs before every command.
     let license_status = gleon_core::license::LicenseGate::verify(&env);
-    let decision = gleon_core::license::enforce_policy(license_status, cli.strict, &env);
+    let strict = cli.strict || gleon_core::env::is_flag_on(&env, "GLEON_STRICT");
+    let decision = gleon_core::license::enforce_policy(license_status, strict, &env);
     for line in &decision.message {
         eprintln!("{line}");
     }
@@ -57,13 +58,12 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("{annotation}");
     }
     if decision.action == gleon_core::license::EnforcementAction::Block {
-        std::process::exit(42);
+        std::process::exit(exit_code::ExitCode::LicenseBlocked.into());
     }
 
-    // Any error still bubbling here means a command couldn't even start (e.g. context
-    // resolution failed) — every command that *did* start reports its own failures via
-    // `commands::report_failure`, so this is the one remaining spot that needs to log+exit
-    // consistently with those.
+    // An error here means the command could not start (e.g. its context could not be resolved);
+    // a command that started reports its own failures through `commands::report_failure`, and
+    // this one is reported the same way.
     let exit_code = match run(&cli, &current_dir, &env).await {
         Ok(code) => code,
         Err(e) => i32::from(commands::report_failure("Context resolution failed", &*e)),
@@ -73,6 +73,9 @@ async fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// The variable that does what `--require-storage` of `pull` and `push` does.
+const REQUIRE_STORAGE_ENV: &str = "GLEON_REQUIRE_STORAGE";
 
 fn get_storage_config(env: &dyn EnvProvider) -> Option<gleon_core::storage::StorageConfig> {
     gleon_core::storage::StorageConfig::from_env(env)
@@ -161,7 +164,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
                 storage.as_ref(),
                 *all_platforms,
                 platform_filter(cli, &ctx)?.as_deref(),
-                *require_storage,
+                *require_storage || gleon_core::env::is_flag_on(env, REQUIRE_STORAGE_ENV),
             )
             .await
         }
@@ -176,7 +179,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
                 storage.as_ref(),
                 *all_platforms,
                 platform_filter(cli, &ctx)?.as_deref(),
-                *require_storage,
+                *require_storage || gleon_core::env::is_flag_on(env, REQUIRE_STORAGE_ENV),
             )
             .await
         }

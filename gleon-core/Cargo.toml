@@ -44,7 +44,9 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
-
+[build-dependencies]
+# `build.rs` checks the secret of official builds, so the binary never holds it.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
