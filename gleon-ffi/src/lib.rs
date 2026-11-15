@@ -740,7 +740,11 @@ mod tests {
         "{name}_gleonDiff.png",
     ];
 
+    /// The text of `slice`, which comes from a summary whose `texts` are not freed yet.
     fn text(slice: GleonSlice) -> String {
+        // SAFETY: `ptr` is never null and, while the owning `GleonTexts` lives (every caller
+        // reads before `gleon_texts_free`), points to `len` initialized bytes; an empty slice
+        // dangles, which `from_raw_parts` allows for `len` 0.
         let bytes = unsafe { std::slice::from_raw_parts(slice.ptr.as_ptr(), slice.len) };
         String::from_utf8(bytes.to_vec()).unwrap()
     }
@@ -1384,8 +1388,13 @@ mod tests {
     }
 
     /// The value of type `T` at byte `offset` of `summary`, read the way a C caller reads it.
+    /// Callers pass the `offset_of!` of a field (or of a `GleonSlice` field inside one) whose
+    /// type has the size and validity of `T`.
     fn field<T>(summary: &GleonSummary, offset: usize) -> T {
         let base = (&raw const *summary).cast::<u8>();
+        // SAFETY: per the callers, `offset..offset + size_of::<T>()` lies inside `summary` and
+        // holds an initialized field valid as `T` (`u8` codes, pointers, `usize`), never padding;
+        // read unaligned, so the offset's alignment does not matter.
         unsafe { base.add(offset).cast::<T>().read_unaligned() }
     }
 
@@ -1400,6 +1409,8 @@ mod tests {
             let ptr = field::<*const u8>(summary, offset + offset_of!(GleonSlice, ptr));
             let len = field::<usize>(summary, offset + offset_of!(GleonSlice, len));
             assert!(!ptr.is_null(), "a text is never null, also when empty");
+            // SAFETY: non-null (asserted) and, while `summary` holds its `texts`, a readable
+            // range of `len` initialized bytes; a dangling pointer only with `len` 0.
             unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
         })
     }
