@@ -69,8 +69,10 @@ reviews:
         Permissive (MIT OR Apache-2.0) crates shared with the gleon Flutter package through
         gleon-ffi. They must not depend on BUSL crates (gleon-core, gleon). Any change to the
         gleon-ffi C contract (signatures, packed string order, flags, `GleonCall`, `GleonSummary`,
-        verdict and error codes) must bump `ABI_VERSION` and the layout assertions next to the
-        structs (the Flutter package mirrors them as Dart `Struct`s). Verdict 0 stays an error, so
+        `GleonSlice`, verdict and error codes) must bump `ABI_VERSION` and update the layout
+        assertions next to the structs and the `const _` signature checks below the exports (the
+        Flutter package mirrors them as Dart `Struct`s and `@Native`s). Exports are plain
+        `extern "C"` (no FFI framework); keep `#![deny(improper_ctypes_definitions)]`. Verdict 0 stays an error, so
         an unwritten summary is never a pass; the summary is written to the caller's buffer, never
         returned by value (dart-lang/sdk#64368).
         Changes to `gleon-model` types must regenerate `gleon-model/schema/*.json` (`case.v5`,
