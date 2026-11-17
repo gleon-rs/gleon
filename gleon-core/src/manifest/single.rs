@@ -137,26 +137,13 @@ impl SingleTestManifest {
             )));
         }
 
-        if width > MAX_DIMENSION || height > MAX_DIMENSION {
+        if !gleon_engine::decode::fits_budget(width, height) {
             return Err(ManifestError::Validation(format!(
-                "Image dimensions {width}x{height} exceed the maximum allowed {MAX_DIMENSION}x{MAX_DIMENSION}"
+                "Image dimensions {width}x{height} exceed the decoding budget ({MAX_DIMENSION} \
+                 pixels per side, {MAX_PIXELS} pixels in all)"
             )));
         }
-
-        let total_pixels = u64::from(width) * u64::from(height);
-        if total_pixels > MAX_PIXELS {
-            return Err(ManifestError::Validation(format!(
-                "Total pixel count {total_pixels} ({width}x{height}) exceeds maximum allowed budget {MAX_PIXELS}"
-            )));
-        }
-
         Ok(())
-    }
-
-    fn make_limited_reader(
-        bytes: &[u8],
-    ) -> Result<image::ImageReader<std::io::Cursor<&[u8]>>, ManifestError> {
-        gleon_engine::decode::limited_reader(bytes).map_err(ManifestError::StdIo)
     }
 
     /// Safely validates image dimensions from raw bytes before fully decoding the image, and
@@ -168,7 +155,8 @@ impl SingleTestManifest {
     /// if the image header cannot be read, or [`ManifestError::Validation`] if the declared
     /// dimensions fail [`Self::validate_dimensions`].
     pub fn validate_image_bytes(bytes: &[u8]) -> Result<(u32, u32), ManifestError> {
-        Self::make_limited_reader(bytes)
+        gleon_engine::decode::limited_reader(bytes)
+            .map_err(ManifestError::StdIo)
             .and_then(|reader| reader.into_dimensions().map_err(ManifestError::Image))
             .and_then(|(width, height)| {
                 Self::validate_dimensions(width, height).map(|()| (width, height))
@@ -181,7 +169,8 @@ impl SingleTestManifest {
     /// # Errors
     /// Returns [`ManifestError::Image`] if the image cannot be decoded.
     pub fn decode_validated(bytes: &[u8]) -> Result<image::DynamicImage, ManifestError> {
-        Self::make_limited_reader(bytes)
+        gleon_engine::decode::limited_reader(bytes)
+            .map_err(ManifestError::StdIo)
             .and_then(|reader| reader.decode().map_err(ManifestError::Image))
     }
 

@@ -6,17 +6,17 @@
 //! `.gitignore`/scaffold file management) to the helpers here, wrapping [`CoreError`] via
 //! `#[error(transparent)] Core(#[from] CoreError)`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gleon_engine::phash::compute_phash;
 use gleon_model::{
     case::{CaseErrorKind, Sha256Hex},
     compare,
+    fs::Durability,
     tolerance::Tolerance,
 };
 
 use crate::{
-    config::ConfigError,
     context::{ContextError, ResolvedContext},
     manifest::{ImageHash, ManifestError, SingleTestManifest, WorkspaceIndex},
     paths::GleonPaths,
@@ -34,10 +34,6 @@ pub enum CoreError {
     /// Error resolving context.
     #[error("Context resolution error: {0}")]
     Context(#[from] ContextError),
-
-    /// Error loading configuration.
-    #[error("Config error: {0}")]
-    Config(#[from] ConfigError),
 
     /// Error scanning files.
     #[error("Scanner error: {0}")]
@@ -70,15 +66,6 @@ pub enum CoreError {
          set the GLEON_STORAGE_URL secret)"
     )]
     StorageRequired,
-}
-
-impl From<crate::io::IoError> for CoreError {
-    fn from(err: crate::io::IoError) -> Self {
-        match err {
-            crate::io::IoError::Io(e) => Self::Io(e),
-            crate::io::IoError::JsonParse(e) => Self::Io(std::io::Error::other(e)),
-        }
-    }
 }
 
 /// Ensures the workspace rooted at `base_dir` has been initialized (`.gleon/` exists),
@@ -165,25 +152,6 @@ pub fn load_merged_index_with_fallback(
     Ok(workspace_index)
 }
 
-/// The manifests directory of the platform `platform_filter` names, always one entry of
-/// `manifests_root`.
-///
-/// For `lint_workspace_manifests` and `scan_conflicts`: the key as
-/// [`gleon_model::platform::validate_key`] normalizes it (`MacOS` as `macos`), like
-/// `gleon pull --platform`.
-///
-/// # Errors
-/// Returns `Err(platform_filter)` (the original string, unchanged) if it is no platform key, so
-/// callers can wrap it in their own `InvalidPlatformFilter` error variant.
-pub fn platform_filter_dir<'a>(
-    manifests_root: &Path,
-    platform_filter: &'a str,
-) -> Result<PathBuf, &'a str> {
-    gleon_model::platform::validate_key(platform_filter)
-        .map(|key| manifests_root.join(key.as_ref()))
-        .map_err(|_| platform_filter)
-}
-
 /// What a tracked screenshot is compared with, decided from its manifest and the local blob
 /// before any decoding ([`baseline_of`]): one decision for `gleon diff` and `gleon status`.
 #[derive(Debug, PartialEq, Eq)]
@@ -215,9 +183,10 @@ pub enum Baseline {
 /// The [`Baseline`] of the screenshot `candidate` (PNG bytes, `candidate_sha256` their SHA-256)
 /// tracked by `manifest`, whose blob lies under `blobs_root`, compared under `tolerance`.
 ///
-/// Identical bytes pass only as an image that can be compared under `tolerance` at all
-/// ([`compare::check_size`]): one over the SSIM budget is unavailable with the error `compare`
-/// gives where the bytes differ, so it fails on every platform alike.
+/// Identical bytes pass only as an image that can be compared under `tolerance` at all: a
+/// complete PNG ([`gleon_model::origin::is_complete_png`], the rule of the integrations) whose
+/// size fits ([`compare::check_size`]). One over the SSIM budget is unavailable with the error
+/// `compare` gives where the bytes differ, so it fails on every platform alike.
 ///
 /// A blob counts only as a regular file, opened once without following a link
 /// ([`crate::storage::open_regular_file`], like for `gleon push`): a symbolic link or a directory
@@ -232,6 +201,11 @@ pub fn baseline_of(
     blobs_root: &Path,
 ) -> Baseline {
     let identical = |blob_read| match SingleTestManifest::validate_image_bytes(candidate) {
+        // The header alone tells the size; the chunks tell whether the image is all there.
+        Ok(_) if !gleon_model::origin::is_complete_png(candidate) => Baseline::Unavailable {
+            kind: CaseErrorKind::Image,
+            message: "candidate image: not a complete PNG".to_owned(),
+        },
         Ok((width, height)) => match compare::check_size(tolerance, width, height) {
             Ok(()) => Baseline::Identical { blob_read },
             Err(e) => Baseline::Unavailable {
@@ -461,7 +435,7 @@ pub fn append_missing_gitignore_lines(
     }
     buffer.push_str(&to_append);
 
-    crate::io::save_file_atomically(path, buffer.as_bytes())?;
+    gleon_model::fs::write_atomically(path, buffer.as_bytes(), Durability::Durable)?;
 
     Ok(added)
 }
@@ -575,6 +549,20 @@ mod tests {
             ),
             CaseErrorKind::Image,
             "candidate image",
+        );
+        // A PNG cut short has a whole header and the size in it: still never a pass, like in
+        // the integrations.
+        let (truncated, truncated_sha256) = fixture("truncated_100x100.png");
+        assert_unavailable(
+            &baseline_of(
+                &manifest("sha256", truncated_sha256.as_str()),
+                &truncated,
+                &truncated_sha256,
+                &EXACT,
+                blobs.path(),
+            ),
+            CaseErrorKind::Image,
+            "candidate image: not a complete PNG",
         );
 
         // Other bytes: the blob, if it is there.
@@ -795,39 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn test_platform_filter_dir_is_one_entry_named_by_the_key() {
-        let root = Path::new("/w/.gleon/manifests");
-        assert_eq!(
-            platform_filter_dir(root, "macos-aarch64").unwrap(),
-            root.join("macos-aarch64")
-        );
-        assert_eq!(
-            platform_filter_dir(root, "linux-x86_64+chrome+theme=dark").unwrap(),
-            root.join("linux-x86_64+chrome+theme=dark"),
-            "keys with a renderer and labels"
-        );
-        // Normalized like `gleon pull --platform`: the directory is the key's.
-        assert_eq!(
-            platform_filter_dir(root, " MacOS-AArch64 ").unwrap(),
-            root.join("macos-aarch64")
-        );
-    }
-
-    #[test]
-    fn test_platform_filter_dir_rejects_traversal_and_nesting() {
-        let root = Path::new("/w/.gleon/manifests");
-
-        // Multi-segment, parent traversal and absolute paths must never escape the root.
-        for bad in ["macos/aarch64", "../etc", "/etc", ".", "", "a:b", "con"] {
-            assert_eq!(
-                platform_filter_dir(root, bad),
-                Err(bad),
-                "filter {bad:?} must be rejected"
-            );
-        }
-    }
-
-    #[test]
     fn test_index_keys_missing_from_reports_only_absent_keys() {
         let temp = tempdir().unwrap();
         let manifest_dir = temp.path();
@@ -912,18 +867,6 @@ mod tests {
             original,
             "existing .gitignore content must be left untouched"
         );
-    }
-
-    #[test]
-    fn test_core_error_from_io_error() {
-        let io_err = crate::io::IoError::Io(std::io::Error::other("test io"));
-        let core_err: CoreError = io_err.into();
-        assert!(matches!(core_err, CoreError::Io(_)));
-
-        let json_err: serde_json::Error = serde_json::from_str::<String>("invalid").unwrap_err();
-        let io_json_err = crate::io::IoError::JsonParse(json_err);
-        let core_json_err: CoreError = io_json_err.into();
-        assert!(matches!(core_json_err, CoreError::Io(_)));
     }
 
     #[test]

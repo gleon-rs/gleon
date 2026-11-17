@@ -31,4 +31,5 @@ phash = ["dep:hex", "dep:image_hasher"]
 schemars = ["dep:schemars"]
 
 [dev-dependencies]
+crc32fast = { workspace = true }
 serde_yaml = { workspace = true }

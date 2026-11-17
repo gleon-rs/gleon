@@ -7,18 +7,6 @@ use crate::env::EnvProvider;
 /// Errors that can occur during Git operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
-    /// Failed to discover or open Git repository
-    #[error("Failed to discover Git repository: {0}")]
-    Discover(String),
-
-    /// Failed to read Git HEAD reference
-    #[error("Failed to read Git HEAD reference: {0}")]
-    HeadRead(String),
-
-    /// HEAD is detached and no CI environment branch variables are set
-    #[error("HEAD is detached and no CI environment branch variables are set")]
-    DetachedHead,
-
     /// Path is outside the Git repository
     #[error("Path is outside the Git repository: {0}")]
     OutsideRepository(std::path::PathBuf),
@@ -35,56 +23,53 @@ impl GitResolver {
     /// Resolves the branch name of a run (what `gleon dashboard` records it under): the first
     /// one named by `cli_branch`, `GLEON_BRANCH` or the branch variables of CI providers in
     /// `env`, else the HEAD of the repository at `base_dir`. The name is only recorded, so any
-    /// text passes (an empty one names none).
-    ///
-    /// # Errors
-    /// Returns `GitError::Discover` if no Git repository is found, `GitError::HeadRead`
-    /// if HEAD cannot be read, or `GitError::DetachedHead` if HEAD is detached with no CI
-    /// branch variables set.
+    /// text passes (an empty one names none). `None` (with the reason in the debug log) outside a
+    /// repository, for a HEAD that cannot be read, or a detached HEAD.
+    #[must_use]
     pub fn resolve_branch(
         cli_branch: Option<&str>,
         base_dir: &Path,
         env: &dyn EnvProvider,
-    ) -> Result<String, GitError> {
+    ) -> Option<String> {
         let named = |branch: &str| Some(clean_branch_name(branch)).filter(|b| !b.is_empty());
         if let Some(branch) = cli_branch
             .and_then(named)
             .or_else(|| env.get_var("GLEON_BRANCH").as_deref().and_then(named))
             .or_else(|| resolve_ci_branch(env).as_deref().and_then(named))
         {
-            return Ok(branch);
+            return Some(branch);
         }
 
-        match gix::discover(base_dir) {
-            Ok(repo) => {
-                match repo.head_name() {
-                    Ok(Some(head_name)) => Ok(clean_branch_name(&head_name.shorten().to_string())),
-                    Ok(None) => {
-                        // Detached HEAD and no env overrides
-                        Err(GitError::DetachedHead)
-                    }
-                    Err(e) => Err(GitError::HeadRead(e.to_string())),
-                }
+        match gix::discover(base_dir).map(|repo| repo.head_name()) {
+            Ok(Ok(Some(head_name))) => Some(clean_branch_name(&head_name.shorten().to_string())),
+            Ok(Ok(None)) => {
+                tracing::debug!("No Git branch: HEAD is detached and no CI branch is named");
+                None
             }
-            Err(e) => Err(GitError::Discover(format!(
-                "Not a git repository (or no git installed). Please run inside a git repository, or provide the branch manually using the --branch CLI flag or the GLEON_BRANCH environment variable. Underlying error: {e}"
-            ))),
+            Ok(Err(e)) => {
+                tracing::debug!("No Git branch: HEAD cannot be read: {e}");
+                None
+            }
+            Err(e) => {
+                tracing::debug!("No Git branch: no repository (see --branch, GLEON_BRANCH): {e}");
+                None
+            }
         }
     }
 
     /// Gets the repository's full hexadecimal object ID of HEAD (supporting both SHA-1 and SHA-256 widths).
-    ///
-    /// # Errors
-    /// Returns `GitError::Discover` if no Git repository is found, or `GitError::HeadRead`
-    /// if HEAD cannot be read.
-    pub fn get_head_commit_sha(base_dir: &Path) -> Result<String, GitError> {
-        let repo = gix::discover(base_dir).map_err(|e| GitError::Discover(e.to_string()))?;
-
-        let head_commit = repo
-            .head_commit()
-            .map_err(|e| GitError::HeadRead(e.to_string()))?;
-
-        Ok(head_commit.id.to_string())
+    /// `None` (with the reason in the debug log) outside a repository or without a commit.
+    #[must_use]
+    pub fn get_head_commit_sha(base_dir: &Path) -> Option<String> {
+        gix::discover(base_dir)
+            .map_err(|e| e.to_string())
+            .and_then(|repo| {
+                repo.head_commit()
+                    .map(|commit| commit.id.to_string())
+                    .map_err(|e| e.to_string())
+            })
+            .inspect_err(|e| tracing::debug!("No Git commit: {e}"))
+            .ok()
     }
 
     /// Untracks given relative or absolute paths from the Git index (equivalent to `git rm --cached`).
@@ -209,15 +194,11 @@ fn clean_branch_name(name: &str) -> String {
     cleaned.trim().to_string()
 }
 
-fn is_env_truthy(val: Option<&String>) -> bool {
-    val.is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
-}
-
 fn resolve_ci_branch(env: &dyn EnvProvider) -> Option<String> {
     let get_valid = |k: &str| crate::env::get_trimmed_var(env, k);
 
     // 1. GitHub Actions
-    if is_env_truthy(env.get_var("GITHUB_ACTIONS").as_ref())
+    if crate::env::is_ci_marker(env, "GITHUB_ACTIONS")
         && let Some(b) = get_valid("GITHUB_HEAD_REF").or_else(|| get_valid("GITHUB_REF_NAME"))
     {
         return Some(b);
@@ -233,7 +214,7 @@ fn resolve_ci_branch(env: &dyn EnvProvider) -> Option<String> {
     }
 
     // 3. CircleCI
-    if is_env_truthy(env.get_var("CIRCLECI").as_ref())
+    if crate::env::is_ci_marker(env, "CIRCLECI")
         && let Some(b) = get_valid("CIRCLE_BRANCH")
     {
         return Some(b);
@@ -247,14 +228,14 @@ fn resolve_ci_branch(env: &dyn EnvProvider) -> Option<String> {
     }
 
     // 5. Azure DevOps
-    if is_env_truthy(env.get_var("TF_BUILD").as_ref())
+    if crate::env::is_ci_marker(env, "TF_BUILD")
         && let Some(b) = get_valid("BUILD_SOURCEBRANCHNAME")
     {
         return Some(b);
     }
 
     // 6. Travis CI
-    if is_env_truthy(env.get_var("TRAVIS").as_ref())
+    if crate::env::is_ci_marker(env, "TRAVIS")
         && let Some(b) = get_valid("TRAVIS_BRANCH")
     {
         return Some(b);
@@ -268,7 +249,7 @@ fn resolve_ci_branch(env: &dyn EnvProvider) -> Option<String> {
     }
 
     // 8. Bitrise
-    if is_env_truthy(env.get_var("BITRISE_IO").as_ref())
+    if crate::env::is_ci_marker(env, "BITRISE_IO")
         && let Some(b) = get_valid("BITRISE_GIT_BRANCH")
     {
         return Some(b);
@@ -426,7 +407,7 @@ mod tests {
             vars: HashMap::new(),
         };
         let result = GitResolver::resolve_branch(None, dir.path(), &env);
-        assert!(matches!(result, Err(GitError::DetachedHead)));
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -436,7 +417,7 @@ mod tests {
             vars: HashMap::new(),
         };
         let result = GitResolver::resolve_branch(None, dir.path(), &env);
-        assert!(matches!(result, Err(GitError::Discover(_))));
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -463,7 +444,7 @@ mod tests {
         );
         let env = MockEnv { vars };
         let result = GitResolver::resolve_branch(None, dir.path(), &env);
-        assert!(matches!(result, Err(GitError::Discover(_))));
+        assert_eq!(result, None);
     }
 
     /// The branch is only recorded (`gleon dashboard`): a name Git would refuse passes as given,
@@ -489,21 +470,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_env_truthy() {
-        assert!(is_env_truthy(Some(&"true".to_string())));
-        assert!(is_env_truthy(Some(&"True".to_string())));
-        assert!(is_env_truthy(Some(&"TRUE".to_string())));
-        assert!(is_env_truthy(Some(&"1".to_string())));
-        assert!(!is_env_truthy(Some(&"false".to_string())));
-        assert!(!is_env_truthy(Some(&"0".to_string())));
-        assert!(!is_env_truthy(None));
-    }
-
-    #[test]
     fn test_get_head_commit_sha_no_git() {
         let dir = tempdir().unwrap();
         let result = GitResolver::get_head_commit_sha(dir.path());
-        assert!(matches!(result, Err(GitError::Discover(_))));
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -612,7 +582,7 @@ mod tests {
             vars: HashMap::new(),
         };
         let result = GitResolver::resolve_branch(None, dir.path(), &env);
-        assert!(result.is_err());
+        assert!(result.is_none());
     }
 
     #[test]

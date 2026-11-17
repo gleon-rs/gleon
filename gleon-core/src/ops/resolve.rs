@@ -2,12 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
+use gleon_model::platform::PlatformKey;
 use thiserror::Error;
 
 use crate::{
     io::{IoError, save_json_atomically},
     manifest::{ConflictManifest, SingleTestManifest, parse_conflict_manifest},
-    ops::{common::platform_filter_dir, sync::read_manifests_root},
+    ops::sync::read_manifests_root,
     paths::GleonPaths,
 };
 
@@ -17,10 +18,6 @@ pub enum ResolveError {
     /// Target manifest directory was not found.
     #[error("Manifest directory does not exist at {0}")]
     ManifestDirNotFound(PathBuf),
-
-    /// A platform filter that is no platform key.
-    #[error("Invalid platform filter '{0}': must be a platform key")]
-    InvalidPlatformFilter(String),
 
     /// Standard I/O error.
     #[error("IO error: {0}")]
@@ -54,18 +51,16 @@ pub struct ConflictedManifestItem {
 /// is skipped with a warning.
 ///
 /// # Errors
-/// Returns [`ResolveError::InvalidPlatformFilter`] for a filter that is no platform key,
-/// [`ResolveError::ManifestDirNotFound`] if the directory to scan is missing, or
+/// Returns [`ResolveError::ManifestDirNotFound`] if the directory to scan is missing, or
 /// [`ResolveError::Io`] if `.gleon/manifests/` or a manifest file cannot be read.
 pub fn scan_conflicts(
     base_dir: &Path,
-    platform_filter: Option<&str>,
+    platform_filter: Option<&PlatformKey>,
 ) -> Result<Vec<ConflictedManifestItem>, ResolveError> {
     let manifests_root = GleonPaths::new(base_dir).manifests_root();
 
-    let search_dirs = if let Some(filter) = platform_filter {
-        let search_dir = platform_filter_dir(&manifests_root, filter)
-            .map_err(|p| ResolveError::InvalidPlatformFilter(p.to_string()))?;
+    let search_dirs = if let Some(key) = platform_filter {
+        let search_dir = manifests_root.join(key);
         match std::fs::metadata(&search_dir) {
             Ok(_) => vec![search_dir],
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -264,32 +259,12 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_conflicts_platform_filter_validation() {
+    fn test_scan_conflicts_platform_filter() {
         let temp = tempdir().unwrap();
+        let key = |key: &str| PlatformKey::parse(key).unwrap();
 
-        // 1. Traversal filter
-        let err_traversal = scan_conflicts(temp.path(), Some("../../etc"));
-        assert!(matches!(
-            err_traversal,
-            Err(ResolveError::InvalidPlatformFilter(_))
-        ));
-
-        // 2. Absolute filter
-        let err_abs = scan_conflicts(temp.path(), Some("/tmp"));
-        assert!(matches!(
-            err_abs,
-            Err(ResolveError::InvalidPlatformFilter(_))
-        ));
-
-        // 3. Multi-segment filter
-        let err_multi = scan_conflicts(temp.path(), Some("macos/aarch64"));
-        assert!(matches!(
-            err_multi,
-            Err(ResolveError::InvalidPlatformFilter(_))
-        ));
-
-        // A valid filter of a platform with no manifests directory.
-        let err_missing = scan_conflicts(temp.path(), Some("linux-x86_64"));
+        // A filter of a platform with no manifests directory.
+        let err_missing = scan_conflicts(temp.path(), Some(&key("linux-x86_64")));
         assert!(matches!(
             err_missing,
             Err(ResolveError::ManifestDirNotFound(_))
@@ -298,14 +273,14 @@ mod tests {
         let manifests = temp.path().join(".gleon").join("manifests");
         std::fs::create_dir_all(manifests.parent().unwrap()).unwrap();
         std::fs::write(&manifests, "").unwrap();
-        let err_unreadable = scan_conflicts(temp.path(), Some("linux-x86_64"));
+        let err_unreadable = scan_conflicts(temp.path(), Some(&key("linux-x86_64")));
         assert!(
             matches!(err_unreadable, Err(ResolveError::Io(_))),
             "{err_unreadable:?}"
         );
         std::fs::remove_file(&manifests).unwrap();
 
-        // 4. Positive valid single platform filter case
+        // The manifests of the filter's platform.
         let manifests_dir = temp
             .path()
             .join(".gleon")
@@ -316,7 +291,7 @@ mod tests {
         let conflicted = include_str!("../../tests/fixtures/conflict_2way.json");
         std::fs::write(manifests_dir.join("login.json"), conflicted).unwrap();
 
-        let conflicts = scan_conflicts(temp.path(), Some("macos-aarch64")).unwrap();
+        let conflicts = scan_conflicts(temp.path(), Some(&key("macos-aarch64"))).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].test_path, "auth/login");
         assert_eq!(conflicts[0].platform, "macos-aarch64");

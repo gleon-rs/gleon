@@ -474,28 +474,6 @@ impl Default for MetricsConfig {
     }
 }
 
-impl MetricsConfig {
-    /// Applies the [`METRICS_ENV`] override (`env_value` is its raw value, `None` when unset).
-    ///
-    /// # Errors
-    /// Returns [`ConfigError::InvalidEnvFlag`] as [`Self::env_override`] does.
-    pub fn effective(self, env_value: Option<&str>) -> Result<Self, ConfigError> {
-        Ok(Self {
-            enabled: Self::env_override(env_value)?.unwrap_or(self.enabled),
-            ..self
-        })
-    }
-
-    /// The value of [`METRICS_ENV`] ([`env_flag`]): `None` when unset or empty, else whether it
-    /// turns metrics on.
-    ///
-    /// # Errors
-    /// Returns [`ConfigError::InvalidEnvFlag`] as [`env_flag`] does.
-    pub fn env_override(env_value: Option<&str>) -> Result<Option<bool>, ConfigError> {
-        env_flag(METRICS_ENV, env_value)
-    }
-}
-
 const fn default_true() -> bool {
     true
 }
@@ -1200,7 +1178,8 @@ mod tests {
         let generated_yaml = serde_yaml::to_string(&config).unwrap();
 
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture_path = manifest_dir.join("tests/fixtures/default_config.yaml");
+        // The config the tests of the CLI start from (one copy for both crates).
+        let fixture_path = manifest_dir.join("../gleon-core/tests/fixtures/config/default.yaml");
         let expected_yaml = std::fs::read_to_string(fixture_path).unwrap();
 
         assert_eq!(generated_yaml.trim(), expected_yaml.trim());
@@ -2196,33 +2175,20 @@ artifacts: .gleon/runs/ram
     }
 
     #[test]
-    fn test_metrics_env_override() {
-        let yaml_off = MetricsConfig::default();
-        let on = MetricsConfig {
-            enabled: true,
-            console: false,
-        };
-        assert_eq!(yaml_off.effective(None).unwrap(), yaml_off);
-        assert_eq!(yaml_off.effective(Some("  ")).unwrap(), yaml_off);
-        assert!(yaml_off.effective(Some("1")).unwrap().enabled);
-        assert!(yaml_off.effective(Some("TRUE")).unwrap().enabled);
-        assert_eq!(
-            on.effective(Some("0")).unwrap(),
-            MetricsConfig {
-                enabled: false,
-                console: false
-            }
-        );
-        assert!(!on.effective(Some("false")).unwrap().enabled);
+    fn test_env_flags() {
         for (value, expected) in [
             (None, None),
             (Some(""), None),
+            (Some("  "), None),
+            (Some("1"), Some(true)),
             (Some(" 1 "), Some(true)),
+            (Some("TRUE"), Some(true)),
+            (Some("0"), Some(false)),
             (Some("False"), Some(false)),
         ] {
-            assert_eq!(MetricsConfig::env_override(value).unwrap(), expected);
+            assert_eq!(env_flag(METRICS_ENV, value).unwrap(), expected, "{value:?}");
         }
-        let err = on.effective(Some(" yes ")).unwrap_err();
+        let err = env_flag(METRICS_ENV, Some(" yes ")).unwrap_err();
         assert!(matches!(
             &err,
             ConfigError::InvalidEnvFlag { name: "GLEON_METRICS", value } if value == "yes"

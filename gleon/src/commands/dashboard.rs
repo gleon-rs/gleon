@@ -11,7 +11,7 @@ use gleon_core::{
 };
 
 use crate::{
-    commands::{RunSource, load_cases, report_failure},
+    commands::{RunSource, load_cases},
     exit_code::ExitCode,
 };
 
@@ -27,11 +27,11 @@ pub async fn run_dashboard(
     out: Option<&Path>,
     truncate_history: NonZeroUsize,
     push: bool,
-) -> ExitCode {
-    match run_dashboard_inner(ctx, storage_cfg, from, out, truncate_history, push).await {
-        Ok(()) => ExitCode::Success,
-        Err(e) => report_failure("Error compiling dashboard", &*e),
-    }
+) -> Result<ExitCode> {
+    run_dashboard_inner(ctx, storage_cfg, from, out, truncate_history, push)
+        .await
+        .map(|()| ExitCode::Success)
+        .context("Error compiling dashboard")
 }
 
 async fn run_dashboard_inner(
@@ -99,6 +99,7 @@ mod tests {
     use gleon_core::context::ContextOptions;
 
     use super::*;
+    use crate::commands::exit_code;
 
     const KEEP: NonZeroUsize = NonZeroUsize::new(200).unwrap();
 
@@ -119,8 +120,8 @@ mod tests {
     async fn test_run_dashboard_uninitialized() {
         let temp = tempfile::tempdir().unwrap();
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
-        let exit_code = run_dashboard(&ctx, None, None, None, KEEP, false).await;
-        assert_eq!(exit_code, ExitCode::Failure);
+        let code = exit_code(run_dashboard(&ctx, None, None, None, KEEP, false).await);
+        assert_eq!(code, ExitCode::Failure);
     }
 
     #[tokio::test]
@@ -129,14 +130,14 @@ mod tests {
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
         gleon_core::ops::init_workspace(&ctx, None).unwrap();
         assert_eq!(
-            run_dashboard(&ctx, None, None, None, KEEP, false).await,
+            exit_code(run_dashboard(&ctx, None, None, None, KEEP, false).await),
             ExitCode::Failure,
             "no case reports yet"
         );
 
         record_flutter_run(temp.path());
         assert_eq!(
-            run_dashboard(&ctx, None, None, None, KEEP, false).await,
+            exit_code(run_dashboard(&ctx, None, None, None, KEEP, false).await),
             ExitCode::Success
         );
         assert!(temp.path().join(".gleon/dashboard.html").is_file());
@@ -144,12 +145,12 @@ mod tests {
         // A copy of the run, read as it is.
         let copy = temp.path().join(".gleon/runs/latest");
         assert_eq!(
-            run_dashboard(&ctx, None, Some(&copy), None, KEEP, false).await,
+            exit_code(run_dashboard(&ctx, None, Some(&copy), None, KEEP, false).await),
             ExitCode::Success
         );
         let missing = temp.path().join("does_not_exist/latest");
         assert_eq!(
-            run_dashboard(&ctx, None, Some(&missing), None, KEEP, false).await,
+            exit_code(run_dashboard(&ctx, None, Some(&missing), None, KEEP, false).await),
             ExitCode::Failure
         );
     }

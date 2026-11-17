@@ -20,6 +20,7 @@ gleon-engine = { path = "../gleon-engine" }
 gleon-model = { path = "../gleon-model" }
 
 [dev-dependencies]
+crc32fast = { workspace = true }
 image = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

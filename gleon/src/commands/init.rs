@@ -2,27 +2,30 @@
 
 use std::path::Path;
 
+use anyhow::Context as _;
 use gleon_core::{context::ResolvedContext, ops::Template};
 use tracing::{info, warn};
 
-use crate::{commands::report_failure, exit_code::ExitCode};
+use crate::exit_code::ExitCode;
 
 /// Runs the `gleon init` subcommand in `dir` with the config of `template` (`None`: by the
 /// `pubspec.yaml`).
 ///
 /// Like `git init`, it initializes `dir` itself: the workspace `ctx` found above it (if any) is
 /// only what a new workspace nests in, and a nested workspace is named as such.
-pub fn run_init(ctx: &ResolvedContext, dir: &Path, template: Option<Template>) -> ExitCode {
+pub fn run_init(
+    ctx: &ResolvedContext,
+    dir: &Path,
+    template: Option<Template>,
+) -> anyhow::Result<ExitCode> {
     let target = gleon_core::paths::resolved(dir);
     let enclosing =
         (ctx.config.is_some() && ctx.base_dir != target && target.starts_with(&ctx.base_dir))
             .then(|| ctx.base_dir.clone());
     let mut ctx = ctx.clone();
     ctx.base_dir = target;
-    let res = match gleon_core::ops::init_workspace(&ctx, template) {
-        Ok(res) => res,
-        Err(e) => return report_failure("Error initializing workspace", &e),
-    };
+    let res =
+        gleon_core::ops::init_workspace(&ctx, template).context("Error initializing workspace")?;
 
     info!("Initialized gleon workspace at {}", res.gleon_dir.display());
     let config = res.config_path.display();
@@ -50,5 +53,5 @@ pub fn run_init(ctx: &ResolvedContext, dir: &Path, template: Option<Template>) -
             ctx.base_dir.display()
         );
     }
-    ExitCode::Success
+    Ok(ExitCode::Success)
 }

@@ -2,26 +2,28 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context as _;
 use gleon_core::{context::ResolvedContext, ops::ListedCases};
 use tracing::{info, warn};
 
-use crate::{
-    commands::{env_run_id, report_failure},
-    exit_code::ExitCode,
-};
+use crate::{commands::env_run_id, exit_code::ExitCode};
 
 /// Runs the `approve` command on the runs `from` (copies of `.gleon/runs/latest`, read as they
 /// are), or on the latest run of the workspace, picked with `GLEON_RUN_ID`.
-pub fn run_approve(ctx: &ResolvedContext, paths: &[PathBuf], from: &[PathBuf]) -> ExitCode {
+pub fn run_approve(
+    ctx: &ResolvedContext,
+    paths: &[PathBuf],
+    from: &[PathBuf],
+) -> anyhow::Result<ExitCode> {
     // The caller's run id names a run of this workspace, never a copied one.
-    let run_id = match from.is_empty().then(env_run_id).transpose() {
-        Ok(run_id) => run_id.flatten(),
-        Err(e) => return report_failure("Error approving screenshots", &*e),
-    };
-    let res = match gleon_core::ops::approve_workspace(ctx, paths, from, run_id.as_ref()) {
-        Ok(res) => res,
-        Err(e) => return report_failure("Error approving screenshots", &e),
-    };
+    let run_id = from
+        .is_empty()
+        .then(env_run_id)
+        .transpose()
+        .context("Error approving screenshots")?
+        .flatten();
+    let res = gleon_core::ops::approve_workspace(ctx, paths, from, run_id.as_ref())
+        .context("Error approving screenshots")?;
     for warning in &res.warnings {
         warn!("{warning}");
     }
@@ -30,5 +32,5 @@ pub fn run_approve(ctx: &ResolvedContext, paths: &[PathBuf], from: &[PathBuf]) -
         res.approved.len(),
         ListedCases(&res.approved)
     );
-    ExitCode::Success
+    Ok(ExitCode::Success)
 }

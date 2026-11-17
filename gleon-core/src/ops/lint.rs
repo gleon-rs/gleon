@@ -5,12 +5,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use gleon_model::platform::PlatformKey;
 use thiserror::Error;
 
 use crate::{
     context::ResolvedContext,
     manifest::{index::manifest_names, single::SingleTestManifest},
-    ops::{common::platform_filter_dir, sync::read_manifests_root},
+    ops::sync::read_manifests_root,
     paths::GleonPaths,
 };
 
@@ -20,10 +21,6 @@ pub enum LintError {
     /// The target manifests directory was not found.
     #[error("Manifest directory does not exist at {0}")]
     ManifestDirNotFound(PathBuf),
-
-    /// A platform filter that is no platform key.
-    #[error("Invalid platform filter '{0}': must be a platform key")]
-    InvalidPlatformFilter(String),
 
     /// Standard IO error.
     #[error("IO error: {0}")]
@@ -65,16 +62,14 @@ pub struct LintReport {
 /// Returns [`LintError`] if reading directory fails or if the target directory is missing.
 pub fn lint_workspace_manifests(
     ctx: &ResolvedContext,
-    platform_filter: Option<&str>,
+    platform_filter: Option<&PlatformKey>,
 ) -> Result<LintReport, LintError> {
     crate::ops::common::refuse_goldens(ctx)?;
     let base_dir = ctx.base_dir.as_path();
     let manifests_root = GleonPaths::new(base_dir).manifests_root();
 
-    let (search_dirs, foreign_entries) = if let Some(filter) = platform_filter {
-        let search_dir = platform_filter_dir(&manifests_root, filter)
-            .map_err(|p| LintError::InvalidPlatformFilter(p.to_string()))?;
-        (vec![search_dir], Vec::new())
+    let (search_dirs, foreign_entries) = if let Some(key) = platform_filter {
+        (vec![manifests_root.join(key)], Vec::new())
     } else {
         let root = read_manifests_root(&manifests_root).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -399,39 +394,9 @@ mod tests {
         let err = lint_workspace_manifests(&ctx, None);
         assert!(matches!(err, Err(LintError::ManifestDirNotFound(_))));
 
-        // 2. Traversal platform filter
-        let err_traversal = lint_workspace_manifests(&ctx, Some("../../etc"));
-        assert!(matches!(
-            err_traversal,
-            Err(LintError::InvalidPlatformFilter(_))
-        ));
-
-        // 3. Absolute path filter
-        let err_abs = lint_workspace_manifests(&ctx, Some("/tmp"));
-        assert!(matches!(err_abs, Err(LintError::InvalidPlatformFilter(_))));
-
-        // 4. Multi-segment platform filter
-        let err_multi = lint_workspace_manifests(&ctx, Some("linux/x86_64"));
-        assert!(matches!(
-            err_multi,
-            Err(LintError::InvalidPlatformFilter(_))
-        ));
-
-        // 5. Invalid characters in normal platform filter
-        let err_invalid_chars = lint_workspace_manifests(&ctx, Some("linux:x86_64"));
-        assert!(matches!(
-            err_invalid_chars,
-            Err(LintError::InvalidPlatformFilter(_))
-        ));
-        // A key in another case names the directory of its lowercase key, as `gleon pull` does.
-        let err_upper = lint_workspace_manifests(&ctx, Some("LINUX"));
-        assert!(
-            matches!(&err_upper, Err(LintError::ManifestDirNotFound(dir)) if dir.ends_with("linux")),
-            "{err_upper:?}"
-        );
-
-        // 6. Valid platform filter on missing directory
-        let err_valid = lint_workspace_manifests(&ctx, Some("linux-x86_64"));
+        // 2. A platform filter on a missing directory
+        let linux = PlatformKey::parse("linux-x86_64").unwrap();
+        let err_valid = lint_workspace_manifests(&ctx, Some(&linux));
         assert!(matches!(err_valid, Err(LintError::ManifestDirNotFound(_))));
     }
 
@@ -540,9 +505,6 @@ mod tests {
     fn test_lint_error_display() {
         let err_missing = LintError::ManifestDirNotFound(PathBuf::from("/missing"));
         assert!(err_missing.to_string().contains("does not exist"));
-
-        let err_filter = LintError::InvalidPlatformFilter("bad/filter".to_string());
-        assert!(err_filter.to_string().contains("Invalid platform filter"));
 
         let io_err = std::io::Error::other("test error");
         let err_io = LintError::Io(io_err);

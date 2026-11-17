@@ -182,18 +182,8 @@ impl ResolvedContext {
             &resolved_base_dir,
             env_provider,
         )
-        .unwrap_or_else(|e| {
-            tracing::debug!("No Git branch ({e}): the run is recorded under 'main'");
-            "main".to_string()
-        });
-
-        let commit_sha = match crate::git::GitResolver::get_head_commit_sha(&resolved_base_dir) {
-            Ok(sha) => Some(sha),
-            Err(e) => {
-                tracing::debug!("Git commit SHA resolution skipped or failed: {e}");
-                None
-            }
-        };
+        .unwrap_or_else(|| "main".to_owned());
+        let commit_sha = crate::git::GitResolver::get_head_commit_sha(&resolved_base_dir);
 
         Ok(Self {
             config,

@@ -9,7 +9,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, BufWriter, Write as _},
-    path::{Component, Path, PathBuf},
+    path::{Component, Components, Path, PathBuf},
 };
 
 /// `path` absolute with symbolic links resolved.
@@ -52,6 +52,20 @@ pub fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
     cfg!(windows) && eq_ignoring_case(a.as_os_str(), b.as_os_str())
 }
 
+/// The components of `path` after those of `dir`, when `path` is `dir` or lies inside it
+/// (compared component by component, [`same_component`]); `None` otherwise.
+#[must_use]
+pub fn strip_dir<'a>(path: &'a Path, dir: &Path) -> Option<Components<'a>> {
+    let mut inside = path.components();
+    dir.components()
+        .all(|own| {
+            inside
+                .next()
+                .is_some_and(|other| same_component(own, other))
+        })
+        .then_some(inside)
+}
+
 /// Whether `a` and `b` are equal but for case: ASCII without allocating, other characters by
 /// their lowercase.
 fn eq_ignoring_case(a: &OsStr, b: &OsStr) -> bool {
@@ -88,6 +102,17 @@ pub fn write_atomically(path: &Path, bytes: &[u8], durability: Durability) -> io
     write_atomically_with(path, durability, |writer| writer.write_all(bytes))
 }
 
+/// Writes `bytes` to `path` atomically in place of whatever entry is there, creating missing
+/// parent directories: a symbolic link is replaced, never written through.
+///
+/// See [`replace_atomically_with`].
+///
+/// # Errors
+/// Returns the I/O error of creating, writing or renaming the file.
+pub fn replace_atomically(path: &Path, bytes: &[u8], durability: Durability) -> io::Result<()> {
+    replace_atomically_with(path, durability, |writer| writer.write_all(bytes))
+}
+
 /// Removes the file at `path`; a file that is not there is fine.
 ///
 /// # Errors
@@ -99,8 +124,11 @@ pub fn remove_if_exists(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Writes `bytes` to `path` atomically ([`write_atomically`]), or without bytes removes `path`
-/// ([`remove_if_exists`]), so an image of an earlier outcome never passes for this one's.
+/// Writes `bytes` to `path` in place of whatever is there, or without bytes removes `path`.
+///
+/// For output a run recreates: the write is [`replace_atomically`] (a symbolic link at `path` is
+/// replaced, so the bytes never land at its target), the removal [`remove_if_exists`], so an
+/// image of an earlier outcome never passes for this one's.
 ///
 /// # Errors
 /// Returns the I/O error of the write or the removal.
@@ -111,14 +139,15 @@ pub fn write_or_remove(
 ) -> io::Result<()> {
     bytes.map_or_else(
         || remove_if_exists(path),
-        |bytes| write_atomically(path, bytes, durability),
+        |bytes| replace_atomically(path, bytes, durability),
     )
 }
 
 /// Writes the output of `write` to `path` atomically, creating missing parent directories.
 ///
-/// A symbolic link at `path` is written through (its target is replaced, the link stays; a
-/// cache that never trusts a link uses [`replace_atomically_with`]). On
+/// A symbolic link at `path` is written through (its target is replaced, the link stays): for
+/// committed files that may be links (goldens). Caches and the output of runs never trust a link
+/// and use [`replace_atomically_with`]. On
 /// Unix the file gets the permission bits of the file it replaces, or `0644` for a new one (a
 /// temporary file alone would be `0600`, while these files are committed or read by other users).
 /// A failed write removes the temporary file.
@@ -134,8 +163,10 @@ pub fn write_atomically_with(
     persist_with(&resolve_link(path), durability, write)
 }
 
-/// Writes the output of `write` to `path` atomically in place of whatever entry is there,
-/// creating missing parent directories: for caches that never trust a link (blobs).
+/// Writes the output of `write` to `path` atomically in place of whatever entry is there.
+///
+/// Missing parent directories are created. For caches that never trust a link (blobs) and the
+/// output of runs (case reports, failure images).
 ///
 /// Like [`write_atomically_with`], but a symbolic link at `path` is never followed: the rename
 /// replaces the link itself, so the bytes never land at its target, and a reader sees the old

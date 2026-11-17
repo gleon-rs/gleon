@@ -21,7 +21,7 @@ use gleon_core::{
 };
 use tracing::{info, warn};
 
-use crate::commands::{env_run_id, report_failure};
+use crate::commands::env_run_id;
 
 /// The exit code of a command that is not found, as shells give it.
 const COMMAND_NOT_FOUND: i32 = 127;
@@ -49,10 +49,10 @@ pub async fn run_test(
     env: &dyn EnvProvider,
     command: &[String],
     current_dir: &Path,
-) -> i32 {
+) -> Result<i32> {
     run_test_inner(ctx, env, command, current_dir)
         .await
-        .unwrap_or_else(|e| report_failure("Error running the tests", &*e).into())
+        .context("Error running the tests")
 }
 
 async fn run_test_inner(
@@ -633,7 +633,9 @@ mod tests {
         let run_file = temp.path().join(".gleon/runs/latest/run.json");
         gleon_core::ops::init_workspace(&ctx, None).unwrap();
         assert_eq!(
-            run_test(&ctx, &Env, &[], temp.path()).await,
+            run_test(&ctx, &Env, &[], temp.path())
+                .await
+                .unwrap_or_else(|e| crate::commands::report(&e).into()),
             i32::from(ExitCode::Failure)
         );
         assert!(!run_file.exists());

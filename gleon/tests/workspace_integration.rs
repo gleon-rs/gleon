@@ -61,7 +61,7 @@ fn config_in(dir: &Path) {
 fn golden() -> Vec<u8> {
     fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../gleon-ffi/tests/fixtures/counter_initial.png"),
+            .join("../gleon-model/tests/fixtures/flutter/counter_initial.png"),
     )
     .unwrap()
 }

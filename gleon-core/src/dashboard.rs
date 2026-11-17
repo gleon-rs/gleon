@@ -21,7 +21,7 @@ use sha2::Digest as _;
 use tracing::instrument;
 
 use crate::{
-    cases::{Cases, CasesError},
+    cases::Cases,
     context::ResolvedContext,
     paths::GleonPaths,
     storage::{ObjectStoreAdapter, ObjectVersion, StorageConfig, StorageError},
@@ -38,9 +38,9 @@ pub enum DashboardError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// Template rendering error.
-    #[error("Template rendering error: {0}")]
-    Render(#[from] minijinja::Error),
+    /// Template rendering error (it names the template).
+    #[error(transparent)]
+    Render(#[from] crate::report::ReportError),
 
     /// File system I/O error.
     #[error("I/O error: {0}")]
@@ -53,10 +53,6 @@ pub enum DashboardError {
     /// Remote storage was not configured when push was requested.
     #[error("Storage not configured: GLEON_STORAGE_URL is required when --push is enabled")]
     StorageNotConfigured,
-
-    /// The case reports of the run cannot be read.
-    #[error(transparent)]
-    Cases(#[from] CasesError),
 
     /// The platform of a run without case reports (the context's) has no key.
     #[error("the platform of the run has no key: {0}")]
@@ -75,15 +71,6 @@ pub enum DashboardError {
         /// Which history: the local file or the remote object.
         location: String,
     },
-}
-
-impl From<crate::io::IoError> for DashboardError {
-    fn from(err: crate::io::IoError) -> Self {
-        match err {
-            crate::io::IoError::Io(e) => Self::Io(e),
-            crate::io::IoError::JsonParse(e) => Self::Json(e),
-        }
-    }
 }
 
 /// Aggregated summary counters for a test run (the rest of `total` passed).
@@ -446,14 +433,7 @@ impl DashboardCompiler {
             generated_at: Utc::now().to_rfc3339(),
         };
 
-        let template = crate::report::JINJA_ENV
-            .get_template("dashboard.html")
-            .map_err(DashboardError::Render)?;
-
-        let html = template
-            .render(Serde(&view))
-            .map_err(DashboardError::Render)?;
-        Ok(html)
+        Ok(crate::report::render("dashboard.html", Serde(&view))?)
     }
 
     /// High-level executor that synchronizes history, compiles the dashboard, and pushes to storage if requested.
@@ -601,12 +581,19 @@ where
         local_history.merge(history, options.truncate_limit);
 
         // Save local history.json
+        // The history keeps runs no later run brings back: durable; the page is compiled from it.
         let serialized_history = serde_json::to_string_pretty(&local_history)?;
-        crate::io::save_file_atomically(history_path, serialized_history.as_bytes())?;
-
-        // Compile dashboard.html and save locally
+        gleon_model::fs::write_atomically(
+            history_path,
+            serialized_history.as_bytes(),
+            gleon_model::fs::Durability::Durable,
+        )?;
         let html_content = DashboardCompiler::compile_dashboard(&local_history)?;
-        crate::io::save_file_atomically(target_html_path, html_content.as_bytes())?;
+        gleon_model::fs::write_atomically(
+            target_html_path,
+            html_content.as_bytes(),
+            gleon_model::fs::Durability::Atomic,
+        )?;
 
         let Some(ad) = adapter.filter(|_| options.push_to_storage) else {
             return Ok((local_history.runs.len(), false));
@@ -1694,14 +1681,10 @@ mod tests {
         assert!(html.contains("error (image)"));
         assert!(html.contains("Diff pixels: 5"));
 
-        // Test error displays and From implementations
-        let io_err = crate::io::IoError::Io(std::io::Error::other("io err"));
-        let dash_io: DashboardError = io_err.into();
+        // Test error displays
+        let dash_io = DashboardError::Io(std::io::Error::other("io err"));
         assert!(format!("{dash_io}").contains("io err"));
-
-        let parse_err =
-            crate::io::IoError::JsonParse(serde_json::from_str::<String>("bad").unwrap_err());
-        let dash_parse: DashboardError = parse_err.into();
+        let dash_parse = DashboardError::Json(serde_json::from_str::<String>("bad").unwrap_err());
         assert!(format!("{dash_parse}").contains("JSON error"));
 
         let unsupported_err = DashboardError::UnsupportedSchemaVersion {

@@ -39,7 +39,6 @@
 )]
 #![deny(improper_ctypes_definitions)]
 
-mod compare;
 mod error;
 mod golden;
 mod session;
@@ -53,12 +52,12 @@ use std::{
 
 use error::{ErrorKind, Failure};
 use gleon_engine::{
-    Region,
+    Pixels, Region,
     config::{Dimension, Zone},
 };
 use gleon_model::{
     case::RUN_ID_ENV,
-    compare::{Candidate, is_rgba_len},
+    compare::Candidate,
     config::{ARTIFACTS_ENV, METRICS_ENV, REQUIRE_CANONICAL_ENV},
     tolerance::{TextTolerance, Tolerance},
 };
@@ -520,11 +519,12 @@ fn call_candidate<'a>(call: &GleonCall, bytes: &'a [u8]) -> Result<Candidate<'a>
     match call.candidate_format {
         0 => Ok(Candidate::Png(bytes)),
         1 => {
-            if !is_rgba_len(width, height, bytes.len()) {
+            if Pixels::new(bytes, width, height).is_none() {
+                let needs = Pixels::byte_len(width, height)
+                    .map_or_else(|| "more than 2^64".to_owned(), |len| len.to_string());
                 return Err(format!(
-                    "`candidate` has {} bytes, {width}x{height} RGBA needs {}",
-                    bytes.len(),
-                    u64::from(width) * u64::from(height) * 4
+                    "`candidate` has {} bytes, {width}x{height} RGBA needs {needs}",
+                    bytes.len()
                 ));
             }
             Ok(Candidate::Rgba {
@@ -952,6 +952,14 @@ mod tests {
                     ..Call::default()
                 },
                 "`candidate` has 48 bytes, 4x4 RGBA needs 64",
+            ),
+            (
+                Call {
+                    candidate: &pixels,
+                    format: (1, u32::MAX, u32::MAX),
+                    ..Call::default()
+                },
+                "`candidate` has 48 bytes, 4294967295x4294967295 RGBA needs more than 2^64",
             ),
             (
                 Call {
@@ -1495,8 +1503,10 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "touches the file system and runs the engine")]
     fn test_a_workspace_through_the_abi() {
-        const COUNTER_0: &[u8] = include_bytes!("../tests/fixtures/counter_initial.png");
-        const COUNTER_3: &[u8] = include_bytes!("../tests/fixtures/counter_three_taps.png");
+        const COUNTER_0: &[u8] =
+            include_bytes!("../../gleon-model/tests/fixtures/flutter/counter_initial.png");
+        const COUNTER_3: &[u8] =
+            include_bytes!("../../gleon-model/tests/fixtures/flutter/counter_three_taps.png");
         let dir = tempfile::tempdir().unwrap();
         // Without the `\\?\` prefix of Windows, like the session's own paths.
         let root = gleon_model::fs::canonical(dir.path()).unwrap();

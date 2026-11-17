@@ -99,6 +99,24 @@ pub fn report_failure(context: &str, err: &dyn std::error::Error) -> ExitCode {
     ExitCode::Failure
 }
 
+/// The exit code `main` gives a command's `result` ([`report`]): for the tests of the commands.
+#[cfg(test)]
+pub fn exit_code(result: anyhow::Result<ExitCode>) -> ExitCode {
+    result.unwrap_or_else(|e| report(&e))
+}
+
+/// Logs the failure `e` with its whole cause chain under its outermost context
+/// ([`report_failure`]) and returns [`ExitCode::Failure`].
+pub fn report(e: &anyhow::Error) -> ExitCode {
+    e.source().map_or_else(
+        || {
+            tracing::error!("{e}");
+            ExitCode::Failure
+        },
+        |cause| report_failure(&e.to_string(), cause),
+    )
+}
+
 /// The run a command reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunSource {
@@ -410,6 +428,11 @@ mod tests {
     #[test]
     fn test_report_failure_returns_failure_exit_code() {
         assert_eq!(report_failure("ctx", &Cause), ExitCode::Failure);
+        assert_eq!(report(&anyhow::anyhow!("no cause")), ExitCode::Failure);
+        assert_eq!(
+            exit_code(Err(anyhow::Error::new(Cause).context("ctx"))),
+            ExitCode::Failure
+        );
         assert_eq!(i32::from(ExitCode::Failure), 1);
         assert_eq!(i32::from(ExitCode::Success), 0);
     }

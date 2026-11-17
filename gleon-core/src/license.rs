@@ -231,7 +231,7 @@ pub fn identify_context(env_provider: &dyn crate::env::EnvProvider) -> Execution
     ];
 
     // 1. GitHub Actions
-    if get_trimmed_var(env_provider, "GITHUB_ACTIONS").as_deref() == Some("true")
+    if crate::env::is_ci_marker(env_provider, "GITHUB_ACTIONS")
         && let Some(repo) = get_trimmed_var(env_provider, "GITHUB_REPOSITORY")
     {
         let is_private = parse_github_event_payload_is_private(env_provider);
@@ -256,7 +256,7 @@ pub fn identify_context(env_provider: &dyn crate::env::EnvProvider) -> Execution
     if !repo.is_empty()
         || OTHER_CI_MARKER_VARS
             .iter()
-            .any(|var| env_provider.has_var(var))
+            .any(|var| env_provider.get_var(var).is_some())
     {
         return ExecutionContext::GenericCI { repo };
     }
@@ -582,7 +582,7 @@ pub fn enforce_policy(
     strict_mode: bool,
     env_provider: &dyn crate::env::EnvProvider,
 ) -> PolicyDecision {
-    let in_github = env_provider.has_var("GITHUB_ACTIONS");
+    let in_github = crate::env::is_ci_marker(env_provider, "GITHUB_ACTIONS");
     match status {
         LicenseStatus::Valid | LicenseStatus::PublicOrGrantedUse => PolicyDecision {
             action: EnforcementAction::Allow,

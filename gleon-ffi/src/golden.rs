@@ -35,7 +35,6 @@ use gleon_model::{
 };
 
 use crate::{
-    compare::{self, Timed},
     error::{ErrorKind, Failure},
     session::{ArtifactNames, Membership, Plan, Session, Tracking},
     text,
@@ -193,11 +192,15 @@ fn update(
     let path = request.golden_path;
     let current = fs::read(path).ok();
     // Never recorded: every later comparison would fail it.
-    if let Some(error) = size_error(plan, candidate) {
-        let message = error.to_string();
+    let refusal = if gleon_model::origin::is_complete_png(candidate) {
+        size_error(plan, candidate).map(|error| error.to_string())
+    } else {
+        Some(text::INCOMPLETE_CANDIDATE.to_owned())
+    };
+    if let Some(message) = refusal {
         return Call::new(session, request, plan, current.as_deref(), started).error(
             Failure::new(
-                error.kind().into(),
+                ErrorKind::Image,
                 text::cannot_record(request.golden_uri, &message),
             ),
             message,
@@ -243,6 +246,15 @@ fn update(
     }
 }
 
+/// A comparison and the time it took.
+#[derive(Debug)]
+struct Timed {
+    /// What the comparison found, or why the images could not be compared (never a pass).
+    comparison: Result<Comparison, Failure>,
+    /// Time spent decoding, comparing and encoding the diff.
+    native: Duration,
+}
+
 /// What update mode does with an existing golden.
 enum Kept {
     /// Nothing to write: the same image.
@@ -272,7 +284,7 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
             reason.clone(),
         ),
         // The candidate is kept for `gleon approve` (only inside a workspace, so raw pixels are
-        // never encoded for nothing), unless it is no PNG at all.
+        // never encoded for nothing), unless it is no complete PNG.
         Ok(None) => call.finish(
             CaseOutcome::Missing,
             Details {
@@ -280,7 +292,7 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
                     candidate: plan
                         .in_workspace()
                         .and_then(|_| call.candidate_png())
-                        .filter(|png| case::png_size(png).is_some()),
+                        .filter(|png| gleon_model::origin::is_complete_png(png)),
                     ..ArtifactImages::default()
                 },
                 ..Details::default()
@@ -302,28 +314,13 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
                     message,
                 );
             }
-            let clamped = case::png_size(golden).map_or(0, |(width, height)| {
+            let clamped = gleon_model::origin::png_size(golden).map_or(0, |(width, height)| {
                 clamped_zones(&plan.masks, width, height)
             });
             call.finish(CaseOutcome::Identical, Details::default(), String::new)
                 .warn(clamped_masks(request.golden_uri, clamped))
         }
-        Ok(Some(golden)) => {
-            let text = call.text().map(|tolerance| Text {
-                regions: &request.text_regions,
-                tolerance,
-            });
-            judge(
-                &call,
-                compare::compare(
-                    golden,
-                    request.candidate,
-                    &plan.tolerance,
-                    &plan.masks,
-                    text,
-                ),
-            )
-        }
+        Ok(Some(golden)) => judge(&call, call.compare(golden, request.candidate)),
     };
     finished
         .warn(unused_text)
@@ -333,7 +330,7 @@ fn compare(session: &Session, request: &Request<'_>, plan: &Plan, started: Insta
 /// Why no comparison under the tolerance of `plan` could use the PNG `png` (its size read from
 /// the header, [`gleon_model::compare::check_size`]); `None` for one that fits, or no PNG.
 fn size_error(plan: &Plan, png: &[u8]) -> Option<CompareError> {
-    case::png_size(png).and_then(|(width, height)| {
+    gleon_model::origin::png_size(png).and_then(|(width, height)| {
         gleon_model::compare::check_size(&plan.tolerance, width, height).err()
     })
 }
@@ -520,13 +517,15 @@ impl<'a> Call<'a> {
     }
 
     /// Whether the PNG `image` is the image of `golden` (this call's golden), with or without
-    /// its stamp: compared in place.
+    /// its stamp: compared in place. Only a complete PNG is an image: other bytes are never
+    /// identical, however equal, since no comparison could decode them.
     fn is_image(&self, golden: &[u8], image: &[u8]) -> bool {
-        golden == image
-            || self
-                .stamp
-                .as_ref()
-                .is_some_and(|stamp| stamp.is_stripped(golden, image))
+        gleon_model::origin::is_complete_png(image)
+            && (golden == image
+                || self
+                    .stamp
+                    .as_ref()
+                    .is_some_and(|stamp| stamp.is_stripped(golden, image)))
     }
 }
 
@@ -554,6 +553,33 @@ impl Call<'_> {
                 .get()
                 .and_then(Option::as_deref)
                 .map_or_else(|| CandidateImage::raw(width, height), CandidateImage::of),
+        }
+    }
+
+    /// Compares the PNG `golden` with `candidate` under the plan's tolerance and masks and the
+    /// text of the call, exactly like `gleon diff` (`gleon_model::compare::compare`), timed.
+    ///
+    /// The engine runs on the calling thread (`gleon-engine` without its `parallel` feature): the
+    /// test runners of the integrations (`flutter test`, Playwright) parallelize across worker
+    /// processes, each loading its own copy of the library, so a thread pool per process would
+    /// only multiply threads (workers x cores) and add a hand-off per pass.
+    fn compare(&self, golden: &[u8], candidate: Candidate<'_>) -> Timed {
+        let text = self.text().map(|tolerance| Text {
+            regions: &self.request.text_regions,
+            tolerance,
+        });
+        let started = Instant::now();
+        let comparison = gleon_model::compare::compare(
+            golden,
+            candidate,
+            &self.plan.tolerance,
+            &self.plan.masks,
+            text,
+        )
+        .map_err(|error| Failure::new(error.kind().into(), error.to_string()));
+        Timed {
+            comparison,
+            native: started.elapsed(),
         }
     }
 
@@ -621,9 +647,9 @@ impl Call<'_> {
         }
         if self.is_image(golden, candidate) {
             // The same image is written again only to stamp a golden that names no platform
-            // yet (recorded by Flutter, or by the gleon package before 0.5.0) as recorded here:
-            // once per golden, and
-            // never one the workspace excludes or assumes recorded elsewhere.
+            // yet (recorded by Flutter or another tool, or by the gleon Flutter package before
+            // 0.5.0) as recorded here: once per golden, and never one the workspace excludes or
+            // assumes recorded elsewhere.
             let stamps = self.stamp.is_none()
                 && !self.plan.is_excluded()
                 && self.origin.elsewhere().is_none();
@@ -632,17 +658,7 @@ impl Call<'_> {
         if self.origin.elsewhere().is_none() || self.plan.tracking == Tracking::Unknown {
             return Kept::Replaced;
         }
-        let text = self.text().map(|tolerance| Text {
-            regions: &self.request.text_regions,
-            tolerance,
-        });
-        let timed = compare::compare(
-            golden,
-            Candidate::Png(candidate),
-            &self.plan.tolerance,
-            &self.plan.masks,
-            text,
-        );
+        let timed = self.compare(golden, Candidate::Png(candidate));
         if matches!(
             &timed.comparison,
             Ok(Comparison {
@@ -958,8 +974,10 @@ mod tests {
     const RED: Rgba<u8> = Rgba([255, 0, 0, 255]);
     const BLUE: Rgba<u8> = Rgba([0, 0, 255, 255]);
     /// Real `flutter test` renders of the example app (text is Ahem squares).
-    const COUNTER_0: &[u8] = include_bytes!("../tests/fixtures/counter_initial.png");
-    const COUNTER_3: &[u8] = include_bytes!("../tests/fixtures/counter_three_taps.png");
+    const COUNTER_0: &[u8] =
+        include_bytes!("../../gleon-model/tests/fixtures/flutter/counter_initial.png");
+    const COUNTER_3: &[u8] =
+        include_bytes!("../../gleon-model/tests/fixtures/flutter/counter_three_taps.png");
 
     fn png(width: u32, height: u32, dot: bool) -> Vec<u8> {
         let img = image::RgbaImage::from_fn(width, height, |x, y| {
@@ -979,27 +997,13 @@ mod tests {
 
     /// `png` with a `tEXt` chunk after `IHDR`: other bytes, the same pixels.
     fn with_text_chunk(png: &[u8]) -> Vec<u8> {
-        fn crc32(bytes: &[u8]) -> u32 {
-            let mut crc = !0u32;
-            for &byte in bytes {
-                crc ^= u32::from(byte);
-                for _ in 0..8 {
-                    crc = if crc & 1 == 1 {
-                        (crc >> 1) ^ 0xedb8_8320
-                    } else {
-                        crc >> 1
-                    };
-                }
-            }
-            !crc
-        }
         let body = b"tEXtSoftware\0another encoder";
         let mut chunk = u32::try_from(body.len() - 4)
             .unwrap()
             .to_be_bytes()
             .to_vec();
         chunk.extend_from_slice(body);
-        chunk.extend_from_slice(&crc32(body).to_be_bytes());
+        chunk.extend_from_slice(&crc32fast::hash(body).to_be_bytes());
         // Signature (8) + IHDR chunk (4 + 4 + 13 + 4).
         let mut out = png[..33].to_vec();
         out.extend_from_slice(&chunk);
@@ -1213,8 +1217,8 @@ screenshots:
             format!(
                 "Golden \"goldens/a.png\": 6.25% (1 of 16px) differ (gleon exact).\n\
                  Failure feedback can be found at {} (the differences: `a_gleonDiff.png`)\n\
-                 Tip: tolerances per golden and the platform that compares text live in \
-                 .gleon/gleon.yaml, the file of the gleon CLI (see the package README).",
+                 Tip: a tolerance for this golden goes into .gleon/gleon.yaml (see the package \
+                 README).",
                 fixture.failures
             )
         );
@@ -1863,7 +1867,11 @@ screenshots:
             "{}",
             outside.message
         );
-        assert!(outside.message.contains("\nTip: tolerances per golden"));
+        assert!(
+            outside
+                .message
+                .contains("\nTip: a tolerance for this golden")
+        );
     }
 
     /// Without a `fallback_platform` nothing could record a golden again, so update mode writes
@@ -3034,7 +3042,7 @@ metrics:
     /// the verdict is the same on every platform (real fixture).
     #[test]
     fn test_images_over_the_ssim_budget_are_neither_recorded_nor_identical() {
-        let big = include_bytes!("../tests/fixtures/ssim_budget_4097x4096.png");
+        let big = include_bytes!("../../gleon-core/tests/fixtures/ssim_budget_4097x4096.png");
         let ssim = Some(Tolerance::Ssim {
             min_similarity: 0.8,
             color_tolerance: 8.0,
@@ -3075,6 +3083,67 @@ metrics:
         // Exact has no such budget: the same bytes stay identical.
         let exact = fixture.run_with(&session, Mode::Compare, big, None, vec![]);
         assert_eq!(exact.verdict, Verdict::Identical);
+    }
+
+    /// Bytes that are no complete PNG are never identical to themselves, and update mode never
+    /// records them: no comparison could decode such a golden, on any platform. With or without a
+    /// workspace, and for a golden the workspace excludes too.
+    #[test]
+    fn test_bytes_that_are_no_complete_png_are_never_identical_nor_recorded() {
+        let complete = png(4, 4, false);
+        // Cut inside the image data: the header is whole, the end chunk is gone.
+        let truncated = &complete[..complete.len() - 20];
+        for bytes in [&b"not a png"[..], truncated] {
+            for yaml in [None, Some(METRICS), Some(EXCLUDING)] {
+                let fixture = Fixture::new(yaml);
+                let session = fixture.session(None);
+                fs::write(&fixture.golden, bytes).unwrap();
+
+                let compared = fixture.run(&session, Mode::Compare, bytes);
+                assert_eq!(
+                    (compared.verdict, compared.error_kind),
+                    (Verdict::Error, ErrorKind::Image),
+                    "{yaml:?}: {}",
+                    compared.message
+                );
+                assert!(
+                    compared.message.starts_with(
+                        "Golden \"goldens/a.png\": gleon could not compare: golden image"
+                    ),
+                    "{}",
+                    compared.message
+                );
+
+                let refused = fixture.run(&session, Mode::Update, bytes);
+                assert_eq!(
+                    (refused.verdict, refused.error_kind),
+                    (Verdict::Error, ErrorKind::Image),
+                    "{yaml:?}: {}",
+                    refused.message
+                );
+                assert_eq!(
+                    refused.message,
+                    "Golden \"goldens/a.png\": gleon cannot record it: the candidate is not a \
+                     complete PNG."
+                );
+                assert_eq!(
+                    fs::read(&fixture.golden).unwrap(),
+                    bytes,
+                    "the golden stays"
+                );
+            }
+        }
+
+        // Over a valid golden: it stays, and the refusal is recorded.
+        let fixture = Fixture::new(Some(METRICS));
+        let refused = fixture.run(&fixture.session(None), Mode::Update, truncated);
+        assert_eq!(refused.error_kind, ErrorKind::Image);
+        assert_eq!(fs::read(&fixture.golden).unwrap(), complete);
+        let case = fixture.case();
+        assert_eq!(
+            (case.outcome, case.error_kind),
+            (CaseOutcome::Error, Some(CaseErrorKind::Image))
+        );
     }
 
     #[test]

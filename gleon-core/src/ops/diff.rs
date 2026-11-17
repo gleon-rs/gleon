@@ -201,9 +201,10 @@ impl DiffRun<'_> {
                 candidate: Some(&candidate),
                 diff: judged.diff.as_deref(),
             },
-            // Kept for `gleon approve`, unless it is no PNG at all.
+            // Kept for `gleon approve`, unless it is no complete PNG.
             CaseOutcome::Missing => ArtifactImages {
-                candidate: case::png_size(&candidate).map(|_| candidate.as_slice()),
+                candidate: gleon_model::origin::is_complete_png(&candidate)
+                    .then_some(candidate.as_slice()),
                 ..ArtifactImages::default()
             },
             _ => ArtifactImages::default(),
@@ -493,9 +494,7 @@ mod tests {
     use sha2::Digest;
 
     use super::*;
-    use crate::{
-        config::ConfigError, context::ContextError, manifest::ManifestError, scanner::ScannerError,
-    };
+    use crate::{context::ContextError, manifest::ManifestError, scanner::ScannerError};
 
     /// A workspace with one staged 4x4 screenshot `shots/a.png` (exact rule) and its context.
     fn staged_workspace() -> (tempfile::TempDir, ResolvedContext) {
@@ -953,10 +952,6 @@ mod tests {
         })
         .into();
         assert!(err3.to_string().contains("Scanner error"));
-
-        let err4: DiffOpError =
-            CoreError::Config(ConfigError::Validation("bad config".to_string())).into();
-        assert!(err4.to_string().contains("Config error"));
 
         let err5: DiffOpError =
             CoreError::Manifest(ManifestError::Validation("bad manifest".to_string())).into();

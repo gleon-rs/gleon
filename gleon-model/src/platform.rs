@@ -211,17 +211,10 @@ impl PlatformConfig {
     /// # Errors
     /// Returns [`PlatformError`] like [`Self::matches_host`], or if `platform` cannot be read.
     pub fn matches_platform(&self, platform: &Self) -> Result<bool, PlatformError> {
-        let matches = |fields: &PlatformFields| {
-            fields.os.as_deref().map_or(Ok(false), |os| {
-                self.matches(os, fields.arch.as_deref().unwrap_or_default())
-            })
-        };
-        match platform {
-            Self::Opaque(key) => {
-                matches(&PlatformFields::parse_key_value(key).map_err(PlatformError::ParseError)?)
-            }
-            Self::Structured(fields) => matches(fields),
-        }
+        let fields = platform.fields()?;
+        fields.os.as_deref().map_or(Ok(false), |os| {
+            self.matches(os, fields.arch.as_deref().unwrap_or_default())
+        })
     }
 
     /// Checks that this platform names an OS, and an architecture if any, the way a process
@@ -241,17 +234,20 @@ impl PlatformConfig {
 
     /// The OS and architecture (if any) this platform names, under the names a process reports.
     fn host_names(&self) -> Result<(String, Option<String>), PlatformError> {
-        let names = |fields: &PlatformFields| -> Result<(String, Option<String>), PlatformError> {
-            let os = known_name(fields.os.as_deref(), &OS_NAMES)?
-                .ok_or_else(|| PlatformError::UnknownHost("an OS is required".to_owned()))?;
-            let arch = known_name(fields.arch.as_deref(), &ARCH_NAMES)?;
-            Ok((os.into_owned(), arch.map(Cow::into_owned)))
-        };
+        let fields = self.fields()?;
+        let os = known_name(fields.os.as_deref(), &OS_NAMES)?
+            .ok_or_else(|| PlatformError::UnknownHost("an OS is required".to_owned()))?;
+        let arch = known_name(fields.arch.as_deref(), &ARCH_NAMES)?;
+        Ok((os.into_owned(), arch.map(Cow::into_owned)))
+    }
+
+    /// The fields of this platform; an opaque value is read as `key=value` pairs.
+    fn fields(&self) -> Result<Cow<'_, PlatformFields>, PlatformError> {
         match self {
-            Self::Opaque(key) => {
-                names(&PlatformFields::parse_key_value(key).map_err(PlatformError::ParseError)?)
-            }
-            Self::Structured(fields) => names(fields),
+            Self::Opaque(key) => PlatformFields::parse_key_value(key)
+                .map(Cow::Owned)
+                .map_err(PlatformError::ParseError),
+            Self::Structured(fields) => Ok(Cow::Borrowed(fields)),
         }
     }
 

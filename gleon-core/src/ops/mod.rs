@@ -13,7 +13,7 @@ pub mod status;
 pub(crate) mod sync;
 
 pub use approve::{ApproveError, ApproveResult, ApprovedCase, ListedCases, approve_workspace};
-pub use clean::{CleanError, CleanOptions, CleanResult, clean_workspace};
+pub use clean::{CleanOptions, CleanResult, clean_workspace};
 pub use diff::{DiffOpError, DiffReportResult, run_diff};
 pub use init::{InitError, InitResult, Template, init_workspace};
 pub use lint::{LintError, LintReport, lint_workspace_manifests};
@@ -21,4 +21,4 @@ pub use pull::{PullError, PullResult, pull_blobs};
 pub use push::{PushError, PushResult, push_blobs};
 pub use resolve::{ConflictedManifestItem, ResolveError, apply_resolution, scan_conflicts};
 pub use stage::{StageError, StageResult, stage_workspace};
-pub use status::{Explained, StatusError, StatusReport, check_status};
+pub use status::{Explained, StatusReport, check_status};

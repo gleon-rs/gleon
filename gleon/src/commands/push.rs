@@ -1,27 +1,29 @@
 //! Implementation of the `gleon push` subcommand.
 
+use anyhow::Context as _;
 use gleon_core::{context::ResolvedContext, ops::push_blobs, storage::StorageConfig};
+use gleon_model::platform::PlatformKey;
 use tracing::info;
-
-use crate::{commands::report_failure, exit_code::ExitCode};
 
 /// Runs the `gleon push` subcommand; `require_storage` (`--require-storage`) fails instead of
 /// working in local mode without remote storage.
 ///
-/// Returns [`ExitCode::Success`] on success or local mode, or [`ExitCode::Failure`] on error.
+/// # Errors
+/// Returns the error of the push. There is no other failure: local mode and a workspace of
+/// golden files end in success.
 pub async fn run_push(
     ctx: &ResolvedContext,
     storage_cfg: Option<&StorageConfig>,
     all_platforms: bool,
-    platform_override: Option<&str>,
+    platform_override: Option<&PlatformKey>,
     require_storage: bool,
-) -> ExitCode {
-    if let Some(code) = crate::commands::goldens_nothing_to_do(ctx, "push") {
-        return code;
+) -> anyhow::Result<()> {
+    if crate::commands::goldens_nothing_to_do(ctx, "push").is_some() {
+        return Ok(());
     }
     info!("Running blob push...");
 
-    let res = match push_blobs(
+    let res = push_blobs(
         ctx,
         storage_cfg,
         all_platforms,
@@ -29,10 +31,7 @@ pub async fn run_push(
         require_storage,
     )
     .await
-    {
-        Ok(res) => res,
-        Err(e) => return report_failure("Error pushing baseline blobs", &e),
-    };
+    .context("Error pushing baseline blobs")?;
 
     if res.local_mode {
         info!("Operating in local mode. Cloud sync disabled. Please configure storage.");
@@ -49,7 +48,7 @@ pub async fn run_push(
             res.uploaded_blobs, res.skipped_blobs, res.total_manifest_blobs
         );
     }
-    ExitCode::Success
+    Ok(())
 }
 
 #[cfg(all(test, not(miri)))]
@@ -75,27 +74,20 @@ mod tests {
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
 
         // 1. Uninitialized -> Failure
-        let exit_code_uninit = run_push(&ctx, None, false, None, false).await;
-        assert_eq!(exit_code_uninit, ExitCode::Failure);
+        assert!(run_push(&ctx, None, false, None, false).await.is_err());
 
         // 2. Initialized + Local Mode -> Success
         gleon_core::ops::init_workspace(&ctx, None).unwrap();
-        let exit_code_local = run_push(&ctx, None, false, None, false).await;
-        assert_eq!(exit_code_local, ExitCode::Success);
+        run_push(&ctx, None, false, None, false).await.unwrap();
 
         // 3. Initialized + Storage Configured + 0 manifest blobs -> Success
         let cfg = StorageConfig::new("memory://");
-        let exit_code_zero_blobs = run_push(&ctx, Some(&cfg), false, None, false).await;
-        assert_eq!(exit_code_zero_blobs, ExitCode::Success);
+        run_push(&ctx, Some(&cfg), false, None, false)
+            .await
+            .unwrap();
 
         // 4. Storage required: missing -> Failure, configured -> Success
-        assert_eq!(
-            run_push(&ctx, None, false, None, true).await,
-            ExitCode::Failure
-        );
-        assert_eq!(
-            run_push(&ctx, Some(&cfg), false, None, true).await,
-            ExitCode::Success
-        );
+        assert!(run_push(&ctx, None, false, None, true).await.is_err());
+        run_push(&ctx, Some(&cfg), false, None, true).await.unwrap();
     }
 }

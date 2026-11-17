@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "artifacts": {
-      "description": "The images kept for the case: of a failure, or the candidate of a recorded pass against\nanother platform's golden that differs from it.",
+      "description": "The images kept for a failure (a mismatch, a dimension mismatch, a missing golden); absent\nfor a pass and an error.",
       "anyOf": [
         {
           "$ref": "#/$defs/Artifacts"
@@ -139,7 +139,7 @@
       "type": "object",
       "properties": {
         "candidate": {
-          "description": "The candidate (mismatches, dimension mismatches, missing goldens and passes against another\nplatform's golden that differ from it, for `gleon approve`):\n`<artifacts dir>/<platform key>/<name>/candidate.png`.",
+          "description": "The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`):\n`<artifacts dir>/<platform key>/<name>/candidate.png`.",
           "type": [
             "string",
             "null"
@@ -378,7 +378,7 @@
           "pattern": "^(?!\\.\\.?(/|$))[A-Za-z0-9._-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)*$"
         },
         "platform": {
-          "description": "The platform the golden was recorded on, as the gleon chunk of its PNG names it\n([`crate::origin`]); absent for a golden without one (recorded by another tool, or by the\nFlutter package before 0.4.0; then taken as recorded on the `fallback_platform` of the\nworkspace).",
+          "description": "The platform the golden was recorded on, as the gleon chunk of its PNG names it\n([`crate::origin`]); absent for a golden without one (recorded by Flutter or another tool,\nor by the gleon Flutter package before 0.5.0; then taken as recorded on the\n`fallback_platform` of the workspace).",
           "anyOf": [
             {
               "$ref": "#/$defs/PlatformKey"

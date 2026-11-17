@@ -156,7 +156,7 @@ impl WorkspaceIndex {
                 _ => false,
             };
             if !is_same_file {
-                remove_file_ignore_missing(&old_path)?;
+                gleon_model::fs::remove_if_exists(&old_path).map_err(ManifestError::StdIo)?;
             }
         }
 
@@ -186,11 +186,11 @@ impl WorkspaceIndex {
 
         if let Some(old_source) = self.source_paths.remove(canonical_key) {
             let old_path = manifest_file_path(manifest_dir, &old_source);
-            remove_file_ignore_missing(&old_path)?;
+            gleon_model::fs::remove_if_exists(&old_path).map_err(ManifestError::StdIo)?;
         }
 
         let target_path = manifest_file_path(manifest_dir, canonical_key);
-        remove_file_ignore_missing(&target_path)?;
+        gleon_model::fs::remove_if_exists(&target_path).map_err(ManifestError::StdIo)?;
         Ok(self.entries.remove(canonical_key))
     }
 }
@@ -288,15 +288,6 @@ fn manifest_file_path(dir: &Path, key: &str) -> PathBuf {
     dir.join(file_name)
 }
 
-/// Removes the file at `path`, treating it already being absent as success.
-fn remove_file_ignore_missing(path: &Path) -> Result<(), ManifestError> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(ManifestError::StdIo(e)),
-    }
-}
-
 // The loads touch the file system and may run on threads, which Miri does not model.
 #[cfg(all(test, not(miri)))]
 #[allow(
@@ -310,35 +301,9 @@ fn remove_file_ignore_missing(path: &Path) -> Result<(), ManifestError> {
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn test_remove_file_ignore_missing_is_idempotent() {
-        let temp = tempdir().unwrap();
-        let path = temp.path().join("manifest.json");
-        fs::write(&path, b"{}").unwrap();
-
-        // First call removes it, second is a no-op rather than an error.
-        remove_file_ignore_missing(&path).unwrap();
-        assert!(!path.exists());
-        remove_file_ignore_missing(&path).unwrap();
-    }
-
-    #[test]
-    fn test_remove_file_ignore_missing_surfaces_other_errors() {
-        // A directory is not a file: removal must fail loudly instead of being swallowed.
-        let temp = tempdir().unwrap();
-        let dir = temp.path().join("not-a-file");
-        fs::create_dir(&dir).unwrap();
-
-        assert!(matches!(
-            remove_file_ignore_missing(&dir),
-            Err(ManifestError::StdIo(_))
-        ));
-        assert!(dir.exists());
-    }
     use tempfile::tempdir;
 
+    use super::*;
     use crate::manifest::ImageHash;
 
     #[test]

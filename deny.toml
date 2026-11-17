@@ -9,7 +9,12 @@ no-default-features = false
 feature-depth = 1
 
 [advisories]
-ignore = []
+# Unmaintained, without a fix: object_store (also the latest, 0.14.2) needs both crates. Remove
+# these when object_store no longer does; then move off chrono (jiff or time) in one step.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono: object_store needs it, no maintained release" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime: object_store needs it, no maintained release" },
+]
 
 [licenses]
 allow = [

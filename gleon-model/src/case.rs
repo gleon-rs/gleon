@@ -24,7 +24,7 @@ use std::{
     time::Duration,
 };
 
-use gleon_engine::{Measurement, Region, config::Zone};
+use gleon_engine::{Measurement, PixelAnalysis, Region, SsimAnalysis, config::Zone};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -188,37 +188,28 @@ impl Metrics {
         };
         // Every pairing is spelled out, so a new mode cannot silently fall into a wrong arm.
         match (*measurement, *tolerance) {
-            (
-                Measurement::Pixel {
-                    checked_pixels,
-                    diff_count,
-                    tolerated_count,
-                    edge_count,
-                    text: analysis,
-                },
-                Tolerance::Exact {} | Tolerance::Pixel { .. },
-            ) => Some(Self::pixel(
-                PixelCounts {
-                    total: checked_pixels,
-                    diff: diff_count,
-                    tolerated: tolerated_count,
-                    edges: edge_count,
-                },
-                tolerance.max_diff_ratio(),
-                text_metrics(analysis),
-            )),
+            (Measurement::Pixel(analysis), Tolerance::Exact {} | Tolerance::Pixel { .. }) => {
+                Some(Self::pixel(
+                    &analysis,
+                    tolerance.max_diff_ratio(),
+                    text_metrics(analysis.text),
+                ))
+            }
             (
                 Measurement::Ssim {
-                    mean_ssim,
-                    min_ssim,
-                    max_excess,
-                    peak_excess,
-                    changed_pixels,
-                    changed_region,
-                    failing_pixels,
-                    failing_region,
+                    analysis:
+                        SsimAnalysis {
+                            mean_ssim,
+                            min_ssim,
+                            max_excess,
+                            peak_excess,
+                            changed_pixels,
+                            changed_region,
+                            failing_pixels,
+                            failing_region,
+                            ..
+                        },
                     text: analysis,
-                    ..
                 },
                 Tolerance::Ssim {
                     min_similarity,
@@ -244,13 +235,14 @@ impl Metrics {
         }
     }
 
-    fn pixel(counts: PixelCounts, max_diff_ratio: f64, text: Option<TextMetrics>) -> Self {
-        let PixelCounts {
-            total: total_pixels,
-            diff: diff_pixels,
-            tolerated: tolerated_pixels,
-            edges: edge_pixels,
-        } = counts;
+    fn pixel(analysis: &PixelAnalysis, max_diff_ratio: f64, text: Option<TextMetrics>) -> Self {
+        let PixelAnalysis {
+            checked_pixels: total_pixels,
+            diff_pixels,
+            tolerated_pixels,
+            edge_pixels,
+            ..
+        } = *analysis;
         #[expect(
             clippy::cast_precision_loss,
             reason = "pixel counts are far below 2^52, so the f64 conversion is exact"
@@ -270,19 +262,6 @@ impl Metrics {
             text,
         }
     }
-}
-
-/// The pixel counts [`Metrics::Pixel`] is made of.
-#[derive(Debug, Clone, Copy, Default)]
-struct PixelCounts {
-    /// Pixels compared strictly.
-    total: u64,
-    /// Strictly compared pixels that differ beyond the options.
-    diff: u64,
-    /// Differing pixels the channel tolerance or the anti-aliasing detection let pass.
-    tolerated: u64,
-    /// Differing pixels the edge mask hid.
-    edges: u64,
 }
 
 /// A SHA-256 digest as 64 lowercase hex characters.
@@ -425,7 +404,7 @@ impl RegionMetrics {
         text: Option<&TextTolerance>,
     ) -> Vec<Self> {
         let analysis = match measurement {
-            Measurement::Pixel { text, .. } | Measurement::Ssim { text, .. } => text,
+            Measurement::Pixel(PixelAnalysis { text, .. }) | Measurement::Ssim { text, .. } => text,
         };
         let tile = text
             .zip(analysis.and_then(|analysis| analysis.worst_tile))
@@ -433,10 +412,10 @@ impl RegionMetrics {
                 kind: RegionKind::Text,
                 rect: Some(tile.region),
                 metrics: Metrics::pixel(
-                    PixelCounts {
-                        total: tile.pixels,
-                        diff: tile.diff_pixels,
-                        ..PixelCounts::default()
+                    &PixelAnalysis {
+                        checked_pixels: tile.pixels,
+                        diff_pixels: tile.diff_pixels,
+                        ..PixelAnalysis::default()
                     },
                     text.0,
                     None,
@@ -445,8 +424,12 @@ impl RegionMetrics {
         let local = match (*measurement, *tolerance) {
             (
                 Measurement::Ssim {
-                    changed_local,
-                    failing_local,
+                    analysis:
+                        SsimAnalysis {
+                            changed_local,
+                            failing_local,
+                            ..
+                        },
                     ..
                 },
                 Tolerance::Ssim {
@@ -515,9 +498,9 @@ pub struct GoldenImage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
     /// The platform the golden was recorded on, as the gleon chunk of its PNG names it
-    /// ([`crate::origin`]); absent for a golden without one (recorded by another tool, or by the
-    /// Flutter package before 0.4.0; then taken as recorded on the `fallback_platform` of the
-    /// workspace).
+    /// ([`crate::origin`]); absent for a golden without one (recorded by Flutter or another tool,
+    /// or by the gleon Flutter package before 0.5.0; then taken as recorded on the
+    /// `fallback_platform` of the workspace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformKey>,
 }
@@ -544,7 +527,7 @@ impl GoldenImage {
     /// verified).
     #[must_use]
     pub fn hashed(path: String, png: &[u8], sha256: Sha256Hex, blob: Option<ImageHash>) -> Self {
-        let size = png_size(png);
+        let size = crate::origin::png_size(png);
         Self {
             path,
             sha256: Some(sha256),
@@ -582,7 +565,7 @@ impl CandidateImage {
     /// The candidate with the PNG bytes `png`, whose SHA-256 `sha256` the caller already has.
     #[must_use]
     pub fn hashed(png: &[u8], sha256: Sha256Hex) -> Self {
-        let size = png_size(png);
+        let size = crate::origin::png_size(png);
         Self {
             sha256: Some(sha256),
             width: size.map(|(width, _)| width),
@@ -599,21 +582,6 @@ impl CandidateImage {
             height: Some(height),
         }
     }
-}
-
-/// Width and height from a PNG header, without decoding (absent when `bytes` do not start with
-/// one, or the header claims a zero size, which the PNG specification forbids).
-#[must_use]
-pub fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
-    let header = bytes.get(..24)?;
-    if !header.starts_with(SIGNATURE) || &header[12..16] != b"IHDR" {
-        return None;
-    }
-    let read = |at: usize| {
-        u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
-    };
-    Some((read(16), read(20))).filter(|&(width, height)| width > 0 && height > 0)
 }
 
 /// The images of a case, as paths relative to the workspace root (`/`-separated):
@@ -637,8 +605,7 @@ pub struct Artifacts {
         pattern = r"^\.gleon/runs/(latest/artifacts|(?![Ll][Aa][Tt][Ee][Ss][Tt](/|$))(?!\.\.?(/|$))[A-Za-z0-9._-]+(/(?!\.\.?(/|$))[A-Za-z0-9._-]+)*)/[a-z0-9_.-]+([+=][a-z0-9_.-]+)*/(?!\.\.?(/|$))[a-z0-9_.-]+(/(?!\.\.?(/|$))[a-z0-9_.-]+)*/golden\.png$"
     ))]
     pub golden: Option<String>,
-    /// The candidate (mismatches, dimension mismatches, missing goldens and passes against another
-    /// platform's golden that differ from it, for `gleon approve`):
+    /// The candidate (mismatches, dimension mismatches and missing goldens, for `gleon approve`):
     /// `<artifacts dir>/<platform key>/<name>/candidate.png`.
     #[serde(
         default,
@@ -991,8 +958,8 @@ pub struct CaseReport {
     /// Per-region metrics when `metrics` is present: the whole image, then the worst tile of text
     /// (when text was compared under a tolerance).
     pub regions: Vec<RegionMetrics>,
-    /// The images kept for the case: of a failure, or the candidate of a recorded pass against
-    /// another platform's golden that differs from it.
+    /// The images kept for a failure (a mismatch, a dimension mismatch, a missing golden); absent
+    /// for a pass and an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<Artifacts>,
     /// Durations.
@@ -1223,7 +1190,8 @@ impl CaseReport {
     /// replacing the previous report of its golden on this platform only.
     ///
     /// Reports are regenerated by every run, so they are written atomically but not flushed to
-    /// disk ([`Durability::Atomic`]).
+    /// disk ([`Durability::Atomic`]), and a symbolic link at the path is replaced, never written
+    /// through.
     ///
     /// # Errors
     /// Returns [`io::ErrorKind::InvalidInput`] if the name is not a canonical test name, the
@@ -1238,7 +1206,7 @@ impl CaseReport {
             .platform_key()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let file = Self::path(gleon_dir, &platform_key, &self.name);
-        crate::fs::write_atomically_with(&file, Durability::Atomic, |writer| {
+        crate::fs::replace_atomically_with(&file, Durability::Atomic, |writer| {
             serde_json::to_writer_pretty(&mut *writer, self)?;
             writer.write_all(b"\n")
         })
@@ -1911,21 +1879,23 @@ mod tests {
 
     fn ssim_measurement() -> Measurement {
         Measurement::Ssim {
-            mean_ssim: 0.99,
-            min_ssim: 0.931,
-            max_excess: 1.5,
-            peak_excess: 5.2,
-            changed_pixels: 12,
-            changed_region: Some(Region {
-                x: 1,
-                y: 2,
-                width: 3,
-                height: 4,
-            }),
-            failing_pixels: 0,
-            failing_region: None,
-            changed_local: None,
-            failing_local: None,
+            analysis: SsimAnalysis {
+                mean_ssim: 0.99,
+                min_ssim: 0.931,
+                max_excess: 1.5,
+                peak_excess: 5.2,
+                changed_pixels: 12,
+                changed_region: Some(Region {
+                    x: 1,
+                    y: 2,
+                    width: 3,
+                    height: 4,
+                }),
+                failing_pixels: 0,
+                failing_region: None,
+                changed_local: None,
+                failing_local: None,
+            },
             text: None,
         }
     }
@@ -1966,16 +1936,18 @@ mod tests {
             failing_pixels,
         };
         let measurement = Measurement::Ssim {
-            mean_ssim: 0.99,
-            min_ssim: 0.5,
-            max_excess: 12.0,
-            peak_excess: 20.0,
-            changed_pixels: 9,
-            changed_region: None,
-            failing_pixels: 9,
-            failing_region: None,
-            changed_local: Some(local(0, 9)),
-            failing_local: Some(local(1, 9)),
+            analysis: SsimAnalysis {
+                mean_ssim: 0.99,
+                min_ssim: 0.5,
+                max_excess: 12.0,
+                peak_excess: 20.0,
+                changed_pixels: 9,
+                changed_region: None,
+                failing_pixels: 9,
+                failing_region: None,
+                changed_local: Some(local(0, 9)),
+                failing_local: Some(local(1, 9)),
+            },
             text: None,
         };
         let tolerance = Tolerance::Ssim {
@@ -2003,13 +1975,13 @@ mod tests {
                 && (headroom.color + 12.0).abs() < 1e-12
         ));
         // A pixel comparison has no such regions.
-        let pixel = Measurement::Pixel {
+        let pixel = Measurement::Pixel(PixelAnalysis {
             checked_pixels: 4,
-            diff_count: 0,
-            tolerated_count: 0,
-            edge_count: 0,
+            diff_pixels: 0,
+            tolerated_pixels: 0,
+            edge_pixels: 0,
             text: None,
-        };
+        });
         let metrics = Metrics::from_measurement(&pixel, &Tolerance::Exact {}, None).unwrap();
         assert_eq!(
             RegionMetrics::of(metrics, &pixel, &Tolerance::Exact {}, None).len(),
@@ -2017,16 +1989,18 @@ mod tests {
         );
         // Changed pixels within the policy: no excess, whatever their peak.
         let passing = Measurement::Ssim {
-            mean_ssim: 0.99,
-            min_ssim: 0.9,
-            max_excess: 0.0,
-            peak_excess: 20.0,
-            changed_pixels: 9,
-            changed_region: None,
-            failing_pixels: 0,
-            failing_region: None,
-            changed_local: Some(local(0, 0)),
-            failing_local: None,
+            analysis: SsimAnalysis {
+                mean_ssim: 0.99,
+                min_ssim: 0.9,
+                max_excess: 0.0,
+                peak_excess: 20.0,
+                changed_pixels: 9,
+                changed_region: None,
+                failing_pixels: 0,
+                failing_region: None,
+                changed_local: Some(local(0, 0)),
+                failing_local: None,
+            },
             text: None,
         };
         let metrics = Metrics::from_measurement(&passing, &tolerance, None).unwrap();
@@ -2052,13 +2026,13 @@ mod tests {
 
     #[test]
     fn test_pixel_headroom_for_exact_and_pixel() {
-        let measurement = Measurement::Pixel {
+        let measurement = Measurement::Pixel(PixelAnalysis {
             checked_pixels: 100,
-            diff_count: 5,
-            tolerated_count: 0,
-            edge_count: 0,
+            diff_pixels: 5,
+            tolerated_pixels: 0,
+            edge_pixels: 0,
             text: None,
-        };
+        });
         assert_eq!(
             Metrics::from_measurement(&measurement, &Tolerance::Exact {}, None),
             Some(Metrics::Pixel {
@@ -2080,13 +2054,13 @@ mod tests {
         // Pixels the options let pass are reported apart (those the edge mask hid on their own),
         // and only when there are some.
         let tolerated = Metrics::from_measurement(
-            &Measurement::Pixel {
+            &Measurement::Pixel(PixelAnalysis {
                 checked_pixels: 100,
-                diff_count: 5,
-                tolerated_count: 7,
-                edge_count: 3,
+                diff_pixels: 5,
+                tolerated_pixels: 7,
+                edge_pixels: 3,
                 text: None,
-            },
+            }),
             &pixel,
             None,
         )
@@ -2108,13 +2082,13 @@ mod tests {
         let json = serde_json::to_string(&metrics.unwrap()).unwrap();
         assert!(!json.contains("tolerated_pixels") && !json.contains("edge_pixels"));
         let empty = Metrics::from_measurement(
-            &Measurement::Pixel {
+            &Measurement::Pixel(PixelAnalysis {
                 checked_pixels: 0,
-                diff_count: 0,
-                tolerated_count: 0,
-                edge_count: 0,
+                diff_pixels: 0,
+                tolerated_pixels: 0,
+                edge_pixels: 0,
                 text: None,
-            },
+            }),
             &pixel,
             None,
         );
@@ -2129,15 +2103,15 @@ mod tests {
 
     #[test]
     fn test_differs_counts_the_pixels_every_option_let_pass() {
-        let pixel = |diff_count, tolerated_count, edge_count| {
+        let pixel = |diff_pixels, tolerated_pixels, edge_pixels| {
             Metrics::from_measurement(
-                &Measurement::Pixel {
+                &Measurement::Pixel(PixelAnalysis {
                     checked_pixels: 100,
-                    diff_count,
-                    tolerated_count,
-                    edge_count,
+                    diff_pixels,
+                    tolerated_pixels,
+                    edge_pixels,
                     text: None,
-                },
+                }),
                 &Tolerance::pixel(0.1),
                 None,
             )
@@ -2188,13 +2162,13 @@ mod tests {
         };
         assert_eq!(
             Metrics::from_measurement(
-                &Measurement::Pixel {
+                &Measurement::Pixel(PixelAnalysis {
                     checked_pixels: 1,
-                    diff_count: 0,
-                    tolerated_count: 0,
-                    edge_count: 0,
+                    diff_pixels: 0,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     text: None
-                },
+                }),
                 &ssim,
                 None
             ),
@@ -2268,41 +2242,20 @@ mod tests {
         assert_eq!(back.metrics, metrics);
     }
 
-    /// A PNG header (signature and `IHDR`) of `width` x `height`, without image data.
-    fn png_header(width: u32, height: u32) -> Vec<u8> {
-        let mut header = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
-        header.extend_from_slice(&width.to_be_bytes());
-        header.extend_from_slice(&height.to_be_bytes());
-        header
-    }
-
-    #[test]
-    fn test_png_size_reads_the_header_only() {
-        let header = png_header(100, 60);
-        assert_eq!(png_size(&header), Some((100, 60)));
-        assert_eq!(png_size(&header[..23]), None);
-        let mut other = header.clone();
-        other[12..16].copy_from_slice(b"IDAT");
-        assert_eq!(png_size(&other), None);
-        assert_eq!(png_size(&[7; 64]), None);
-        assert_eq!(png_size(&png_header(0, 60)), None);
-        assert_eq!(png_size(&png_header(100, 0)), None);
-    }
-
     #[test]
     fn test_images_of_png_bytes() {
         assert_eq!(
             Sha256Hex::of(&[1, 2, 3]).as_str(),
             "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
         );
-        let header = png_header(4, 3);
+        let png = crate::compare::encode_png(&image::RgbaImage::new(4, 3)).unwrap();
         let blob: ImageHash = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
-        let golden = GoldenImage::of("a.png".to_owned(), Some(&header), Some(blob.clone()));
+        let golden = GoldenImage::of("a.png".to_owned(), Some(&png), Some(blob.clone()));
         assert_eq!(
             golden,
             GoldenImage {
                 path: "a.png".to_owned(),
-                sha256: Some(Sha256Hex::of(&header)),
+                sha256: Some(Sha256Hex::of(&png)),
                 blob: Some(blob),
                 width: Some(4),
                 height: Some(3),
@@ -2313,13 +2266,13 @@ mod tests {
         assert_eq!(
             GoldenImage::hashed(
                 "a.png".to_owned(),
-                &header,
-                Sha256Hex::of(&header),
+                &png,
+                Sha256Hex::of(&png),
                 golden.blob.clone()
             ),
             golden
         );
-        let given = GoldenImage::hashed("a.png".to_owned(), &header, Sha256Hex::of(b"given"), None);
+        let given = GoldenImage::hashed("a.png".to_owned(), &png, Sha256Hex::of(b"given"), None);
         assert_eq!(given.sha256, Some(Sha256Hex::of(b"given")));
         assert_eq!((given.width, given.height), (Some(4), Some(3)));
         let missing = GoldenImage::of("a.png".to_owned(), None, None);
@@ -2620,6 +2573,88 @@ mod tests {
             keyless.write(&gleon_dir).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
+    }
+
+    /// The output of a run never writes through a symbolic link at its path (a checkout or a CI
+    /// artifact may hold one): the link is replaced, the file it names keeps its bytes. Reports
+    /// and images alike.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_output_replaces_a_symbolic_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let outside = root.join("outside");
+        std::fs::write(&outside, b"keep").unwrap();
+        let link_at = |path: &Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&outside, path).unwrap();
+        };
+        let is_file = |path: &Path| std::fs::symlink_metadata(path).unwrap().is_file();
+
+        let report = CaseReport {
+            schema_version: CASE_SCHEMA_VERSION,
+            name: "test/goldens/a".to_owned(),
+            golden: GoldenImage::of("test/goldens/a.png".to_owned(), None, None),
+            candidate: CandidateImage::of(b"png"),
+            source: Source {
+                tool: "gleon_cli".to_owned(),
+                tool_version: "0.4.1".to_owned(),
+                renderer: None,
+            },
+            platform: PlatformConfig::Opaque("linux-x86_64".to_owned()),
+            test: None,
+            comparison: Comparison {
+                tolerance: Tolerance::Exact {},
+                masks: vec![],
+                policy_version: 4,
+                text_tolerance: None,
+            },
+            outcome: CaseOutcome::Missing,
+            error_kind: None,
+            message: None,
+            metrics: None,
+            regions: vec![],
+            artifacts: None,
+            timings_ms: CaseTimings::new(Duration::from_millis(1), None),
+            run_id: None,
+            recorded_at: chrono::Utc::now(),
+        };
+        let gleon_dir = root.join(".gleon");
+        let file = CaseReport::path(
+            &gleon_dir,
+            &PlatformKey::parse("linux-x86_64").unwrap(),
+            "test/goldens/a",
+        );
+        link_at(&file);
+        report.write(&gleon_dir).unwrap();
+        assert!(is_file(&file));
+        assert_eq!(
+            CaseReport::parse(&std::fs::read(&file).unwrap()).unwrap(),
+            report
+        );
+
+        let key = &PlatformKey::parse("linux-x86_64").unwrap();
+        let folder = root.join(".gleon/runs/latest/artifacts/linux-x86_64/test/goldens/a");
+        link_at(&folder.join("candidate.png"));
+        let images = ArtifactImages {
+            candidate: Some(b"candidate"),
+            ..ArtifactImages::default()
+        };
+        write_artifacts(
+            root,
+            &ArtifactsDir::default(),
+            key,
+            "test/goldens/a",
+            images,
+        )
+        .unwrap();
+        assert!(is_file(&folder.join("candidate.png")));
+        assert_eq!(
+            std::fs::read(folder.join("candidate.png")).unwrap(),
+            b"candidate"
+        );
+
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
     }
 
     /// The images of a report lie at `<artifacts dir>/<its platform key>/<its name>/<file>`, all

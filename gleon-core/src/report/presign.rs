@@ -31,9 +31,9 @@ impl super::ReportGenerator {
 
         let mut signed_urls = HashMap::new();
         for hash in to_sign {
-            // Address the same remote key `push`/`pull` use: `blobs/<scheme>/<value>`.
-            let remote_key = format!("blobs/{}/{}", hash.scheme(), hash.value());
-            if let Some(signed) = adapter.sign_blob_url(&remote_key, expires_in).await {
+            // The same remote key `push`/`pull` use.
+            let remote_key = crate::storage::blob_key(hash);
+            if let Some(signed) = adapter.sign_blob_url(remote_key.as_ref(), expires_in).await {
                 let _ = signed_urls.insert(hash.clone(), signed);
             } else {
                 tracing::warn!("Failed to generate pre-signed URL for a baseline blob");

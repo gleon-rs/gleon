@@ -15,7 +15,7 @@ use std::{
 };
 
 use gleon_model::{
-    case::{self, CaseOutcome, CaseReport, RunId, Sha256Hex},
+    case::{CaseOutcome, CaseReport, RunId, Sha256Hex},
     compare::{self, CompareError},
     fs::Durability,
     platform::{PlatformConfig, PlatformKey},
@@ -438,11 +438,11 @@ fn golden_file(base_dir: &Path, report: &CaseReport) -> Result<PathBuf, ApproveE
     let path = Path::new(&report.golden.path);
     let file = base_dir.join(path);
     let is_link = std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink());
-    // The PNG header (signature and size) is enough to tell.
+    // The PNG header (the signature and the 25 bytes of the header chunk) is enough to tell.
     let mut head = Vec::new();
     let replaces_no_png = std::fs::File::open(&file)
-        .and_then(|file| file.take(24).read_to_end(&mut head))
-        .is_ok_and(|_| case::png_size(&head).is_none());
+        .and_then(|file| file.take(33).read_to_end(&mut head))
+        .is_ok_and(|_| gleon_model::origin::png_size(&head).is_none());
     if !is_png_outside_hidden_dirs(path)
         || is_link
         || replaces_no_png
@@ -850,7 +850,7 @@ mod tests {
     use super::*;
     use crate::{
         cases::fixtures::{report, report_on},
-        config::{ConfigError, GleonConfig},
+        config::GleonConfig,
         manifest::ImageHash,
     };
 
@@ -984,10 +984,6 @@ mod tests {
             ),
             "{nothing}"
         );
-
-        let config: ApproveError =
-            CoreError::Config(ConfigError::Validation("bad".to_string())).into();
-        assert!(config.to_string().contains("Config error"));
 
         let decode = ApproveError::ImageDecode {
             path: PathBuf::from("bar.png"),

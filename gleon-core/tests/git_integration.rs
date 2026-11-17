@@ -39,7 +39,7 @@ fn test_resolve_branch_real_repo() {
 
     let result = GitResolver::resolve_branch(None, &repo_root, &gleon_core::env::OsEnv);
     assert!(
-        result.is_ok(),
+        result.is_some(),
         "Expected branch resolution to succeed on real repo, got {result:?}"
     );
     let branch = result.unwrap();

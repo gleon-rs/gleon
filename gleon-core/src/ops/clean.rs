@@ -14,14 +14,6 @@ use crate::{
     ops::common::{CoreError, append_missing_gitignore_lines, load_config_and_scan},
 };
 
-/// Error types that can occur during the clean operation.
-#[derive(Debug, thiserror::Error)]
-pub enum CleanError {
-    /// Error shared across `ops::*` operations.
-    #[error(transparent)]
-    Core(#[from] CoreError),
-}
-
 /// Options controlling the clean workspace operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[expect(
@@ -70,7 +62,7 @@ pub struct CleanResult {
 pub fn clean_workspace(
     context: &ResolvedContext,
     options: &CleanOptions,
-) -> Result<CleanResult, CleanError> {
+) -> Result<CleanResult, CoreError> {
     let base_path = context.base_dir.as_path();
     let mut result = CleanResult::default();
     if options.screenshots {
@@ -84,7 +76,7 @@ pub fn clean_workspace(
             match std::fs::remove_dir_all(&runs_dir) {
                 Ok(()) => {}
                 Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(CoreError::Io(e).into()),
+                Err(e) => return Err(CoreError::Io(e)),
             }
         }
         result.cache_cleaned = true;
@@ -107,7 +99,7 @@ fn clean_screenshots(
     context: &ResolvedContext,
     options: &CleanOptions,
     result: &mut CleanResult,
-) -> Result<(), CleanError> {
+) -> Result<(), CoreError> {
     let base_path = context.base_dir.as_path();
     let config = context.config.clone().unwrap_or_default();
 
@@ -205,7 +197,7 @@ fn clean_screenshots(
         let existing = match std::fs::read_to_string(&gitignore_path) {
             Ok(text) => text,
             Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(CoreError::Io(e).into()),
+            Err(e) => return Err(CoreError::Io(e)),
         };
 
         let existing_set: std::collections::HashSet<&str> =
@@ -262,9 +254,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{
-        config::ConfigError, context::ContextError, platform::PlatformError, scanner::ScannerError,
-    };
+    use crate::{context::ContextError, platform::PlatformError, scanner::ScannerError};
 
     #[test]
     fn test_clean_workspace_dry_run_and_execution() {
@@ -445,29 +435,23 @@ screenshots:
             ..CleanOptions::default()
         };
         let err = clean_workspace(&ctx, &opts).unwrap_err();
-        assert!(matches!(err, CleanError::Core(CoreError::Io(_))));
+        assert!(matches!(err, CoreError::Io(_)));
     }
 
     #[test]
     fn test_clean_error_display() {
-        let io_err: CleanError = CoreError::Io(std::io::Error::other("disk full")).into();
+        let io_err = CoreError::Io(std::io::Error::other("disk full"));
         assert!(io_err.to_string().contains("IO error: disk full"));
 
-        let ctx_err: CleanError = CoreError::Context(ContextError::Platform(
-            PlatformError::InvalidSegment("x".to_string()),
-        ))
-        .into();
+        let ctx_err = CoreError::Context(ContextError::Platform(PlatformError::InvalidSegment(
+            "x".to_string(),
+        )));
         assert!(ctx_err.to_string().contains("Context resolution error:"));
 
-        let cfg_err: CleanError =
-            CoreError::Config(ConfigError::NotFound(PathBuf::from("foo"))).into();
-        assert!(cfg_err.to_string().contains("Config error:"));
-
-        let scan_err: CleanError = CoreError::Scanner(ScannerError::InvalidTestName {
+        let scan_err = CoreError::Scanner(ScannerError::InvalidTestName {
             name: "bad".to_string(),
             reason: "invalid".to_string(),
-        })
-        .into();
+        });
         assert!(scan_err.to_string().contains("Scanner error:"));
 
         let res = CleanResult::default();
@@ -679,10 +663,7 @@ screenshots:
         std::fs::set_permissions(&runs_dir, orig_perms).unwrap();
 
         assert!(res.is_err());
-        assert!(matches!(
-            res.unwrap_err(),
-            CleanError::Core(CoreError::Io(_))
-        ));
+        assert!(matches!(res.unwrap_err(), CoreError::Io(_)));
     }
 
     #[test]

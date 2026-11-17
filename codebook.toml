@@ -1,5 +1,6 @@
 words = [
     "amd64",
+    "getrandom",
     "armv",
     "beos",
     "osx",
@@ -95,6 +96,7 @@ words = [
     "globset",
     "goldens",
     "gpgsign",
+    "humantime",
     "idempotently",
     "indicatif",
     "keygen",

@@ -86,6 +86,21 @@ pub struct Region {
     pub height: u32,
 }
 
+impl Region {
+    /// This region clipped to a `width` x `height` image; `None` if nothing of it is inside.
+    #[must_use]
+    pub fn clipped(&self, width: u32, height: u32) -> Option<Self> {
+        let (x, y) = (self.x.min(width), self.y.min(height));
+        let clipped = Self {
+            x,
+            y,
+            width: self.x.saturating_add(self.width).min(width) - x,
+            height: self.y.saturating_add(self.height).min(height) - y,
+        };
+        (clipped.width > 0 && clipped.height > 0).then_some(clipped)
+    }
+}
+
 /// The metrics of the policy inside one region of the images (see
 /// [`SsimAnalysis::changed_local`]), from the planes the analysis computed anyway.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,7 +122,7 @@ pub struct SsimRegion {
 }
 
 /// Result of [`analyze`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SsimAnalysis {
     /// Mean local SSIM over the whole (half-resolution) image; diagnostic only.
     pub mean_ssim: f64,
@@ -138,9 +153,6 @@ pub struct SsimAnalysis {
     pub changed_local: Option<SsimRegion>,
     /// The metrics inside [`Self::failing_region`] (`None` when the policy passed).
     pub failing_local: Option<SsimRegion>,
-    /// Diff visualization, present only when the policy fails: the baseline faded out, tolerated
-    /// differences in yellow, failing pixels in red.
-    pub diff_image: Option<RgbaImage>,
 }
 
 impl SsimAnalysis {
@@ -553,10 +565,11 @@ pub fn analyze<'a>(
     actual: impl Into<Pixels<'a>>,
     policy: &SsimPolicy,
 ) -> SsimAnalysis {
-    analyze_with(baseline, actual, policy, true)
+    analyze_with(baseline, actual, policy, false).0
 }
 
-/// [`analyze`], rendering [`SsimAnalysis::diff_image`] of a failure only if `render_diff`.
+/// [`analyze`] with the diff visualization of a failure when `render_diff`: the baseline faded
+/// out, tolerated differences in yellow, failing pixels in red (`None` for a pass).
 ///
 /// # Panics
 /// Like [`analyze`].
@@ -565,7 +578,7 @@ pub(crate) fn analyze_with<'a>(
     actual: impl Into<Pixels<'a>>,
     policy: &SsimPolicy,
     render_diff: bool,
-) -> SsimAnalysis {
+) -> (SsimAnalysis, Option<RgbaImage>) {
     let (baseline, actual) = (baseline.into(), actual.into());
     assert_eq!(
         baseline.dimensions(),
@@ -590,7 +603,7 @@ pub(crate) fn analyze_with<'a>(
     };
 
     let Some((changed, changed_pixels)) = diff_bbox(base, cand) else {
-        return SsimAnalysis {
+        let identical = SsimAnalysis {
             mean_ssim: 1.0,
             min_ssim: 1.0,
             max_excess: 0.0,
@@ -601,8 +614,8 @@ pub(crate) fn analyze_with<'a>(
             failing_region: None,
             changed_local: None,
             failing_local: None,
-            diff_image: None,
         };
+        return (identical, None);
     };
 
     #[expect(
@@ -650,7 +663,7 @@ pub(crate) fn analyze_with<'a>(
         fail_rect,
         failing: &failing,
     };
-    SsimAnalysis {
+    let analysis = SsimAnalysis {
         mean_ssim,
         min_ssim: f64::from(min_ssim),
         max_excess: f64::from(max_excess),
@@ -667,8 +680,8 @@ pub(crate) fn analyze_with<'a>(
             ..planes.windows(changed)
         }),
         failing_local: failing_region.0.map(|rect| planes.local(rect)),
-        diff_image,
-    }
+    };
+    (analysis, diff_image)
 }
 
 /// The full-resolution pixels failing the policy.
@@ -976,7 +989,7 @@ mod tests {
         assert_eq!((a.mean_ssim, a.min_ssim, a.max_excess), (1.0, 1.0, 0.0));
         assert_eq!((a.peak_excess, a.changed_pixels), (0.0, 0));
         assert_eq!((a.changed_region, a.failing_region), (None, None));
-        assert!(a.diff_image.is_none());
+        assert!(analyze_with(&img, &img, &POLICY, true).1.is_none());
     }
 
     #[test]
@@ -1043,12 +1056,12 @@ mod tests {
         let base = solid(64, 64, [255, 255, 255, 255]);
         let mut cand = base.clone();
         cand.put_pixel(20, 30, Rgba([0, 0, 0, 255]));
-        let mut rendered = analyze(&base, &cand, &POLICY);
+        let rendered = analyze_with(&base, &cand, &POLICY, true);
         let skipped = analyze_with(&base, &cand, &POLICY, false);
-        assert!(!skipped.passed());
-        assert!(rendered.diff_image.is_some() && skipped.diff_image.is_none());
-        rendered.diff_image = None;
-        assert_eq!(format!("{rendered:?}"), format!("{skipped:?}"));
+        assert!(!skipped.0.passed());
+        assert!(rendered.1.is_some() && skipped.1.is_none());
+        assert_eq!(rendered.0, skipped.0);
+        assert_eq!(analyze(&base, &cand, &POLICY), skipped.0);
     }
 
     #[test]
@@ -1068,7 +1081,7 @@ mod tests {
                 height: 1
             })
         );
-        assert!(a.diff_image.is_some());
+        assert!(analyze_with(&base, &cand, &POLICY, true).1.is_some());
     }
 
     #[test]

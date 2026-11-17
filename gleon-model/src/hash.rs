@@ -86,18 +86,10 @@ impl ImageHash {
         scheme: impl Into<String>,
         value: impl Into<String>,
     ) -> Result<Self, InvalidImageHash> {
-        let mut scheme_str = scheme.into();
-        if scheme_str.bytes().any(|b| b.is_ascii_uppercase()) {
-            scheme_str.make_ascii_lowercase();
-        }
-        let mut value_str = value.into();
-        if value_str.bytes().any(|b| b.is_ascii_uppercase()) {
-            value_str.make_ascii_lowercase();
-        }
-        validate_hash_parts(&scheme_str, &value_str).map(|()| Self {
-            scheme: scheme_str,
-            value: value_str,
-        })
+        let (mut scheme, mut value) = (scheme.into(), value.into());
+        scheme.make_ascii_lowercase();
+        value.make_ascii_lowercase();
+        validate_hash_parts(&scheme, &value).map(|()| Self { scheme, value })
     }
 
     /// Gets the hashing scheme.
@@ -121,22 +113,7 @@ impl std::str::FromStr for ImageHash {
             .split_once(':')
             .ok_or(InvalidImageHash::MissingSeparator)?;
 
-        let scheme_cow = if scheme.bytes().any(|b| b.is_ascii_uppercase()) {
-            std::borrow::Cow::Owned(scheme.to_ascii_lowercase())
-        } else {
-            std::borrow::Cow::Borrowed(scheme)
-        };
-
-        let value_cow = if value.bytes().any(|b| b.is_ascii_uppercase()) {
-            std::borrow::Cow::Owned(value.to_ascii_lowercase())
-        } else {
-            std::borrow::Cow::Borrowed(value)
-        };
-
-        validate_hash_parts(&scheme_cow, &value_cow).map(|()| Self {
-            scheme: scheme_cow.into_owned(),
-            value: value_cow.into_owned(),
-        })
+        Self::new(scheme, value)
     }
 }
 

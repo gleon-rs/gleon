@@ -51,8 +51,7 @@ fn resolve(
     let mut regions = Vec::with_capacity(zones.len());
     for zone in zones {
         let Some(ResolvedZone {
-            x_end,
-            y_end,
+            region,
             is_out_of_bounds,
         }) = resolve_zone(zone, width, height)
         else {
@@ -61,16 +60,7 @@ fn resolve(
         if is_out_of_bounds {
             on_clamped(zone);
         }
-        let (x, y) = (zone.x.min(width), zone.y.min(height));
-        let region = Region {
-            x,
-            y,
-            width: x_end.min(width) - x,
-            height: y_end.min(height) - y,
-        };
-        if region.width > 0 && region.height > 0 {
-            regions.push(region);
-        }
+        regions.extend(region.clipped(width, height));
     }
     regions
 }
@@ -134,10 +124,8 @@ pub fn clamped_zones(zones: &[Zone], width: u32, height: u32) -> usize {
 
 /// A zone resolved against an image of a non-zero size.
 struct ResolvedZone {
-    /// Exclusive right edge, not yet clamped.
-    x_end: u32,
-    /// Exclusive bottom edge, not yet clamped.
-    y_end: u32,
+    /// The zone in pixels, not yet clipped to the image.
+    region: Region,
     /// Whether the zone reaches beyond the image.
     is_out_of_bounds: bool,
 }
@@ -152,8 +140,12 @@ fn resolve_zone(zone: &Zone, img_w: u32, img_h: u32) -> Option<ResolvedZone> {
     let x_end = zone.x.saturating_add(w_px);
     let y_end = zone.y.saturating_add(h_px);
     Some(ResolvedZone {
-        x_end,
-        y_end,
+        region: Region {
+            x: zone.x,
+            y: zone.y,
+            width: w_px,
+            height: h_px,
+        },
         is_out_of_bounds: zone.x >= img_w || zone.y >= img_h || x_end > img_w || y_end > img_h,
     })
 }

@@ -158,8 +158,8 @@ pub fn clamped_masks(golden_uri: &str, count: usize) -> String {
 /// everything else.
 pub fn unused_text_tolerance(golden_uri: &str) -> String {
     format!(
-        "gleon: the text tolerance of golden \"{golden_uri}\" did not apply: text is compared \
-         under it for widgets only."
+        "gleon: the text tolerance of golden \"{golden_uri}\" did not apply: the candidate came \
+         without text regions."
     )
 }
 
@@ -205,8 +205,12 @@ pub fn config_error(config_path: &str, message: &str) -> String {
     format!("gleon: {config_path}: {message}")
 }
 
-/// Update mode did not record the candidate: no comparison could use it as the golden (an image
-/// over the SSIM analysis budget). The golden stays as it was.
+/// Why update mode did not record a candidate that is no complete PNG
+/// ([`gleon_model::origin::is_complete_png`]).
+pub const INCOMPLETE_CANDIDATE: &str = "the candidate is not a complete PNG.";
+
+/// Update mode did not record the candidate: no comparison could use it as the golden (no
+/// complete PNG, or an image over the SSIM analysis budget). The golden stays as it was.
 pub fn cannot_record(golden_uri: &str, message: &str) -> String {
     format!("Golden \"{golden_uri}\": gleon cannot record it: {message}")
 }
@@ -230,8 +234,8 @@ pub fn failure(golden_uri: &str, reason: &str, feedback: &str, report: Option<&s
             );
         }
         None => message.push_str(
-            "\nTip: tolerances per golden and the platform that compares text live in \
-             .gleon/gleon.yaml, the file of the gleon CLI (see the package README).",
+            "\nTip: a tolerance for this golden goes into .gleon/gleon.yaml (see the package \
+             README).",
         ),
     }
     message
@@ -270,8 +274,8 @@ pub fn feedback(failures_dir: &str, diff: Option<&str>) -> String {
 
 /// Printed once per session when `GLEON_METRICS` asks for metrics without a workspace.
 pub const MISSING_WORKSPACE_WARNING: &str = "gleon: GLEON_METRICS is set but there is no \
-     .gleon/gleon.yaml: create it (see the package README; `gleon init` of the gleon CLI writes \
-     one); metrics are written to .gleon/runs/latest/cases/.";
+     .gleon/gleon.yaml: create it (see the package README); metrics are written to \
+     .gleon/runs/latest/cases/.";
 
 #[cfg(all(test, not(miri)))]
 #[allow(
@@ -512,9 +516,19 @@ mod tests {
             "gleon: 2 masks of golden \"a.png\" reach beyond the image and were clipped to it."
         );
         assert!(failure("a.png", "x.", &feedback, None).ends_with(
-            "\nTip: tolerances per golden and the platform that compares text live in \
-             .gleon/gleon.yaml, the file of the gleon CLI (see the package README)."
+            "\nTip: a tolerance for this golden goes into .gleon/gleon.yaml (see the package \
+             README)."
         ));
+        assert_eq!(
+            unused_text_tolerance("a.png"),
+            "gleon: the text tolerance of golden \"a.png\" did not apply: the candidate came \
+             without text regions."
+        );
+        assert_eq!(
+            MISSING_WORKSPACE_WARNING,
+            "gleon: GLEON_METRICS is set but there is no .gleon/gleon.yaml: create it (see the \
+             package README); metrics are written to .gleon/runs/latest/cases/."
+        );
         assert_eq!(
             kept_foreign("a.png", "linux-x86_64", "macos-aarch64"),
             "gleon: golden \"a.png\" was kept: it was recorded on linux-x86_64, and the new image \

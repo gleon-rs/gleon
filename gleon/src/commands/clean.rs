@@ -1,19 +1,17 @@
 //! Handler for `gleon clean` subcommand.
 
+use anyhow::Context as _;
 use gleon_core::{
     context::ResolvedContext,
     ops::clean::{CleanOptions, clean_workspace},
 };
 use tracing::info;
 
-use crate::{commands::report_failure, exit_code::ExitCode};
+use crate::exit_code::ExitCode;
 
 /// Runs the `clean` command.
-pub fn run_clean(ctx: &ResolvedContext, options: &CleanOptions) -> ExitCode {
-    let res = match clean_workspace(ctx, options) {
-        Ok(r) => r,
-        Err(e) => return report_failure("Error cleaning workspace", &e),
-    };
+pub fn run_clean(ctx: &ResolvedContext, options: &CleanOptions) -> anyhow::Result<ExitCode> {
+    let res = clean_workspace(ctx, options).context("Error cleaning workspace")?;
 
     if options.dry_run {
         info!(
@@ -53,9 +51,9 @@ pub fn run_clean(ctx: &ResolvedContext, options: &CleanOptions) -> ExitCode {
     }
 
     if res.failed_files.is_empty() {
-        ExitCode::Success
+        Ok(ExitCode::Success)
     } else {
-        ExitCode::Failure
+        Ok(ExitCode::Failure)
     }
 }
 
@@ -75,6 +73,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::commands::exit_code;
 
     #[test]
     fn test_run_clean_dry_run_and_actual_flow() {
@@ -102,7 +101,7 @@ screenshots:
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
         // 1. Dry run
-        let exit_code = run_clean(
+        let code = exit_code(run_clean(
             &ctx,
             &CleanOptions {
                 dry_run: true,
@@ -110,18 +109,18 @@ screenshots:
                 skip_gitignore: false,
                 keep_runs: false,
             },
-        );
-        assert_eq!(exit_code, ExitCode::Success);
+        ));
+        assert_eq!(code, ExitCode::Success);
         assert!(test_dir.join("login.png").exists());
 
         // 2. A plain run keeps the screenshots (an integration's goldens) and `.gitignore`.
-        let exit_code = run_clean(&ctx, &CleanOptions::default());
-        assert_eq!(exit_code, ExitCode::Success);
+        let code = exit_code(run_clean(&ctx, &CleanOptions::default()));
+        assert_eq!(code, ExitCode::Success);
         assert!(test_dir.join("login.png").exists());
         assert!(!base_path.join(".gitignore").exists());
 
         // 3. Real run with screenshots
-        let exit_code = run_clean(
+        let code = exit_code(run_clean(
             &ctx,
             &CleanOptions {
                 dry_run: false,
@@ -129,8 +128,8 @@ screenshots:
                 skip_gitignore: false,
                 keep_runs: false,
             },
-        );
-        assert_eq!(exit_code, ExitCode::Success);
+        ));
+        assert_eq!(code, ExitCode::Success);
         assert!(!test_dir.join("login.png").exists());
         assert!(base_path.join(".gitignore").exists());
         assert!(!gleon_dir.join("runs").exists());
@@ -164,7 +163,7 @@ screenshots:
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
         // 1. Dry run with keep_runs=true and skip_gitignore=true
-        let exit_code = run_clean(
+        let code = exit_code(run_clean(
             &ctx,
             &CleanOptions {
                 dry_run: true,
@@ -172,12 +171,12 @@ screenshots:
                 skip_gitignore: true,
                 keep_runs: true,
             },
-        );
-        assert_eq!(exit_code, ExitCode::Success);
+        ));
+        assert_eq!(code, ExitCode::Success);
         assert!(test_dir.join("login.png").exists());
 
         // 2. Real run with keep_runs=true and skip_gitignore=true
-        let exit_code = run_clean(
+        let code = exit_code(run_clean(
             &ctx,
             &CleanOptions {
                 dry_run: false,
@@ -185,8 +184,8 @@ screenshots:
                 skip_gitignore: true,
                 keep_runs: true,
             },
-        );
-        assert_eq!(exit_code, ExitCode::Success);
+        ));
+        assert_eq!(code, ExitCode::Success);
         assert!(!test_dir.join("login.png").exists());
         assert!(!base_path.join(".gitignore").exists());
         assert!(runs_dir.exists());
@@ -210,12 +209,12 @@ screenshots:
 "#;
         std::fs::write(gleon_dir.join("gleon.yaml"), config_yaml).unwrap();
 
-        // Create .gitignore as directory to force CleanError::Io
+        // Create .gitignore as directory to force an I/O error
         std::fs::create_dir_all(base_path.join(".gitignore")).unwrap();
 
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
 
-        let exit_code = run_clean(
+        let code = exit_code(run_clean(
             &ctx,
             &CleanOptions {
                 dry_run: false,
@@ -223,8 +222,8 @@ screenshots:
                 skip_gitignore: false,
                 keep_runs: false,
             },
-        );
-        assert_eq!(exit_code, ExitCode::Failure);
+        ));
+        assert_eq!(code, ExitCode::Failure);
     }
 
     /// A screenshot that cannot be deleted fails the command, while the rest is cleaned.
@@ -255,16 +254,16 @@ screenshots:
         }
 
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_path).unwrap();
-        let exit_code = run_clean(
+        let code = exit_code(run_clean(
             &ctx,
             &CleanOptions {
                 screenshots: true,
                 ..CleanOptions::default()
             },
-        );
+        ));
         std::fs::set_permissions(&locked, permissions).unwrap();
 
-        assert_eq!(exit_code, ExitCode::Failure);
+        assert_eq!(code, ExitCode::Failure);
         assert!(locked.join("a.png").exists());
         assert!(!base_path.join("b.png").exists());
     }

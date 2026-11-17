@@ -105,14 +105,6 @@ impl super::ReportGenerator {
             return Ok(None);
         }
 
-        #[expect(
-            clippy::expect_used,
-            reason = "bundled templates are compile-time assets validated by the test suite"
-        )]
-        let tmpl = super::JINJA_ENV
-            .get_template("report.html")
-            .expect("bundled report.html template is registered");
-
         let failures: Vec<_> = cases
             .failures_by_severity()
             .into_iter()
@@ -125,10 +117,7 @@ impl super::ReportGenerator {
             failures => Serde(failures),
         };
 
-        tmpl.render(ctx).map(Some).map_err(|e| ReportError::Render {
-            template: "report.html",
-            source: e,
-        })
+        super::render("report.html", ctx).map(Some)
     }
 }
 
