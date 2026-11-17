@@ -373,7 +373,7 @@ fn test_stage_refuses_a_screenshot_over_the_decoder_budget() {
     );
     assert!(
         err.to_string()
-            .contains("Total pixel count 67125248 (16384x4097) exceeds"),
+            .contains("16384x4097 exceed the decoding budget"),
         "{err}"
     );
 }

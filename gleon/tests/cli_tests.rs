@@ -275,9 +275,12 @@ fn test_pull_without_storage_runs_locally() -> Result<(), Box<dyn std::error::Er
         .arg("pull")
         .assert()
         .success()
-        .stderr(predicates::str::contains(
-            "Operating in local mode. Cloud sync disabled. Please configure storage.",
-        ));
+        .stderr(predicates::function::function(|stderr: &str| {
+            stderr
+                .matches("Operating in local mode. Cloud sync disabled. Please configure storage.")
+                .count()
+                == 1
+        }));
     Ok(())
 }
 
@@ -2036,6 +2039,39 @@ fn test_pull_and_push_require_storage() {
             .failure()
             .stderr(predicate::str::contains("gleon init"))
             .stderr(predicate::str::contains("no remote storage").not());
+    }
+}
+
+/// A flag variable is `1`, `true`, `0` or `false` (or blank): any other value is an error that
+/// names it, never read as on or off, also next to the flag it stands for.
+#[test]
+fn test_flag_variables_take_only_true_or_false() {
+    let dir = init_temp_dir();
+    for args in [&["status"][..], &["--strict", "status"]] {
+        gleon()
+            .current_dir(dir.path())
+            .env("GLEON_STRICT", "yes")
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "GLEON_STRICT must be 1, 0, true or false (got 'yes')",
+            ));
+    }
+    for args in [
+        &["pull"][..],
+        &["pull", "--require-storage"],
+        &["push", "--require-storage"],
+    ] {
+        gleon()
+            .current_dir(dir.path())
+            .env("GLEON_REQUIRE_STORAGE", "on")
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "GLEON_REQUIRE_STORAGE must be 1, 0, true or false (got 'on')",
+            ));
     }
 }
 

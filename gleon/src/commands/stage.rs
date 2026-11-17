@@ -2,19 +2,17 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context as _;
 use gleon_core::context::ResolvedContext;
 use tracing::info;
 
-use crate::{commands::report_failure, exit_code::ExitCode};
+use crate::exit_code::ExitCode;
 
 /// Runs the `gleon stage` subcommand, optionally restricted to `paths`.
-pub fn run_stage(ctx: &ResolvedContext, paths: &[PathBuf]) -> ExitCode {
+pub fn run_stage(ctx: &ResolvedContext, paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
     let filter = if paths.is_empty() { None } else { Some(paths) };
 
-    let res = match gleon_core::ops::stage_workspace(ctx, filter) {
-        Ok(res) => res,
-        Err(e) => return report_failure("Error staging screenshots", &e),
-    };
+    let res = gleon_core::ops::stage_workspace(ctx, filter).context("Error staging screenshots")?;
 
     if res.total_screenshots_staged == 0 {
         info!("Already up to date.");
@@ -25,5 +23,5 @@ pub fn run_stage(ctx: &ResolvedContext, paths: &[PathBuf]) -> ExitCode {
             res.staged_test_cases.len()
         );
     }
-    ExitCode::Success
+    Ok(ExitCode::Success)
 }

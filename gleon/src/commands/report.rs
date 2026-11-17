@@ -5,7 +5,7 @@ use gleon_core::report::{MarkdownReportOptions, ReportGenerator};
 
 use crate::{
     cli::ReportFormat,
-    commands::{RunSource, load_cases, report_failure},
+    commands::{RunSource, load_cases},
     exit_code::ExitCode,
 };
 
@@ -21,11 +21,11 @@ pub async fn run_report(
     source: &RunSource,
     pr_number: Option<u64>,
     out: Option<&std::path::Path>,
-) -> ExitCode {
-    match run_report_inner(env, storage_cfg, format, source, pr_number, out).await {
-        Ok(()) => ExitCode::Success,
-        Err(e) => report_failure("Error generating report", &*e),
-    }
+) -> Result<ExitCode> {
+    run_report_inner(env, storage_cfg, format, source, pr_number, out)
+        .await
+        .map(|()| ExitCode::Success)
+        .context("Error generating report")
 }
 
 async fn run_report_inner(
@@ -79,18 +79,12 @@ async fn run_report_inner(
         gleon_core::report::RenderTarget::LocalTerminal
     };
 
-    let has_signed_urls = !signed_urls.is_empty();
-    let resolver = |hash: &gleon_core::manifest::ImageHash| signed_urls.get(hash).cloned();
     let options = MarkdownReportOptions {
         context,
         base_image_url,
         html_artifact_url,
         golden_base_url: golden_base_url.as_deref(),
-        image_url_resolver: if has_signed_urls {
-            Some(&resolver)
-        } else {
-            None
-        },
+        signed_urls: Some(&signed_urls),
     };
 
     let report_content = match format {
@@ -117,8 +111,13 @@ async fn run_report_inner(
 
     if let Some(out_path) = out {
         // Creates missing parent directories too.
-        gleon_core::io::save_file_atomically(out_path, report_content.as_bytes())
-            .with_context(|| format!("Failed to write output to '{}'", out_path.display()))?;
+        // Output a later run recreates: atomic, not flushed to disk.
+        gleon_model::fs::write_atomically(
+            out_path,
+            report_content.as_bytes(),
+            gleon_model::fs::Durability::Atomic,
+        )
+        .with_context(|| format!("Failed to write output to '{}'", out_path.display()))?;
         tracing::info!("Generated the report at {}", out_path.display());
     } else {
         println!("{report_content}");
@@ -199,6 +198,7 @@ fn pull_request_head(env: &dyn gleon_core::env::EnvProvider) -> Option<String> {
 )]
 mod tests {
     use super::*;
+    use crate::commands::exit_code;
 
     struct DummyEnv;
     impl gleon_core::env::EnvProvider for DummyEnv {
@@ -241,15 +241,17 @@ mod tests {
         let cases = copy_of_run(&temp);
         let nested_out = temp.path().join("nested").join("sub").join("output.md");
 
-        let res = run_report(
-            &DummyEnv,
-            None,
-            ReportFormat::Markdown,
-            &cases,
-            None,
-            Some(&nested_out),
-        )
-        .await;
+        let res = exit_code(
+            run_report(
+                &DummyEnv,
+                None,
+                ReportFormat::Markdown,
+                &cases,
+                None,
+                Some(&nested_out),
+            )
+            .await,
+        );
 
         assert_eq!(res, ExitCode::Success);
         let md = std::fs::read_to_string(nested_out).unwrap();
@@ -269,24 +271,43 @@ mod tests {
             (ReportFormat::Json, "\"schema_version\": 5"),
         ] {
             let out = temp.path().join(format!("out.{format:?}"));
-            let res = run_report(&DummyEnv, None, format, &cases, Some(7), Some(&out)).await;
+            let res =
+                exit_code(run_report(&DummyEnv, None, format, &cases, Some(7), Some(&out)).await);
             assert_eq!(res, ExitCode::Success, "{format:?}");
             let content = std::fs::read_to_string(&out).unwrap();
             assert!(content.contains(expected), "{format:?}: {content}");
         }
-
-        // To stdout, the HTML links its images from the working directory.
-        let res = run_report(&DummyEnv, None, ReportFormat::Html, &cases, None, None).await;
-        assert_eq!(res, ExitCode::Success);
-        let res = run_report(
+        // An output path that is a directory cannot be written.
+        let failed = run_report(
             &DummyEnv,
             None,
-            ReportFormat::Markdown,
+            ReportFormat::Json,
             &cases,
-            Some(0),
-            None,
+            Some(7),
+            Some(temp.path()),
         )
-        .await;
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{failed:#}").contains("Failed to write output to"),
+            "{failed:#}"
+        );
+
+        // To stdout, the HTML links its images from the working directory.
+        let res =
+            exit_code(run_report(&DummyEnv, None, ReportFormat::Html, &cases, None, None).await);
+        assert_eq!(res, ExitCode::Success);
+        let res = exit_code(
+            run_report(
+                &DummyEnv,
+                None,
+                ReportFormat::Markdown,
+                &cases,
+                Some(0),
+                None,
+            )
+            .await,
+        );
         assert_eq!(res, ExitCode::Failure, "PR #0 is rejected");
     }
 
@@ -392,12 +413,16 @@ mod tests {
     async fn test_run_report_fails_without_case_reports() {
         let temp = tempfile::tempdir().unwrap();
         let empty = RunSource::Own(temp.path().join("runs/latest"));
-        let res = run_report(&DummyEnv, None, ReportFormat::Markdown, &empty, None, None).await;
+        let res = exit_code(
+            run_report(&DummyEnv, None, ReportFormat::Markdown, &empty, None, None).await,
+        );
         assert_eq!(res, ExitCode::Failure, "nothing recorded is no pass");
 
         std::fs::create_dir_all(temp.path().join("runs/latest/cases")).unwrap();
         std::fs::write(temp.path().join("runs/latest/cases/broken.json"), "{").unwrap();
-        let res = run_report(&DummyEnv, None, ReportFormat::Markdown, &empty, None, None).await;
+        let res = exit_code(
+            run_report(&DummyEnv, None, ReportFormat::Markdown, &empty, None, None).await,
+        );
         assert_eq!(res, ExitCode::Failure, "only broken reports are no reports");
     }
 }

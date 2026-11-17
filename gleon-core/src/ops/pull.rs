@@ -1,5 +1,6 @@
 //! Pull operation for downloading missing baseline blobs from remote storage.
 
+use gleon_model::platform::PlatformKey;
 use thiserror::Error;
 
 use crate::{
@@ -90,7 +91,7 @@ pub async fn pull_blobs(
     context: &ResolvedContext,
     storage_config: Option<&StorageConfig>,
     all_platforms: bool,
-    platform_override: Option<&str>,
+    platform_override: Option<&PlatformKey>,
     require_storage: bool,
 ) -> Result<PullResult, PullError> {
     let paths = ensure_initialized(&context.base_dir)?;
@@ -154,7 +155,7 @@ pub async fn pull_blobs(
         adapter.concurrency(),
         |(hash, origin_platform), pb| {
             let adapter = adapter.clone();
-            let dest_path = blobs_root.join(hash.scheme()).join(hash.value());
+            let dest_path = crate::storage::local_blob_path(&blobs_root, &hash);
             async move {
                 pb.set_message(format!("Downloading {}", short_hash(&hash)));
                 let res = match adapter.download_blob(&hash, &dest_path).await {
@@ -256,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
-    async fn test_pull_platform_override_validation() {
+    async fn test_pull_platform_override() {
         let temp = tempfile::tempdir().unwrap();
         let gleon_dir = temp.path().join(".gleon");
         std::fs::create_dir_all(&gleon_dir).unwrap();
@@ -267,19 +268,16 @@ mod tests {
         };
         let cfg = StorageConfig::new("memory://");
 
-        // Invalid platform override segment
-        let res = pull_blobs(&ctx, Some(&cfg), false, Some("../invalid"), false).await;
-        assert!(matches!(
-            res,
-            Err(PullError::Core(CoreError::Context(ContextError::Platform(
-                _
-            ))))
-        ));
-
         // Empty manifest directory for valid platform override -> 0 blobs
-        let res = pull_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"), false)
-            .await
-            .unwrap();
+        let res = pull_blobs(
+            &ctx,
+            Some(&cfg),
+            false,
+            Some(&PlatformKey::parse("macos-aarch64").unwrap()),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(res.total_manifest_blobs, 0);
     }
 
@@ -647,9 +645,15 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             ..ResolvedContext::default()
         };
-        let res = pull_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"), false)
-            .await
-            .unwrap();
+        let res = pull_blobs(
+            &ctx,
+            Some(&cfg),
+            false,
+            Some(&PlatformKey::parse("macos-aarch64").unwrap()),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(res.total_manifest_blobs, 1);
         assert_eq!(res.downloaded_blobs, 1);
     }

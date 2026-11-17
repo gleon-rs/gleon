@@ -15,10 +15,10 @@ pub mod ssim;
 use image::RgbaImage;
 #[cfg(feature = "phash")]
 pub use phash::compute_phash;
-pub use pixel::{PixelOptions, PixelRegions, TextAnalysis, TextTile};
+pub use pixel::{PixelAnalysis, PixelOptions, PixelRegions, TextAnalysis, TextTile};
 pub use ssim::{Region, SsimAnalysis, SsimPolicy, SsimRegion};
 
-use crate::config::{DiffConfig, Mode};
+use crate::config::Policy;
 
 /// Version of the engine's tolerant decisions: the SSIM policy, the text tiles.
 ///
@@ -39,11 +39,19 @@ pub struct Pixels<'a> {
 
 impl<'a> Pixels<'a> {
     /// The `width` x `height` image of `raw`, or `None` unless `raw` holds exactly its
-    /// `width * height * 4` bytes.
+    /// [`Self::byte_len`] bytes.
     #[must_use]
     pub fn new(raw: &'a [u8], width: u32, height: u32) -> Option<Self> {
-        (u64::try_from(raw.len()).ok() == Some(u64::from(width) * u64::from(height) * 4))
+        Self::byte_len(width, height)
+            .is_some_and(|len| u64::try_from(raw.len()) == Ok(len))
             .then_some(Self { raw, width, height })
+    }
+
+    /// The bytes of a `width` x `height` image, `width * height * 4`; `None` beyond `u64`.
+    #[must_use]
+    pub fn byte_len(width: u32, height: u32) -> Option<u64> {
+        // Two `u32`s multiply within `u64`; the four bytes of a pixel may not.
+        (u64::from(width) * u64::from(height)).checked_mul(4)
     }
 
     /// The bytes, `width * height * 4` of them.
@@ -105,68 +113,15 @@ impl<'a> From<&'a RgbaImage> for Pixels<'a> {
 pub enum Measurement {
     /// Pixel (and exact) mode: the differing pixels among those compared strictly, and the text
     /// regions.
-    Pixel {
-        /// Pixels compared strictly (neither masked nor text under a text tolerance), the base of
-        /// the threshold.
-        checked_pixels: u64,
-        /// Strictly compared pixels whose RGBA bytes differ (beyond the [`PixelOptions`]).
-        diff_count: u64,
-        /// Differing pixels the channel tolerance or the anti-aliasing detection let pass,
-        /// counted as equal.
-        tolerated_count: u64,
-        /// Differing pixels on the baseline's edges the edge mask hid, counted as equal: apart,
-        /// since only this option hides real changes (those that lie on edges).
-        edge_count: u64,
-        /// The text regions, when a text tolerance applied to some.
-        text: Option<TextAnalysis>,
-    },
+    Pixel(PixelAnalysis),
     /// Tolerant (SSIM) mode; see [`ssim`] for the decision policy and [`SsimAnalysis`] for the
     /// meaning of each value.
     Ssim {
-        /// Mean local SSIM over the whole (half-resolution) image; diagnostic only.
-        mean_ssim: f64,
-        /// Lowest local SSIM, the value gated by `min_similarity`.
-        min_ssim: f64,
-        /// Largest deviation beyond `color_tolerance` among failing envelope regions (0 unless
-        /// the envelope gate failed).
-        max_excess: f64,
-        /// Largest envelope deviation over all changed pixels, `color_tolerance` not subtracted.
-        peak_excess: f64,
-        /// Number of pixels whose RGBA bytes differ.
-        changed_pixels: u64,
-        /// Bounding box of the changed pixels.
-        changed_region: Option<Region>,
-        /// Number of pixels failing the policy.
-        failing_pixels: u64,
-        /// Bounding box of the changed pixels that failed the policy.
-        failing_region: Option<Region>,
-        /// The policy's metrics inside `changed_region`.
-        changed_local: Option<SsimRegion>,
-        /// The policy's metrics inside `failing_region`.
-        failing_local: Option<SsimRegion>,
+        /// What the policy measured.
+        analysis: SsimAnalysis,
         /// The text regions, judged by their tiles, when a text tolerance applied to some.
         text: Option<TextAnalysis>,
     },
-}
-
-impl Measurement {
-    /// The measurement of an SSIM `analysis`, with the `text` its tiles judged.
-    #[must_use]
-    pub const fn ssim(analysis: &SsimAnalysis, text: Option<TextAnalysis>) -> Self {
-        Self::Ssim {
-            mean_ssim: analysis.mean_ssim,
-            min_ssim: analysis.min_ssim,
-            max_excess: analysis.max_excess,
-            peak_excess: analysis.peak_excess,
-            changed_pixels: analysis.changed_pixels,
-            changed_region: analysis.changed_region,
-            failing_pixels: analysis.failing_pixels,
-            failing_region: analysis.failing_region,
-            changed_local: analysis.changed_local,
-            failing_local: analysis.failing_local,
-            text,
-        }
-    }
 }
 
 /// What a comparison keeps of the diff visualization of a failure ([`compare_images_as`]):
@@ -245,13 +200,13 @@ pub enum ComparisonResult<D = RgbaImage> {
 fn execute_pixel_comparison<D: DiffImage>(
     baseline: Pixels<'_>,
     actual: Pixels<'_>,
-    config: &DiffConfig,
+    max_diff_ratio: f64,
+    options: PixelOptions,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult<D> {
-    let threshold = config.threshold;
-    let compared = pixel::compare(baseline, actual, regions, &PixelOptions::from(config));
+    let compared = pixel::compare(baseline, actual, regions, &options);
     let analysis = compared.analysis;
-    let strict_passes = if threshold == 0.0 || analysis.checked_pixels == 0 {
+    let strict_passes = if max_diff_ratio == 0.0 || analysis.checked_pixels == 0 {
         analysis.diff_pixels == 0
     } else {
         // Pixel counts here are always far below 2^52, so converting to `f64` is exact for
@@ -261,17 +216,11 @@ fn execute_pixel_comparison<D: DiffImage>(
             reason = "counts are far below 2^52, so the f64 conversion is exact for any realistic input"
         )]
         let mismatch_ratio = analysis.diff_pixels as f64 / analysis.checked_pixels as f64;
-        mismatch_ratio <= threshold
+        mismatch_ratio <= max_diff_ratio
     };
     let text_passes = compared.text_passes();
 
-    let measurement = Measurement::Pixel {
-        checked_pixels: analysis.checked_pixels,
-        diff_count: analysis.diff_pixels,
-        tolerated_count: analysis.tolerated_pixels,
-        edge_count: analysis.edge_pixels,
-        text: analysis.text,
-    };
+    let measurement = Measurement::Pixel(analysis);
     if strict_passes && text_passes {
         return ComparisonResult::Match { measurement };
     }
@@ -282,7 +231,7 @@ fn execute_pixel_comparison<D: DiffImage>(
     }
 }
 
-/// Compares a baseline and an actual image using the configured mode and thresholds.
+/// Compares a baseline and an actual image under `policy`.
 ///
 /// `regions` lie inside the images ([`masking::resolve_zones`]). In pixel mode masked pixels are
 /// neither compared nor counted and text is compared under its policy ([`pixel`]); in SSIM mode
@@ -300,11 +249,10 @@ fn execute_pixel_comparison<D: DiffImage>(
 pub fn compare_images<'a>(
     baseline: impl Into<Pixels<'a>>,
     actual: impl Into<Pixels<'a>>,
-    mode: Mode,
-    config: &DiffConfig,
+    policy: &Policy,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult {
-    compare_images_as(baseline, actual, mode, config, regions)
+    compare_images_as(baseline, actual, policy, regions)
 }
 
 /// [`compare_images`], keeping the diff visualization of a failure as `D`: `()` decides and
@@ -316,8 +264,7 @@ pub fn compare_images<'a>(
 pub fn compare_images_as<'a, D: DiffImage>(
     baseline: impl Into<Pixels<'a>>,
     actual: impl Into<Pixels<'a>>,
-    mode: Mode,
-    config: &DiffConfig,
+    policy: &Policy,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult<D> {
     let (baseline, actual) = (baseline.into(), actual.into());
@@ -332,25 +279,24 @@ pub fn compare_images_as<'a, D: DiffImage>(
         };
     }
 
-    match mode {
-        Mode::Pixel => execute_pixel_comparison(baseline, actual, config, regions),
-        Mode::Ssim if !ssim::fits_analysis_budget(w1, h1) => {
+    match policy {
+        Policy::Pixel {
+            max_diff_ratio,
+            options,
+        } => execute_pixel_comparison(baseline, actual, *max_diff_ratio, *options, regions),
+        Policy::Ssim(_) if !ssim::fits_analysis_budget(w1, h1) => {
             ComparisonResult::TooLarge { size: (w1, h1) }
         }
-        Mode::Ssim => execute_ssim_comparison(baseline, actual, config, regions),
+        Policy::Ssim(policy) => execute_ssim_comparison(baseline, actual, policy, regions),
     }
 }
 
 fn execute_ssim_comparison<D: DiffImage>(
     baseline: Pixels<'_>,
     actual: Pixels<'_>,
-    config: &DiffConfig,
+    policy: &SsimPolicy,
     regions: &PixelRegions<'_>,
 ) -> ComparisonResult<D> {
-    let policy = SsimPolicy {
-        min_similarity: config.min_similarity,
-        color_tolerance: config.color_tolerance,
-    };
     let has_text = regions.text_tolerance.is_some() && !regions.text.is_empty();
     // Text is judged by its tiles as in pixel mode (masks winning); glyphs of another rasterizer
     // would fail the envelope, so text is left out of both gates like masks.
@@ -365,17 +311,19 @@ fn execute_ssim_comparison<D: DiffImage>(
         image
     });
     let analyzed_actual = patched.as_ref().map_or(actual, Pixels::from);
-    let analysis = ssim::analyze_with(baseline, analyzed_actual, &policy, D::RENDERED);
+    let (analysis, failing_diff) =
+        ssim::analyze_with(baseline, analyzed_actual, policy, D::RENDERED);
     let text_passes = text.as_ref().is_none_or(pixel::Compared::text_passes);
-    let measurement =
-        Measurement::ssim(&analysis, text.as_ref().and_then(|text| text.analysis.text));
+    let measurement = Measurement::Ssim {
+        analysis,
+        text: text.as_ref().and_then(|text| text.analysis.text),
+    };
     if analysis.passed() && text_passes {
         return ComparisonResult::Match { measurement };
     }
     let diff_image = D::of(|| {
-        let mut diff_image = analysis
-            .diff_image
-            .unwrap_or_else(|| ssim::passing_diff(baseline, analyzed_actual));
+        let mut diff_image =
+            failing_diff.unwrap_or_else(|| ssim::passing_diff(baseline, analyzed_actual));
         if let Some(text) = &text {
             text.paint_text(&mut diff_image, baseline);
         }
@@ -402,7 +350,23 @@ mod tests {
     use image::{ImageBuffer, Rgba};
 
     use super::*;
-    use crate::config::DiffConfig;
+    use crate::{config::Policy, pixel::PixelAnalysis};
+
+    /// Exact: pixel mode, no share of differing pixels, strict options.
+    const EXACT: Policy = pixel(0.0);
+    /// SSIM at its defaults.
+    const SSIM: Policy = Policy::Ssim(SsimPolicy {
+        min_similarity: config::DEFAULT_MIN_SIMILARITY,
+        color_tolerance: config::DEFAULT_COLOR_TOLERANCE,
+    });
+
+    /// Pixel mode with strict options and at most `max_diff_ratio` differing.
+    const fn pixel(max_diff_ratio: f64) -> Policy {
+        Policy::Pixel {
+            max_diff_ratio,
+            options: PixelOptions::STRICT,
+        }
+    }
 
     /// `result` with its diff visualization dropped, as [`compare_images_as::<()>`] returns it.
     fn without_diff(result: ComparisonResult) -> ComparisonResult<()> {
@@ -423,6 +387,20 @@ mod tests {
                 diff_image: None,
             },
         }
+    }
+
+    /// The length of a size never overflows: a size whose bytes `u64` cannot count has none.
+    #[test]
+    fn test_pixels_of_a_size_beyond_u64_have_no_length() {
+        assert_eq!(Pixels::byte_len(2, 3), Some(24));
+        assert_eq!(Pixels::byte_len(0, 7), Some(0));
+        assert_eq!(Pixels::byte_len(u32::MAX, u32::MAX), None);
+        assert_eq!(Pixels::new(&[], u32::MAX, u32::MAX), None);
+        assert_eq!(
+            Pixels::new(&[0; 24], 2, 3).map(Pixels::dimensions),
+            Some((2, 3))
+        );
+        assert_eq!(Pixels::new(&[0; 23], 2, 3), None);
     }
 
     /// Keeping no diff, a comparison decides and measures exactly as with one, in both modes,
@@ -448,7 +426,6 @@ mod tests {
             text: &text,
             text_tolerance: Some(0.05),
         };
-        let config = DiffConfig::default();
         // A dense change of the text, a masked change and a change elsewhere.
         let mut changed = baseline.clone();
         for x in 0..16 {
@@ -459,31 +436,31 @@ mod tests {
         let wider = ImageBuffer::from_pixel(49, 32, white);
 
         let mut outcomes = Vec::new();
-        for (actual, mode) in [
-            (&baseline, Mode::Pixel),
-            (&changed, Mode::Pixel),
-            (&wider, Mode::Pixel),
-            (&baseline, Mode::Ssim),
-            (&changed, Mode::Ssim),
-            (&wider, Mode::Ssim),
+        for (actual, policy) in [
+            (&baseline, EXACT),
+            (&changed, EXACT),
+            (&wider, EXACT),
+            (&baseline, SSIM),
+            (&changed, SSIM),
+            (&wider, SSIM),
         ] {
-            let rendered = compare_images(&baseline, actual, mode, &config, &regions);
+            let rendered = compare_images(&baseline, actual, &policy, &regions);
             let skipped: ComparisonResult<()> =
-                compare_images_as(&baseline, actual, mode, &config, &regions);
+                compare_images_as(&baseline, actual, &policy, &regions);
             outcomes.push(std::mem::discriminant(&skipped));
-            assert_eq!(skipped, without_diff(rendered), "{mode:?}");
+            assert_eq!(skipped, without_diff(rendered), "{policy:?}");
         }
         // Every outcome that renders a diff was exercised.
         assert!(matches!(
-            compare_images_as::<()>(&baseline, &changed, Mode::Ssim, &config, &regions),
+            compare_images_as::<()>(&baseline, &changed, &SSIM, &regions),
             ComparisonResult::Mismatch { .. }
         ));
         // Over the SSIM analysis budget nothing is analyzed, with a diff kept or not.
         let huge = ImageBuffer::from_pixel(4097, 4096, white);
         let none = PixelRegions::NONE;
         assert_eq!(
-            compare_images_as::<()>(&huge, &huge, Mode::Ssim, &config, &none),
-            without_diff(compare_images(&huge, &huge, Mode::Ssim, &config, &none))
+            compare_images_as::<()>(&huge, &huge, &SSIM, &none),
+            without_diff(compare_images(&huge, &huge, &SSIM, &none))
         );
         assert!(outcomes.contains(&std::mem::discriminant(
             &ComparisonResult::<()>::DimensionMismatch {
@@ -518,35 +495,32 @@ mod tests {
             text: &text,
             text_tolerance: Some(0.05),
         };
-        let exact = DiffConfig {
-            threshold: 0.0,
-            ..DiffConfig::default()
+        let compare = |actual: &RgbaImage, policy: Policy| {
+            compare_images(&baseline, actual, &policy, &regions)
         };
-        let compare =
-            |actual: &RgbaImage, mode| compare_images(&baseline, actual, mode, &exact, &regions);
 
         let mut tolerated = baseline.clone();
         tolerated.put_pixel(3, 3, Rgba([0, 0, 0, 255])); // 1 of 256 text pixels
         tolerated.put_pixel(20, 2, Rgba([0, 0, 0, 255])); // masked
         assert!(matches!(
-            compare(&tolerated, Mode::Pixel),
+            compare(&tolerated, EXACT),
             ComparisonResult::Match {
-                measurement: Measurement::Pixel {
+                measurement: Measurement::Pixel(PixelAnalysis {
                     checked_pixels: 128,
-                    diff_count: 0,
-                    tolerated_count: 0,
-                    edge_count: 0,
+                    diff_pixels: 0,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     text: Some(_),
-                }
+                })
             }
         ));
 
         let mut strict = tolerated.clone();
         strict.put_pixel(20, 12, Rgba([0, 0, 0, 255]));
         assert!(matches!(
-            compare(&strict, Mode::Pixel),
+            compare(&strict, EXACT),
             ComparisonResult::Mismatch {
-                measurement: Measurement::Pixel { diff_count: 1, .. },
+                measurement: Measurement::Pixel(PixelAnalysis { diff_pixels: 1, .. }),
                 ..
             }
         ));
@@ -555,13 +529,13 @@ mod tests {
         for i in 0..16 {
             cluster.put_pixel(i, 0, Rgba([0, 0, 0, 255]));
         }
-        let result = compare(&cluster, Mode::Pixel);
+        let result = compare(&cluster, EXACT);
         assert!(
             matches!(
                 &result,
                 ComparisonResult::Mismatch {
-                    measurement: Measurement::Pixel {
-                        diff_count: 0,
+                    measurement: Measurement::Pixel(PixelAnalysis {
+                        diff_pixels: 0,
                         text: Some(TextAnalysis {
                             worst_tile: Some(TextTile {
                                 region: Region {
@@ -576,7 +550,7 @@ mod tests {
                             ..
                         }),
                         ..
-                    },
+                    }),
                     ..
                 }
             ),
@@ -584,16 +558,16 @@ mod tests {
         );
         // Text without differing pixels has no worst tile.
         assert!(matches!(
-            compare(&baseline, Mode::Pixel),
+            compare(&baseline, EXACT),
             ComparisonResult::Match {
-                measurement: Measurement::Pixel {
-                    diff_count: 0,
+                measurement: Measurement::Pixel(PixelAnalysis {
+                    diff_pixels: 0,
                     text: Some(TextAnalysis {
                         worst_tile: None,
                         ..
                     }),
                     ..
-                }
+                })
             }
         ));
 
@@ -601,7 +575,7 @@ mod tests {
         let mut masked = baseline.clone();
         masked.put_pixel(20, 2, Rgba([0, 0, 0, 255]));
         assert!(matches!(
-            compare(&masked, Mode::Ssim),
+            compare(&masked, SSIM),
             ComparisonResult::Match { .. }
         ));
     }
@@ -619,13 +593,11 @@ mod tests {
             width: 16,
             height: 16,
         }];
-        let ssim = DiffConfig::default();
         let compare = |actual: &RgbaImage, text_tolerance| {
             compare_images(
                 &baseline,
                 actual,
-                Mode::Ssim,
-                &ssim,
+                &SSIM,
                 &PixelRegions {
                     masks: &[],
                     text: &text,
@@ -643,12 +615,14 @@ mod tests {
                 compare(&glyph, 1.0),
                 ComparisonResult::Match {
                     measurement: Measurement::Ssim {
-                        failing_pixels: 0,
+                        analysis: SsimAnalysis {
+                            failing_pixels: 0,
+                            ..
+                        },
                         text: Some(TextAnalysis {
                             diff_pixels: 16,
                             ..
                         }),
-                        ..
                     }
                 }
             ),
@@ -661,11 +635,7 @@ mod tests {
             matches!(
                 &strict,
                 ComparisonResult::Mismatch {
-                    measurement: Measurement::Ssim {
-                        failing_pixels: 0,
-                        text: Some(_),
-                        ..
-                    },
+                    measurement: Measurement::Ssim { analysis: SsimAnalysis { failing_pixels: 0, .. }, text: Some(_), .. },
                     diff_image,
                 } if *diff_image.get_pixel(5, 5) == Rgba([255, 165, 0, 255])
                     && *diff_image.get_pixel(12, 12) == Rgba([255, 255, 255, 255])
@@ -700,13 +670,7 @@ mod tests {
         }
         // Without an excluded region the recolored line fails.
         assert!(matches!(
-            compare_images(
-                &baseline,
-                &removed,
-                Mode::Ssim,
-                &DiffConfig::default(),
-                &PixelRegions::NONE
-            ),
+            compare_images(&baseline, &removed, &SSIM, &PixelRegions::NONE),
             ComparisonResult::Mismatch { .. }
         ));
         let above = [Region {
@@ -715,7 +679,6 @@ mod tests {
             width: 32,
             height: 16,
         }];
-        let ssim = DiffConfig::default();
         for regions in [
             PixelRegions {
                 masks: &[],
@@ -730,7 +693,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    compare_images(&baseline, &removed, Mode::Ssim, &ssim, &regions),
+                    compare_images(&baseline, &removed, &SSIM, &regions),
                     ComparisonResult::Mismatch { .. }
                 ),
                 "{regions:?}"
@@ -742,32 +705,20 @@ mod tests {
     fn test_ssim_rejects_images_over_the_analysis_budget() {
         let big = RgbaImage::new(4097, 4096);
         assert_eq!(
-            compare_images(
-                &big,
-                &big,
-                Mode::Ssim,
-                &DiffConfig::default(),
-                &PixelRegions::NONE
-            ),
+            compare_images(&big, &big, &SSIM, &PixelRegions::NONE),
             ComparisonResult::TooLarge { size: (4097, 4096) }
         );
         // Pixel mode has no analysis workspace and keeps working at that size.
         assert_eq!(
-            compare_images(
-                &big,
-                &big,
-                Mode::Pixel,
-                &DiffConfig::default(),
-                &PixelRegions::NONE
-            ),
+            compare_images(&big, &big, &EXACT, &PixelRegions::NONE),
             ComparisonResult::Match {
-                measurement: Measurement::Pixel {
+                measurement: Measurement::Pixel(PixelAnalysis {
                     checked_pixels: 4097 * 4096,
-                    diff_count: 0,
-                    tolerated_count: 0,
-                    edge_count: 0,
+                    diff_pixels: 0,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     text: None
-                }
+                })
             }
         );
     }
@@ -776,21 +727,15 @@ mod tests {
     fn test_empty_images_match_in_pixel_mode() {
         let empty = RgbaImage::new(0, 0);
         assert_eq!(
-            compare_images(
-                &empty,
-                &empty,
-                Mode::Pixel,
-                &DiffConfig::default(),
-                &PixelRegions::NONE
-            ),
+            compare_images(&empty, &empty, &EXACT, &PixelRegions::NONE),
             ComparisonResult::Match {
-                measurement: Measurement::Pixel {
+                measurement: Measurement::Pixel(PixelAnalysis {
                     checked_pixels: 0,
-                    diff_count: 0,
-                    tolerated_count: 0,
-                    edge_count: 0,
+                    diff_pixels: 0,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     text: None
-                }
+                })
             }
         );
     }
@@ -800,8 +745,7 @@ mod tests {
         let img1 = ImageBuffer::from_pixel(100, 100, Rgba([255, 0, 0, 255]));
         let img2 = ImageBuffer::from_pixel(120, 100, Rgba([255, 0, 0, 255]));
 
-        let config = DiffConfig::default();
-        let result = compare_images(&img1, &img2, Mode::Pixel, &config, &PixelRegions::NONE);
+        let result = compare_images(&img1, &img2, &EXACT, &PixelRegions::NONE);
 
         assert!(matches!(
             result,
@@ -823,42 +767,34 @@ mod tests {
         }
 
         // With 10% threshold, it should match
-        let config = DiffConfig {
-            threshold: 0.10,
-            ..Default::default()
-        };
 
         // The measurement is reported on a match too.
-        let result = compare_images(&img1, &img2, Mode::Pixel, &config, &PixelRegions::NONE);
+        let result = compare_images(&img1, &img2, &pixel(0.10), &PixelRegions::NONE);
         assert_eq!(
             result,
             ComparisonResult::Match {
-                measurement: Measurement::Pixel {
+                measurement: Measurement::Pixel(PixelAnalysis {
                     checked_pixels: 100,
-                    diff_count: 5,
-                    tolerated_count: 0,
-                    edge_count: 0,
+                    diff_pixels: 5,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     text: None
-                }
+                })
             }
         );
 
         // With 2% threshold, it should mismatch
-        let config2 = DiffConfig {
-            threshold: 0.02,
-            ..Default::default()
-        };
-        let result2 = compare_images(&img1, &img2, Mode::Pixel, &config2, &PixelRegions::NONE);
+        let result2 = compare_images(&img1, &img2, &pixel(0.02), &PixelRegions::NONE);
         assert!(matches!(
             result2,
             ComparisonResult::Mismatch {
-                measurement: Measurement::Pixel {
+                measurement: Measurement::Pixel(PixelAnalysis {
                     checked_pixels: 100,
-                    diff_count: 5,
-                    tolerated_count: 0,
-                    edge_count: 0,
+                    diff_pixels: 5,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     text: None
-                },
+                }),
                 ..
             }
         ));
@@ -870,22 +806,17 @@ mod tests {
         let mut img2 = ImageBuffer::from_pixel(2, 2, Rgba([255, 0, 0, 255]));
         img2.put_pixel(0, 0, Rgba([0, 255, 0, 255]));
 
-        let config = DiffConfig {
-            threshold: 0.0,
-            ..Default::default()
-        };
-
-        let result = compare_images(&img1, &img2, Mode::Pixel, &config, &PixelRegions::NONE);
+        let result = compare_images(&img1, &img2, &EXACT, &PixelRegions::NONE);
         assert_eq!(
             result,
             ComparisonResult::Mismatch {
-                measurement: Measurement::Pixel {
+                measurement: Measurement::Pixel(PixelAnalysis {
                     checked_pixels: 4,
-                    diff_count: 1,
-                    tolerated_count: 0,
-                    edge_count: 0,
+                    diff_pixels: 1,
+                    tolerated_pixels: 0,
+                    edge_pixels: 0,
                     text: None
-                },
+                }),
                 diff_image: ImageBuffer::from_fn(2, 2, |x, y| {
                     if (x, y) == (0, 0) {
                         Rgba([255, 0, 255, 255])
@@ -903,21 +834,24 @@ mod tests {
         let img1 = ImageBuffer::from_pixel(100, 100, Rgba([255, 0, 0, 255]));
         let mut img2 = ImageBuffer::from_pixel(100, 100, Rgba([254, 0, 0, 255]));
 
-        let config = DiffConfig {
+        let config = Policy::Ssim(SsimPolicy {
             min_similarity: 0.95,
-            ..Default::default()
-        };
+            color_tolerance: 8.0,
+        });
 
         // Imperceptible color drift is tolerated, and the match still reports its measurement.
-        let result = compare_images(&img1, &img2, Mode::Ssim, &config, &PixelRegions::NONE);
+        let result = compare_images(&img1, &img2, &config, &PixelRegions::NONE);
         assert!(
             matches!(
                 result,
                 ComparisonResult::Match {
                     measurement: Measurement::Ssim {
-                        changed_pixels: 10_000,
-                        failing_pixels: 0,
-                        failing_region: None,
+                        analysis: SsimAnalysis {
+                            changed_pixels: 10_000,
+                            failing_pixels: 0,
+                            failing_region: None,
+                            ..
+                        },
                         ..
                     }
                 }
@@ -928,7 +862,7 @@ mod tests {
         // A single saturated pixel on a flat area is a visible change and fails.
         img2.put_pixel(50, 50, Rgba([0, 255, 0, 255]));
         assert!(matches!(
-            compare_images(&img1, &img2, Mode::Ssim, &config, &PixelRegions::NONE),
+            compare_images(&img1, &img2, &config, &PixelRegions::NONE),
             ComparisonResult::Mismatch {
                 measurement: Measurement::Ssim { .. },
                 ..
@@ -941,7 +875,7 @@ mod tests {
             .as_chunks_mut::<4>()
             .0
             .fill([0, 255, 0, 255]);
-        let result2 = compare_images(&img1, &img2, Mode::Ssim, &config, &PixelRegions::NONE);
+        let result2 = compare_images(&img1, &img2, &config, &PixelRegions::NONE);
         assert!(matches!(
             result2,
             ComparisonResult::Mismatch {

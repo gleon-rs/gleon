@@ -17,9 +17,10 @@ use gleon_engine::config::Zone;
 use gleon_model::{
     case::{RUN_ID_ENV, RunId},
     config::{
-        ArtifactsDir, GITIGNORE_LINES, GleonConfig, MetricsConfig, REQUIRE_CANONICAL_ENV, env_flag,
+        ArtifactsDir, GITIGNORE_LINES, GleonConfig, METRICS_ENV, MetricsConfig,
+        REQUIRE_CANONICAL_ENV, env_flag,
     },
-    fs::{canonical, same_component},
+    fs::{canonical, strip_dir},
     platform::PlatformKey,
     rules::{RuleMatch, RuleSet},
     tolerance::{TextTolerance, Tolerance},
@@ -226,13 +227,7 @@ impl Workspace {
     /// with the case as on disk, or `None` when it lies outside. The file and its directories may
     /// be missing (a new golden). Windows paths compare case-insensitively.
     pub fn relative_path(&self, file: &Path) -> Option<String> {
-        let mut inside = file.components();
-        for root_part in self.root.components() {
-            let part = inside.next()?;
-            if !same_component(root_part, part) {
-                return None;
-            }
-        }
+        let inside = strip_dir(file, &self.root)?;
         let mut relative = String::new();
         for part in inside {
             if !relative.is_empty() {
@@ -420,7 +415,7 @@ impl Session {
     #[must_use]
     pub fn new(options: SessionOptions) -> Self {
         let config_error = |message: String| Failure::config(format!("gleon: {message}"));
-        let metrics_override = MetricsConfig::env_override(options.metrics_env.as_deref())
+        let metrics_override = env_flag(METRICS_ENV, options.metrics_env.as_deref())
             .map_err(|e| config_error(e.to_string()));
         let artifacts_override = ArtifactsDir::from_env(options.artifacts_env.as_deref())
             .map_err(|e| config_error(e.to_string()));

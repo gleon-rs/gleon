@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "gleon"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1590,6 +1590,7 @@ dependencies = [
  "gleon-model",
  "globset",
  "hex",
+ "indicatif",
  "libc",
  "predicates",
  "serde_json",
@@ -1603,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "gleon-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1639,8 +1640,9 @@ dependencies = [
 
 [[package]]
 name = "gleon-engine"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
+ "crc32fast",
  "hex",
  "image",
  "image_hasher",
@@ -1654,9 +1656,10 @@ dependencies = [
 
 [[package]]
 name = "gleon-ffi"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
+ "crc32fast",
  "gleon-engine",
  "gleon-model",
  "image",
@@ -1666,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "gleon-model"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "crc32fast",

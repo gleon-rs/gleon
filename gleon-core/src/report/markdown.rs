@@ -52,11 +52,11 @@ impl std::fmt::Display for CodeSpanEscape<'_> {
     }
 }
 
-/// The image link of a case's baseline: for a blob (`gleon diff`), a signed URL from the
-/// resolver if available, else the blob under `base_image_url`; for the golden file of an
-/// integration (no blob), the file in the repository under `golden_base_url`, when it exists
-/// (a `missing` golden has none). Only baselines are linked; candidates and diffs never leave
-/// the machine that ran the tests.
+/// The image link of a case's baseline: for a blob (`gleon diff`), its signed URL if there is
+/// one, else the blob under `base_image_url`; for the golden file of an integration (no blob),
+/// the file in the repository under `golden_base_url`, when it exists (a `missing` golden has
+/// none). Only baselines are linked; candidates and diffs never leave the machine that ran the
+/// tests.
 fn baseline_cell(report: &CaseReport, options: &MarkdownReportOptions) -> Option<String> {
     let Some(blob) = report.golden.blob.as_ref() else {
         report.golden.sha256.as_ref()?;
@@ -69,15 +69,14 @@ fn baseline_cell(report: &CaseReport, options: &MarkdownReportOptions) -> Option
         ));
     };
     let url = options
-        .image_url_resolver
-        .and_then(|resolve| resolve(blob))
+        .signed_urls
+        .and_then(|signed| signed.get(blob).cloned())
         .or_else(|| {
             options.base_image_url.map(|base| {
                 format!(
-                    "{}/blobs/{}/{}",
+                    "{}/{}",
                     base.trim_end_matches('/'),
-                    blob.scheme(),
-                    blob.value()
+                    crate::storage::blob_key(blob)
                 )
             })
         })?;
@@ -96,8 +95,8 @@ fn quote(warning: &str) -> String {
     )
 }
 
-/// One rendered failure row, precomputed in Rust (rather than in the `pr_comment.md` template)
-/// because `options.image_url_resolver` is a closure and can't cross into a minijinja context.
+/// One rendered failure row, precomputed in Rust (rather than in the `pr_comment.md` template):
+/// the baseline link follows the options ([`baseline_cell`]).
 #[derive(Serialize)]
 struct MarkdownRow {
     name: String,
@@ -169,16 +168,6 @@ impl super::ReportGenerator {
             format!("{warnings}{footer}")
         };
 
-        // Bundled template validated by the test suite; a syntax/context mismatch here would be
-        // a build-time bug caught immediately, not a runtime condition callers need to handle.
-        #[expect(
-            clippy::expect_used,
-            reason = "bundled templates are compile-time assets validated by the test suite"
-        )]
-        let tmpl = super::JINJA_ENV
-            .get_template("pr_comment.md")
-            .expect("bundled pr_comment.md template is registered");
-
         let ctx = context! {
             total_failed => total_failed,
             has_baselines => has_baselines,
@@ -188,11 +177,13 @@ impl super::ReportGenerator {
             footer => footer,
         };
 
+        // Bundled template validated by the test suite; a syntax/context mismatch here would be
+        // a build-time bug caught immediately, not a runtime condition callers need to handle.
         #[expect(
             clippy::expect_used,
             reason = "bundled templates are compile-time assets validated by the test suite"
         )]
-        tmpl.render(ctx)
+        super::render("pr_comment.md", ctx)
             .expect("bundled pr_comment.md template renders against a well-formed context")
     }
 
@@ -365,11 +356,14 @@ mod tests {
 
     #[test]
     fn test_render_pr_comment_prefers_signed_urls() {
-        let resolver =
-            |hash: &ImageHash| Some(format!("https://signed.com/{}?token=1", hash.value()));
+        let blob: ImageHash = format!("sha256:{}", digest()).parse().unwrap();
+        let signed = std::collections::HashMap::from([(
+            blob,
+            format!("https://signed.com/{}?token=1", digest()),
+        )]);
         let options = MarkdownReportOptions {
             base_image_url: Some("https://storage.cdn.com"),
-            image_url_resolver: Some(&resolver),
+            signed_urls: Some(&signed),
             ..Default::default()
         };
         let cases = Cases::new("runs/latest", vec![with_blob("a")]);

@@ -2,16 +2,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Comparison mode for visual regression testing.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    /// Pixel-by-pixel color comparison.
-    Pixel,
-    /// Structural Similarity Index comparison.
-    Ssim,
-}
+use crate::{pixel::PixelOptions, ssim::SsimPolicy};
 
 /// Dimension value that can be specified either in pixels or as a percentage of the image size.
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -118,31 +109,22 @@ impl Serialize for Dimension {
     }
 }
 
-/// Configuration parameters for the diff engine: the input of a comparison.
+/// What a comparison tolerates: the input of [`crate::compare_images`].
 ///
 /// Never parsed: `gleon_model` reads the `diff` keys of a `gleon.yaml` rule into its tolerance
 /// and builds this from it for each comparison.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DiffConfig {
-    /// Largest share [0.0, 1.0] of differing pixels in pixel mode (0: every pixel identical, the
-    /// pixel options aside).
-    pub threshold: f64,
-    /// Minimum local SSIM [0.0, 1.0] every neighborhood must reach (SSIM mode).
-    pub min_similarity: f64,
-    /// Tolerated deviation in 8-bit channel units beyond the local 3x3 envelope (SSIM mode).
-    pub color_tolerance: f64,
-    /// Pixel mode, outside text: a differing pixel counts as equal when none of its RGBA bytes
-    /// differs by more than this, `[0, 254]` (0: off). For GPU and color-conversion drift.
-    pub channel_tolerance: u8,
-    /// Pixel mode, outside text: a differing pixel counts as equal when it looks anti-aliased in
-    /// either image (the detection of pixelmatch: between a darker and a brighter neighbor that
-    /// sit in flat areas of both images).
-    pub anti_alias: bool,
-    /// Pixel mode, outside text: a differing pixel counts as equal when the Sobel gradient of the
-    /// baseline's luma there (8-bit units, unnormalized like Skia Gold's: a sharp step of 16
-    /// gives 64) exceeds this, `[0, 254]` (0: off): the edges a sub-pixel shift or another
-    /// rasterizer moves (Skia Gold's edge mask).
-    pub edge_threshold: u8,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Policy {
+    /// Pixel by pixel (exact with a ratio of 0 and strict options).
+    Pixel {
+        /// Largest share `[0, 1]` of the strictly compared pixels that may differ (0: every
+        /// pixel identical, the options aside).
+        max_diff_ratio: f64,
+        /// The differing pixels outside text that count as equal ([`PixelOptions`]).
+        options: PixelOptions,
+    },
+    /// Structural similarity with the color envelope ([`crate::ssim`]).
+    Ssim(SsimPolicy),
 }
 
 /// The default `min_similarity` of SSIM mode.
@@ -157,31 +139,6 @@ pub const MAX_PIXEL_OPTION: u8 = 254;
 
 /// The largest `color_tolerance`: a whole 8-bit channel.
 pub const MAX_COLOR_TOLERANCE: f64 = 255.0;
-
-/// Strict: no pixel may differ in pixel mode, as no share of differing pixels is ever tolerated
-/// unless named; SSIM mode at its defaults.
-impl Default for DiffConfig {
-    fn default() -> Self {
-        Self {
-            threshold: 0.0,
-            min_similarity: DEFAULT_MIN_SIMILARITY,
-            color_tolerance: DEFAULT_COLOR_TOLERANCE,
-            channel_tolerance: 0,
-            anti_alias: false,
-            edge_threshold: 0,
-        }
-    }
-}
-
-impl From<&DiffConfig> for crate::pixel::PixelOptions {
-    fn from(config: &DiffConfig) -> Self {
-        Self {
-            channel_tolerance: config.channel_tolerance,
-            anti_alias: config.anti_alias,
-            edge_threshold: config.edge_threshold,
-        }
-    }
-}
 
 /// A bounding zone to ignore.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

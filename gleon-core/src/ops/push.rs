@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use gleon_model::platform::PlatformKey;
 use thiserror::Error;
 
 use crate::{
@@ -61,7 +62,7 @@ pub async fn push_blobs(
     context: &ResolvedContext,
     storage_config: Option<&StorageConfig>,
     all_platforms: bool,
-    platform_override: Option<&str>,
+    platform_override: Option<&PlatformKey>,
     require_storage: bool,
 ) -> Result<PushResult, PushError> {
     let paths = ensure_initialized(&context.base_dir)?;
@@ -137,7 +138,7 @@ pub async fn push_blobs(
     // Upload missing blobs in parallel with Fail-Fast short-circuiting
     transfer_with_progress(missing_blobs, adapter.concurrency(), |(hash, meta), pb| {
         let adapter = adapter.clone();
-        let src_path = blobs_root.join(hash.scheme()).join(hash.value());
+        let src_path = crate::storage::local_blob_path(&blobs_root, &hash);
         let blob_meta = crate::storage::BlobMetadata::new(&meta.test_name, &meta.platform);
         async move {
             pb.set_message(format!("Uploading {}", short_hash(&hash)));
@@ -215,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
-    async fn test_push_platform_override_validation() {
+    async fn test_push_platform_override() {
         let temp = tempfile::tempdir().unwrap();
         let gleon_dir = temp.path().join(".gleon");
         std::fs::create_dir_all(&gleon_dir).unwrap();
@@ -226,19 +227,16 @@ mod tests {
         };
         let cfg = StorageConfig::new("memory://");
 
-        // Invalid platform override segment
-        let err = push_blobs(&ctx, Some(&cfg), false, Some("../invalid"), false).await;
-        assert!(matches!(
-            err,
-            Err(PushError::Core(CoreError::Context(ContextError::Platform(
-                _
-            ))))
-        ));
-
         // Empty manifest directory for valid platform override -> 0 blobs
-        let res = push_blobs(&ctx, Some(&cfg), false, Some("macos-aarch64"), false)
-            .await
-            .unwrap();
+        let res = push_blobs(
+            &ctx,
+            Some(&cfg),
+            false,
+            Some(&PlatformKey::parse("macos-aarch64").unwrap()),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(res.total_manifest_blobs, 0);
     }
 

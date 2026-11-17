@@ -1,9 +1,11 @@
 //! gleon CLI wrapper binary.
 
-use std::path::Path;
+use std::{io::IsTerminal as _, path::Path};
 
+use anyhow::Context as _;
 use cli::{Cli, Commands};
 use gleon_core::env::EnvProvider;
+use gleon_model::platform::PlatformKey;
 use tracing::debug;
 
 mod cli;
@@ -49,7 +51,10 @@ async fn main() -> anyhow::Result<()> {
 
     // The license check runs before every command.
     let license_status = gleon_core::license::LicenseGate::verify(&env);
-    let strict = cli.strict || gleon_core::env::is_flag_on(&env, "GLEON_STRICT");
+    let strict = match gleon_core::env::flag(&env, STRICT_ENV) {
+        Ok(on) => cli.strict || on,
+        Err(e) => std::process::exit(commands::report_failure("Invalid environment", &e).into()),
+    };
     let decision = gleon_core::license::enforce_policy(license_status, strict, &env);
     for line in &decision.message {
         eprintln!("{line}");
@@ -61,12 +66,11 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(exit_code::ExitCode::LicenseBlocked.into());
     }
 
-    // An error here means the command could not start (e.g. its context could not be resolved);
-    // a command that started reports its own failures through `commands::report_failure`, and
-    // this one is reported the same way.
+    // A command fails with the context it gave its error (or the context could not be resolved):
+    // logged once, with its whole cause chain.
     let exit_code = match run(&cli, &current_dir, &env).await {
         Ok(code) => code,
-        Err(e) => i32::from(commands::report_failure("Context resolution failed", &*e)),
+        Err(e) => i32::from(commands::report(&e)),
     };
     if exit_code != 0 {
         std::process::exit(exit_code);
@@ -76,6 +80,12 @@ async fn main() -> anyhow::Result<()> {
 
 /// The variable that does what `--require-storage` of `pull` and `push` does.
 const REQUIRE_STORAGE_ENV: &str = "GLEON_REQUIRE_STORAGE";
+
+/// The environment variable of `--strict`.
+const STRICT_ENV: &str = "GLEON_STRICT";
+
+/// The context of an error that keeps a command from starting.
+const CONTEXT_FAILED: &str = "Context resolution failed";
 
 fn get_storage_config(env: &dyn EnvProvider) -> Option<gleon_core::storage::StorageConfig> {
     gleon_core::storage::StorageConfig::from_env(env)
@@ -96,7 +106,7 @@ fn resolve_context(
         current_dir,
         env,
     )
-    .map_err(|e| anyhow::anyhow!(e))
+    .context(CONTEXT_FAILED)
 }
 
 /// The platform the global `--platform` names, as the context resolved it: its canonical key
@@ -106,11 +116,11 @@ fn resolve_context(
 fn platform_filter(
     cli: &Cli,
     ctx: &gleon_core::context::ResolvedContext,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<PlatformKey>> {
     if cli.platform.is_none() {
         return Ok(None);
     }
-    Ok(Some(ctx.platform.key()?.as_str().to_owned()))
+    Ok(Some(ctx.platform.key().context(CONTEXT_FAILED)?))
 }
 
 #[expect(
@@ -140,16 +150,17 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         }
         Commands::LintManifests => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            commands::lint::run_lint(&ctx, platform_filter(cli, &ctx)?.as_deref())
+            commands::lint::run_lint(&ctx, platform_filter(cli, &ctx)?.as_ref())
         }
         Commands::Resolve { test_path, fetch } => {
             let ctx = resolve_context(cli, current_dir, env)?;
             commands::resolve::run_resolve(
                 &ctx,
-                platform_filter(cli, &ctx)?.as_deref(),
+                platform_filter(cli, &ctx)?.as_ref(),
                 test_path.as_deref(),
                 *fetch,
                 get_storage_config(env),
+                std::io::stdin().is_terminal(),
             )
             .await
         }
@@ -159,14 +170,18 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         } => {
             let ctx = resolve_context(cli, current_dir, env)?;
             let storage = get_storage_config(env);
+            // The variable is checked even with the flag: an invalid value is always an error.
+            let from_env =
+                gleon_core::env::flag(env, REQUIRE_STORAGE_ENV).context("Invalid environment")?;
             commands::pull::run_pull(
                 &ctx,
                 storage.as_ref(),
                 *all_platforms,
-                platform_filter(cli, &ctx)?.as_deref(),
-                *require_storage || gleon_core::env::is_flag_on(env, REQUIRE_STORAGE_ENV),
+                platform_filter(cli, &ctx)?.as_ref(),
+                *require_storage || from_env,
             )
             .await
+            .map(|()| exit_code::ExitCode::Success)
         }
         Commands::Push {
             all_platforms,
@@ -174,14 +189,18 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         } => {
             let ctx = resolve_context(cli, current_dir, env)?;
             let storage = get_storage_config(env);
+            // The variable is checked even with the flag: an invalid value is always an error.
+            let from_env =
+                gleon_core::env::flag(env, REQUIRE_STORAGE_ENV).context("Invalid environment")?;
             commands::push::run_push(
                 &ctx,
                 storage.as_ref(),
                 *all_platforms,
-                platform_filter(cli, &ctx)?.as_deref(),
-                *require_storage || gleon_core::env::is_flag_on(env, REQUIRE_STORAGE_ENV),
+                platform_filter(cli, &ctx)?.as_ref(),
+                *require_storage || from_env,
             )
             .await
+            .map(|()| exit_code::ExitCode::Success)
         }
         Commands::Report {
             format,
@@ -240,7 +259,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
         // The exit code is the test command's, not a gleon outcome.
         Commands::Test { command } => {
             let ctx = resolve_context(cli, current_dir, env)?;
-            return Ok(commands::test::run_test(&ctx, env, command, current_dir).await);
+            return commands::test::run_test(&ctx, env, command, current_dir).await;
         }
         Commands::Gc {
             dry_run,
@@ -258,7 +277,7 @@ async fn run(cli: &Cli, current_dir: &Path, env: &dyn EnvProvider) -> anyhow::Re
             )
             .await
         }
-    };
+    }?;
 
     Ok(code.into())
 }

@@ -38,8 +38,7 @@ pub enum DecodeError {
 const MAX_BYTES_PER_PIXEL: u64 = 8;
 
 /// Decoder limits derived from [`MAX_DIMENSION`] and [`MAX_PIXELS`].
-#[must_use]
-pub fn limits() -> Limits {
+fn limits() -> Limits {
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_DIMENSION);
     limits.max_image_height = Some(MAX_DIMENSION);
@@ -55,7 +54,8 @@ pub const fn fits_budget(width: u32, height: u32) -> bool {
         && (width as u64) * (height as u64) <= MAX_PIXELS
 }
 
-/// An image reader over `bytes` with the format guessed and [`limits`] applied.
+/// An image reader over `bytes` with the format guessed and the decoder limits ([`MAX_DIMENSION`],
+/// [`MAX_PIXELS`]) applied.
 ///
 /// # Errors
 /// Returns the I/O error of format detection.
@@ -152,11 +152,11 @@ mod tests {
         let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
         bytes.extend_from_slice(&13u32.to_be_bytes());
         bytes.extend_from_slice(&ihdr);
-        bytes.extend_from_slice(&crc32(&ihdr).to_be_bytes());
+        bytes.extend_from_slice(&crc32fast::hash(&ihdr).to_be_bytes());
         for chunk in [&b"IDAT"[..], &b"IEND"[..]] {
             bytes.extend_from_slice(&0u32.to_be_bytes());
             bytes.extend_from_slice(chunk);
-            bytes.extend_from_slice(&crc32(chunk).to_be_bytes());
+            bytes.extend_from_slice(&crc32fast::hash(chunk).to_be_bytes());
         }
         assert!(matches!(
             decode_rgba(&bytes),
@@ -165,21 +165,6 @@ mod tests {
                 height: 4097
             })
         ));
-    }
-
-    fn crc32(data: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &byte in data {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                crc = if crc & 1 == 1 {
-                    (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        !crc
     }
 
     #[test]

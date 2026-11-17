@@ -17,7 +17,7 @@ use gleon_model::platform::PlatformKey;
 use indicatif::ProgressBar;
 
 use crate::{
-    context::{ContextError, ResolvedContext},
+    context::ResolvedContext,
     manifest::{ImageHash, WorkspaceIndex},
     ops::common::CoreError,
     storage::StorageConfig,
@@ -110,15 +110,12 @@ pub fn resolve_platform_dirs(
     context: &ResolvedContext,
     manifests_root: &Path,
     all_platforms: bool,
-    platform_override: Option<&str>,
+    platform_override: Option<&PlatformKey>,
 ) -> Result<Vec<(String, PathBuf)>, CoreError> {
     if all_platforms {
         list_platform_dirs(manifests_root).map_err(CoreError::Io)
-    } else if let Some(p) = platform_override {
-        let valid_key = gleon_model::platform::validate_key(p)
-            .map_err(|e| CoreError::Context(ContextError::Platform(e)))?
-            .into_owned();
-        Ok(vec![(valid_key.clone(), manifests_root.join(valid_key))])
+    } else if let Some(key) = platform_override {
+        Ok(vec![(key.to_string(), manifests_root.join(key))])
     } else {
         let platform_key = super::common::platform_key(context)?;
         Ok(vec![(
@@ -180,21 +177,11 @@ pub fn collect_referenced_hashes(
     Ok(hash_to_meta)
 }
 
-/// Returns `storage_config` if it's set and non-blank, or logs an informational "local mode"
-/// message and returns `None` otherwise.
-///
-/// Callers early-return their operation's zeroed `*Result { local_mode: true, .. }` when this
-/// returns `None`.
+/// Returns `storage_config` if it's set and non-blank; `None` is local mode, which the caller
+/// reports (its zeroed `*Result { local_mode: true, .. }`).
+#[must_use]
 pub fn active_storage_config(storage_config: Option<&StorageConfig>) -> Option<&StorageConfig> {
-    match storage_config {
-        Some(cfg) if !cfg.url.trim().is_empty() => Some(cfg),
-        _ => {
-            tracing::info!(
-                "Operating in local mode. Cloud sync disabled. Please configure storage."
-            );
-            None
-        }
-    }
+    storage_config.filter(|cfg| !cfg.url.trim().is_empty())
 }
 
 /// Runs `task` for each item in `items` with up to `concurrency` transfers in flight, tracked by
@@ -331,15 +318,13 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_platform_dirs_override_validates_segment() {
+    fn test_resolve_platform_dirs_override() {
         let temp = tempdir().unwrap();
         let manifests = temp.path().join("manifests");
         let ctx = ResolvedContext::default();
 
-        let err = resolve_platform_dirs(&ctx, &manifests, false, Some("../invalid")).unwrap_err();
-        assert!(matches!(err, CoreError::Context(ContextError::Platform(_))));
-
-        let res = resolve_platform_dirs(&ctx, &manifests, false, Some("macos-aarch64")).unwrap();
+        let macos = PlatformKey::parse("macos-aarch64").unwrap();
+        let res = resolve_platform_dirs(&ctx, &manifests, false, Some(&macos)).unwrap();
         assert_eq!(
             res,
             vec![("macos-aarch64".to_string(), manifests.join("macos-aarch64"))]

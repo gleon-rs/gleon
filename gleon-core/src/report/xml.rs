@@ -71,14 +71,6 @@ impl super::ReportGenerator {
             .collect();
         let count = |status| test_cases.iter().filter(|tc| tc.status == status).count();
 
-        #[expect(
-            clippy::expect_used,
-            reason = "bundled templates are compile-time assets validated by the test suite"
-        )]
-        let tmpl = super::JINJA_ENV
-            .get_template("junit.xml")
-            .expect("bundled junit.xml template is registered");
-
         let ctx = context! {
             total_tests => test_cases.len(),
             failed_tests => count("failure"),
@@ -86,10 +78,7 @@ impl super::ReportGenerator {
             test_cases => Serde(test_cases),
         };
 
-        tmpl.render(ctx).map_err(|e| ReportError::Render {
-            template: "junit.xml",
-            source: e,
-        })
+        super::render("junit.xml", ctx)
     }
 }
 

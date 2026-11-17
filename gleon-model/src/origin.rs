@@ -1,5 +1,8 @@
-//! The platform a golden PNG was recorded on, kept in the PNG itself: a `tEXt` chunk with the
-//! keyword [`KEYWORD`] and the platform key (`macos-aarch64`) as its text.
+//! PNG chunks read without decoding: the size in the header ([`png_size`]), whether a PNG is
+//! complete ([`is_complete_png`]), and the platform a golden was recorded on.
+//!
+//! The platform is kept in the PNG itself: a `tEXt` chunk with the keyword [`KEYWORD`] and the
+//! platform key (`macos-aarch64`) as its text.
 //!
 //! Decoders ignore text chunks, so a stamped golden shows the same pixels everywhere and stays one
 //! file next to the tests. Tools that strip ancillary chunks (PNG optimizers) drop the origin with
@@ -76,6 +79,41 @@ fn chunks(png: &[u8]) -> Option<Chunks<'_>> {
     })
 }
 
+/// The data of the header chunk (`IHDR`, always 13 bytes) of `png` and the chunks after it;
+/// `None` unless `png` starts with the signature and a whole header chunk.
+fn header(png: &[u8]) -> Option<(&[u8; 13], Chunks<'_>)> {
+    let mut chunks = chunks(png)?;
+    let first = chunks.next().filter(|first| first.kind == *b"IHDR")?;
+    Some((first.data.try_into().ok()?, chunks))
+}
+
+/// Width and height from the header chunk of `png`, without decoding; `None` unless `png` starts
+/// with the PNG signature and a whole header chunk, or for a zero size, which the PNG
+/// specification forbids.
+#[must_use]
+pub fn png_size(png: &[u8]) -> Option<(u32, u32)> {
+    let (&[w0, w1, w2, w3, h0, h1, h2, h3, ..], _) = header(png)?;
+    let size = (
+        u32::from_be_bytes([w0, w1, w2, w3]),
+        u32::from_be_bytes([h0, h1, h2, h3]),
+    );
+    (size.0 > 0 && size.1 > 0).then_some(size)
+}
+
+/// Whether `png` is a complete PNG as far as its chunks tell.
+///
+/// It has a header of a nonzero size ([`png_size`]) and chunks that lead from it through image
+/// data (`IDAT`) to the end chunk (`IEND`). Neither the CRCs nor the pixels are checked (the
+/// decoder does that), but bytes that are no PNG, a truncated one or one without image data never
+/// pass for an image.
+#[must_use]
+pub fn is_complete_png(png: &[u8]) -> bool {
+    png_size(png).is_some()
+        && header(png).is_some_and(|(_, mut chunks)| {
+            chunks.any(|chunk| chunk.kind == *b"IDAT") && chunks.any(|chunk| chunk.kind == *b"IEND")
+        })
+}
+
 /// The origin chunk of a PNG ([`locate`]): the platform it names, and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stamp {
@@ -121,8 +159,7 @@ pub fn read(png: &[u8]) -> Option<PlatformKey> {
 /// or one whose chunks do not lead from its header to its end.
 #[must_use]
 pub fn stamp(png: &[u8], platform: &PlatformKey) -> Option<Vec<u8>> {
-    let mut chunks = chunks(png)?;
-    let header = chunks.next().filter(|first| first.kind == *b"IHDR")?;
+    let (_, chunks) = header(png)?;
     let text: [&[u8]; 3] = [KEYWORD.as_bytes(), b"\0", platform.as_str().as_bytes()];
     let length = text.iter().map(|part| part.len()).sum::<usize>();
     let mut crc = crc32fast::Hasher::new();
@@ -131,7 +168,8 @@ pub fn stamp(png: &[u8], platform: &PlatformKey) -> Option<Vec<u8>> {
         crc.update(part);
     }
     let mut out = Vec::with_capacity(png.len() + length + 12);
-    out.extend_from_slice(&png[..header.range.end]);
+    // The rest starts right after the header chunk.
+    out.extend_from_slice(&png[..chunks.at]);
     out.extend_from_slice(&u32::try_from(length).ok()?.to_be_bytes());
     out.extend_from_slice(b"tEXt");
     for part in text {
@@ -230,6 +268,79 @@ mod tests {
         assert_eq!(read(&stamped), Some(key("linux-x86_64")));
         assert!(stamped.ends_with(b"IEND\xaeB`\x82\0\0\n"));
         assert!(locate(&stamped).unwrap().is_stripped(&stamped, &padded));
+    }
+
+    /// A PNG header (signature and a whole `IHDR` chunk) of `width` x `height`, without image
+    /// data.
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut chunk = b"IHDR".to_vec();
+        chunk.extend_from_slice(&width.to_be_bytes());
+        chunk.extend_from_slice(&height.to_be_bytes());
+        chunk.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let mut header = SIGNATURE.to_vec();
+        header.extend_from_slice(&13u32.to_be_bytes());
+        header.extend_from_slice(&chunk);
+        header.extend_from_slice(&crc32fast::hash(&chunk).to_be_bytes());
+        header
+    }
+
+    #[test]
+    fn test_png_size_reads_the_header_only() {
+        let header = png_header(100, 60);
+        assert_eq!(header.len(), 33);
+        assert_eq!(png_size(&header), Some((100, 60)));
+        assert_eq!(png_size(&png()), Some((3, 2)));
+        assert_eq!(png_size(&header[..32]), None, "a header chunk cut short");
+        let mut other = header.clone();
+        other[12..16].copy_from_slice(b"IDAT");
+        assert_eq!(png_size(&other), None);
+        let mut long = header.clone();
+        long[11] = 14;
+        long.push(0);
+        assert_eq!(png_size(&long), None, "a header chunk of another length");
+        assert_eq!(png_size(&[7; 64]), None);
+        assert_eq!(png_size(&png_header(0, 60)), None);
+        assert_eq!(png_size(&png_header(100, 0)), None);
+    }
+
+    #[test]
+    fn test_a_complete_png_leads_to_its_end() {
+        let png = png();
+        assert!(is_complete_png(&png));
+        assert!(is_complete_png(&stamp(&png, &key("linux-x86_64")).unwrap()));
+        let mut padded = png.clone();
+        padded.extend_from_slice(b"\0\0\n");
+        assert!(
+            is_complete_png(&padded),
+            "bytes after the end are no part of it"
+        );
+        for broken in [
+            &b"not a png"[..],
+            &png_header(3, 2),
+            &png[..png.len() - 1],
+            &png[..png.len() - 20],
+        ] {
+            assert!(!is_complete_png(broken));
+        }
+        let mut empty = png.clone();
+        empty[16..20].copy_from_slice(&0u32.to_be_bytes());
+        assert!(!is_complete_png(&empty), "a zero width");
+        // An empty chunk of `kind`.
+        let chunk = |kind: &[u8]| {
+            [
+                &0u32.to_be_bytes()[..],
+                kind,
+                &crc32fast::hash(kind).to_be_bytes(),
+            ]
+            .concat()
+        };
+        let no_data = [png_header(3, 2), chunk(b"IEND")].concat();
+        assert!(!is_complete_png(&no_data), "no image data");
+        let data_after_end = [png_header(3, 2), chunk(b"IEND"), chunk(b"IDAT")].concat();
+        assert!(
+            !is_complete_png(&data_after_end),
+            "image data after the end"
+        );
     }
 
     #[test]

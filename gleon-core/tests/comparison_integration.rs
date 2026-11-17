@@ -14,8 +14,9 @@
 use std::path::Path;
 
 use gleon_engine::{
-    ComparisonResult, Measurement, PixelRegions, compare_images, compare_images_as,
-    config::{DiffConfig, Mode},
+    ComparisonResult, Measurement, PixelAnalysis, PixelOptions, PixelRegions, SsimPolicy,
+    compare_images, compare_images_as,
+    config::{DEFAULT_COLOR_TOLERANCE, DEFAULT_MIN_SIMILARITY, Policy},
 };
 use image::{Rgba, RgbaImage};
 
@@ -28,29 +29,26 @@ fn load_fixture(name: &str) -> RgbaImage {
         .into_rgba8()
 }
 
+/// Exact: pixel mode, no share of differing pixels, strict options.
+const EXACT: Policy = Policy::Pixel {
+    max_diff_ratio: 0.0,
+    options: PixelOptions::STRICT,
+};
+
 #[test]
 fn test_integration_1_pixel_difference() {
     let baseline = load_fixture("baseline_gradient_100x100.png");
     let actual = load_fixture("diff_1px_black_center_100x100.png");
 
-    let config = DiffConfig {
-        threshold: 0.0,
-        ..Default::default()
-    };
+    let config = EXACT;
 
-    let result = compare_images(
-        &baseline,
-        &actual,
-        Mode::Pixel,
-        &config,
-        &PixelRegions::NONE,
-    );
+    let result = compare_images(&baseline, &actual, &config, &PixelRegions::NONE);
 
     assert!(
         matches!(
             result,
             ComparisonResult::Mismatch {
-                measurement: Measurement::Pixel { diff_count: 1, .. },
+                measurement: Measurement::Pixel(PixelAnalysis { diff_pixels: 1, .. }),
                 ..
             }
         ),
@@ -69,24 +67,18 @@ fn test_integration_16_pixels_corners() {
     let baseline = load_fixture("baseline_gradient_100x100.png");
     let actual = load_fixture("diff_16px_corners_100x100.png");
 
-    let config = DiffConfig {
-        threshold: 0.0,
-        ..Default::default()
-    };
+    let config = EXACT;
 
-    let result = compare_images(
-        &baseline,
-        &actual,
-        Mode::Pixel,
-        &config,
-        &PixelRegions::NONE,
-    );
+    let result = compare_images(&baseline, &actual, &config, &PixelRegions::NONE);
 
     assert!(
         matches!(
             result,
             ComparisonResult::Mismatch {
-                measurement: Measurement::Pixel { diff_count: 16, .. },
+                measurement: Measurement::Pixel(PixelAnalysis {
+                    diff_pixels: 16,
+                    ..
+                }),
                 ..
             }
         ),
@@ -114,24 +106,18 @@ fn test_integration_transparency_difference() {
     let baseline = load_fixture("baseline_gradient_100x100.png");
     let actual = load_fixture("diff_rounded_corners_100x100.png");
 
-    let config = DiffConfig {
-        threshold: 0.0,
-        ..Default::default()
-    };
+    let config = EXACT;
 
-    let result = compare_images(
-        &baseline,
-        &actual,
-        Mode::Pixel,
-        &config,
-        &PixelRegions::NONE,
-    );
+    let result = compare_images(&baseline, &actual, &config, &PixelRegions::NONE);
 
     assert!(
         matches!(
             result,
             ComparisonResult::Mismatch {
-                measurement: Measurement::Pixel { diff_count: 10, .. },
+                measurement: Measurement::Pixel(PixelAnalysis {
+                    diff_pixels: 10,
+                    ..
+                }),
                 ..
             }
         ),
@@ -144,14 +130,8 @@ fn test_integration_dimension_mismatch_real_files() {
     let baseline = load_fixture("baseline_gradient_100x100.png");
     let actual = load_fixture("200x100.png");
 
-    let config = DiffConfig::default();
-    let result = compare_images(
-        &baseline,
-        &actual,
-        Mode::Pixel,
-        &config,
-        &PixelRegions::NONE,
-    );
+    let config = EXACT;
+    let result = compare_images(&baseline, &actual, &config, &PixelRegions::NONE);
 
     assert!(
         matches!(
@@ -172,13 +152,12 @@ fn test_integration_ssim_large_diff() {
     let baseline = load_fixture("baseline_gradient_100x100.png");
     let actual = load_fixture("diff_16px_corners_100x100.png");
 
-    let config = DiffConfig {
+    let config = Policy::Ssim(SsimPolicy {
         min_similarity: 0.999, // Too strict similarity
-        threshold: 0.05,
-        ..Default::default()
-    };
+        color_tolerance: DEFAULT_COLOR_TOLERANCE,
+    });
 
-    let result = compare_images(&baseline, &actual, Mode::Ssim, &config, &PixelRegions::NONE);
+    let result = compare_images(&baseline, &actual, &config, &PixelRegions::NONE);
 
     assert!(
         matches!(
@@ -197,41 +176,45 @@ fn test_integration_ssim_large_diff() {
 #[test]
 fn test_integration_without_diff_decides_like_with_diff() {
     // A 1% pixel threshold: one differing pixel of 10,000 passes.
-    let config = DiffConfig {
-        threshold: 0.01,
-        ..DiffConfig::default()
+    let pixel = Policy::Pixel {
+        max_diff_ratio: 0.01,
+        options: PixelOptions::STRICT,
     };
-    for (baseline, actual, mode, expected) in [
+    let ssim = Policy::Ssim(SsimPolicy {
+        min_similarity: DEFAULT_MIN_SIMILARITY,
+        color_tolerance: DEFAULT_COLOR_TOLERANCE,
+    });
+    for (baseline, actual, policy, expected) in [
         (
             "dashboard_baseline.png",
             "dashboard_actual.png",
-            Mode::Ssim,
+            ssim,
             "mismatch",
         ),
         (
             "dashboard_baseline.png",
             "dashboard_actual.png",
-            Mode::Pixel,
+            pixel,
             "mismatch",
         ),
         (
             "aa_edge_baseline_10x10.png",
             "aa_edge_actual_10x10.png",
-            Mode::Ssim,
+            ssim,
             "match",
         ),
         (
             "baseline_gradient_100x100.png",
             "diff_1px_black_center_100x100.png",
-            Mode::Pixel,
+            pixel,
             "match",
         ),
-        ("baseline_100x100.png", "200x100.png", Mode::Pixel, "size"),
+        ("baseline_100x100.png", "200x100.png", pixel, "size"),
     ] {
         let (baseline, actual) = (load_fixture(baseline), load_fixture(actual));
-        let rendered = compare_images(&baseline, &actual, mode, &config, &PixelRegions::NONE);
+        let rendered = compare_images(&baseline, &actual, &policy, &PixelRegions::NONE);
         let skipped: ComparisonResult<()> =
-            compare_images_as(&baseline, &actual, mode, &config, &PixelRegions::NONE);
+            compare_images_as(&baseline, &actual, &policy, &PixelRegions::NONE);
         let decided = match (&rendered, &skipped) {
             (
                 ComparisonResult::Match { measurement: a },
@@ -263,8 +246,8 @@ fn test_integration_without_diff_decides_like_with_diff() {
                     diff_image: None, ..
                 },
             ) => "size",
-            other => panic!("{mode:?} decided apart: {other:?}"),
+            other => panic!("{policy:?} decided apart: {other:?}"),
         };
-        assert_eq!(decided, expected, "{mode:?}");
+        assert_eq!(decided, expected, "{policy:?}");
     }
 }

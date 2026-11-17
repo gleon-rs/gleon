@@ -51,7 +51,7 @@ impl<'a> Candidate<'a> {
                 pixels,
             } => {
                 // Encoded in place: a copy of the pixels would cost as much as a frame.
-                if !fits_budget(width, height) || !is_rgba_len(width, height, pixels.len()) {
+                if !fits_budget(width, height) || Pixels::new(pixels, width, height).is_none() {
                     return None;
                 }
                 encode(pixels, width, height)
@@ -91,12 +91,6 @@ impl<'a> Candidate<'a> {
             }
         }
     }
-}
-
-/// Whether `len` bytes are the straight RGBA8 pixels of a `width` x `height` image.
-#[must_use]
-pub fn is_rgba_len(width: u32, height: u32, len: usize) -> bool {
-    u64::try_from(len).ok() == Some(u64::from(width) * u64::from(height) * 4)
 }
 
 /// The text of a candidate, judged by its tiles under its own tolerance (in SSIM mode left out
@@ -371,12 +365,11 @@ fn run<D: DiffImage, T>(
         // No diff: images of two sizes compare nothing the masks could cover.
         (Vec::new(), 0)
     };
-    let (mode, config) = tolerance.engine_config();
     let text = text.filter(|text| same_size && !text.regions.is_empty());
     let text_regions: Vec<Region> = text
         .iter()
         .flat_map(|text| text.regions)
-        .filter_map(|region| clip(region, width, height))
+        .filter_map(|region| region.clipped(width, height))
         .collect();
     let text_tolerance = text.map(|text| text.tolerance);
     let regions = PixelRegions {
@@ -384,20 +377,8 @@ fn run<D: DiffImage, T>(
         text: &text_regions,
         text_tolerance: text_tolerance.map(|text| text.0),
     };
-    let result = compare_images_as::<D>(&golden, candidate, mode, &config, &regions);
+    let result = compare_images_as::<D>(&golden, candidate, &tolerance.policy(), &regions);
     finish(result, text_tolerance).map(|found| (found, clamped_masks))
-}
-
-/// `region` clipped to a `width` x `height` image; `None` if nothing of it is inside.
-fn clip(region: &Region, width: u32, height: u32) -> Option<Region> {
-    let (x, y) = (region.x.min(width), region.y.min(height));
-    let clipped = Region {
-        x,
-        y,
-        width: region.x.saturating_add(region.width).min(width) - x,
-        height: region.y.saturating_add(region.height).min(height) - y,
-    };
-    (clipped.width > 0 && clipped.height > 0).then_some(clipped)
 }
 
 /// Encodes `image` as PNG.
@@ -431,7 +412,7 @@ fn encode(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, image::Imag
     reason = "test code: panics are assertions, and pedantic/nursery style lints are not enforced in tests"
 )]
 mod tests {
-    use gleon_engine::{Measurement, config::Dimension};
+    use gleon_engine::{Measurement, PixelAnalysis, config::Dimension};
     use image::{ImageBuffer, Rgba};
 
     use super::*;
@@ -859,13 +840,13 @@ mod tests {
 
     #[test]
     fn test_a_measurement_of_another_mode_is_an_internal_error() {
-        let pixel = Measurement::Pixel {
+        let pixel = Measurement::Pixel(PixelAnalysis {
             checked_pixels: 1,
-            diff_count: 0,
-            tolerated_count: 0,
-            edge_count: 0,
+            diff_pixels: 0,
+            tolerated_pixels: 0,
+            edge_pixels: 0,
             text: None,
-        };
+        });
         assert!(Metrics::from_measurement(&pixel, &SSIM, None).is_none());
         assert_eq!(CompareError::Internal.kind(), CaseErrorKind::Internal);
         assert!(

@@ -1,5 +1,6 @@
 //! Implementation of the `gleon diff` subcommand.
 
+use anyhow::Context as _;
 use gleon_core::{
     config::{ARTIFACTS_ENV, ArtifactsDir},
     context::ResolvedContext,
@@ -10,7 +11,7 @@ use gleon_core::{
 use tracing::info;
 
 use crate::{
-    commands::{env_run_id, pull, report_failure},
+    commands::{env_run_id, pull},
     exit_code::ExitCode,
 };
 
@@ -35,22 +36,14 @@ pub async fn run_diff(
     auto_pull: bool,
     storage_cfg: Option<StorageConfig>,
     artifacts: Option<ArtifactsDir>,
-) -> ExitCode {
-    let options = match options(env, artifacts) {
-        Ok(options) => options,
-        Err(e) => return report_failure("Error running visual diff", &*e),
-    };
+) -> anyhow::Result<ExitCode> {
+    let options = options(env, artifacts).context("Error running visual diff")?;
     if auto_pull {
-        let pull_code = pull::run_pull(ctx, storage_cfg.as_ref(), false, None, false).await;
-        if pull_code != ExitCode::Success {
-            return pull_code;
-        }
+        // A failed pull fails the diff (a pull has no other failure).
+        pull::run_pull(ctx, storage_cfg.as_ref(), false, None, false).await?;
     }
 
-    let report = match gleon_core::ops::run_diff(ctx, &options) {
-        Ok(report) => report,
-        Err(e) => return report_failure("Error running visual diff", &e),
-    };
+    let report = gleon_core::ops::run_diff(ctx, &options).context("Error running visual diff")?;
 
     info!(
         "Ran {} test(s). Passed: {}, Failed: {}.",
@@ -61,8 +54,8 @@ pub async fn run_diff(
     info!("Report generated at {}", report.runs_dir.display());
 
     if report.failed_tests == 0 {
-        ExitCode::Success
+        Ok(ExitCode::Success)
     } else {
-        ExitCode::Failure
+        Ok(ExitCode::Failure)
     }
 }

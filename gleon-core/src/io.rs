@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use gleon_model::fs::Durability;
+
 /// Errors that can occur during I/O operations.
 #[derive(Debug, thiserror::Error)]
 pub enum IoError {
@@ -35,42 +37,8 @@ pub fn load_json<T: serde::de::DeserializeOwned, P: AsRef<Path>>(path: P) -> Res
         })
 }
 
-/// Writes to a temporary file created next to `path` via the closure `f`, then durably and
-/// atomically persists it to `path` (see [`gleon_model::fs::write_atomically_with`]).
-///
-/// Returns the error of `f` itself (a [`IoError::JsonParse`] stays one), else [`IoError::Io`] if
-/// `path` is the root, the parent directory cannot be created, the temporary file cannot be
-/// created or written, or the final persist/fsync step fails.
-fn write_file_atomically(
-    path: &Path,
-    f: impl FnOnce(&mut std::io::BufWriter<&std::fs::File>) -> Result<(), IoError>,
-) -> Result<(), IoError> {
-    // The closure's own error is carried out of the `io::Result` of the shared writer.
-    let mut closure_error = None;
-    gleon_model::fs::write_atomically_with(path, gleon_model::fs::Durability::Durable, |writer| {
-        f(writer).map_err(|e| {
-            closure_error = Some(e);
-            std::io::Error::other("the writer failed")
-        })
-    })
-    .map_err(|e| {
-        tracing::error!("Failed to save file atomically to {:?}: {}", path, e);
-        closure_error.take().unwrap_or(IoError::Io(e))
-    })
-}
-
-/// Atomically writes raw bytes to `path`.
-///
-/// # Errors
-/// Returns [`IoError`] if the write or the atomic persist step fails.
-pub fn save_file_atomically<P: AsRef<Path>>(path: P, content: &[u8]) -> Result<(), IoError> {
-    write_file_atomically(path.as_ref(), |writer| {
-        use std::io::Write;
-        writer.write_all(content).map_err(IoError::Io)
-    })
-}
-
-/// Serializes `value` to pretty-printed JSON and atomically writes it to `path`.
+/// Serializes `value` to pretty-printed JSON and writes it to `path` atomically and durably
+/// ([`gleon_model::fs::write_atomically`]): for committed files (manifests).
 ///
 /// # Errors
 /// Returns [`IoError::JsonParse`] if serialization fails, or [`IoError::Io`] if the atomic
@@ -79,9 +47,9 @@ pub fn save_json_atomically<T: serde::Serialize + ?Sized, P: AsRef<Path>>(
     path: P,
     value: &T,
 ) -> Result<(), IoError> {
-    write_file_atomically(path.as_ref(), |writer| {
-        serde_json::to_writer_pretty(writer, value).map_err(IoError::JsonParse)
-    })
+    let json = serde_json::to_vec_pretty(value)?;
+    gleon_model::fs::write_atomically(path.as_ref(), &json, Durability::Durable)
+        .map_err(IoError::Io)
 }
 
 /// Most threads working on small files (reading manifests and case reports, removing case
@@ -165,55 +133,9 @@ mod tests {
         assert_eq!(map_files(&files, |&file| file * 2)[last], last * 2);
     }
 
-    #[test]
-    #[cfg(all(unix, not(miri)))]
-    fn test_write_file_atomically_new_file_is_group_world_readable() {
-        // A freshly created file must land with the usual 0644-style mode, not the 0600 that
-        // `tempfile` defaults to: manifests written this way are committed to Git and read back
-        // by other users/containers in CI.
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("fresh.json");
-        save_file_atomically(&path, b"{}").unwrap();
-
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644, "expected 0644 for a new file, got {mode:o}");
-    }
-
-    #[test]
-    #[cfg(all(unix, not(miri)))]
-    fn test_write_file_atomically_preserves_existing_mode() {
-        // When the target already exists its mode wins, so a deliberately locked-down file
-        // stays locked down across rewrites.
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("existing.json");
-        std::fs::write(&path, b"old").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        save_file_atomically(&path, b"new").unwrap();
-
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "existing mode must be preserved, got {mode:o}");
-        assert_eq!(std::fs::read(&path).unwrap(), b"new");
-    }
-
     #[derive(Serialize)]
     struct Dummy {
         value: String,
-    }
-
-    #[test]
-    fn test_write_file_atomically_returns_the_writer_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("a.json");
-        let result = write_file_atomically(&path, |_| {
-            Err(IoError::Io(std::io::Error::other("serializer failed")))
-        });
-        assert!(matches!(result, Err(IoError::Io(ref e)) if e.to_string() == "serializer failed"));
-        assert!(!path.exists());
     }
 
     #[test]

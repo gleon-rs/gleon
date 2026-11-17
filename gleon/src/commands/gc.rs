@@ -1,33 +1,13 @@
+use anyhow::Context as _;
 use gleon_core::{
     context::ResolvedContext,
     ops::gc::{GcMode, GcOptions, garbage_collect},
     storage::StorageConfig,
 };
+use indicatif::BinaryBytes;
 use tracing::info;
 
-use crate::{commands::report_failure, exit_code::ExitCode};
-
-/// Formats a byte count into a human-readable string.
-#[must_use]
-pub fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * 1024 * 1024;
-
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "human-readable formatting tolerates f64 rounding"
-    )]
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
+use crate::exit_code::ExitCode;
 
 /// Runs the `gleon gc` subcommand.
 ///
@@ -38,18 +18,17 @@ pub async fn run_gc(
     dry_run: bool,
     grace_period_hours: u32,
     force: bool,
-) -> ExitCode {
+) -> anyhow::Result<ExitCode> {
     if let Some(code) = crate::commands::goldens_nothing_to_do(ctx, "collect") {
-        return code;
+        return Ok(code);
     }
     info!("Running storage garbage collection...");
 
     let options = GcOptions::new(dry_run, grace_period_hours, force);
 
-    let res = match garbage_collect(ctx, storage_cfg, &options).await {
-        Ok(res) => res,
-        Err(e) => return report_failure("Error during storage garbage collection", &e),
-    };
+    let res = garbage_collect(ctx, storage_cfg, &options)
+        .await
+        .context("Error during storage garbage collection")?;
 
     match res.mode {
         GcMode::LocalMode => {
@@ -59,7 +38,7 @@ pub async fn run_gc(
             info!(
                 "[DRY RUN] Would delete {} orphan blob(s) ({} freed). {} referenced, {} protected by {}-hour grace period.",
                 res.deleted_blobs,
-                format_bytes(res.bytes_freed),
+                BinaryBytes(res.bytes_freed),
                 res.referenced_blobs,
                 res.protected_by_grace_period,
                 grace_period_hours
@@ -69,7 +48,7 @@ pub async fn run_gc(
             for blob in &res.orphans {
                 let age = now.signed_duration_since(blob.last_modified);
                 let age_hours = age.num_hours();
-                let size_str = format_bytes(blob.size);
+                let size_str = BinaryBytes(blob.size);
                 let age_str = format!("{age_hours}h");
                 info!(
                     hash = %blob.hash,
@@ -86,7 +65,7 @@ pub async fn run_gc(
                     res.referenced_blobs, res.protected_by_grace_period, grace_period_hours
                 );
             } else {
-                let freed_str = format_bytes(res.bytes_freed);
+                let freed_str = BinaryBytes(res.bytes_freed);
                 info!(
                     "Successfully deleted {} orphan blob(s) ({} freed). {} failed. {} referenced, {} protected by {}-hour grace period.",
                     res.deleted_blobs,
@@ -97,12 +76,12 @@ pub async fn run_gc(
                     grace_period_hours
                 );
                 if res.failed_blobs > 0 {
-                    return ExitCode::Failure;
+                    return Ok(ExitCode::Failure);
                 }
             }
         }
     }
-    ExitCode::Success
+    Ok(ExitCode::Success)
 }
 
 #[cfg(all(test, not(miri)))]
@@ -121,6 +100,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::commands::exit_code;
 
     #[tokio::test]
     async fn test_run_gc_uninitialized_and_local_mode() {
@@ -129,28 +109,28 @@ mod tests {
 
         // 1. Uninitialized with storage -> Failure
         let cfg = StorageConfig::new("memory://");
-        let exit_code_uninit = run_gc(&ctx, Some(&cfg), false, 24, false).await;
+        let exit_code_uninit = exit_code(run_gc(&ctx, Some(&cfg), false, 24, false).await);
         assert_eq!(exit_code_uninit, ExitCode::Failure);
 
         // 2. Initialized + Local Mode (no storage) -> Success
         gleon_core::ops::init_workspace(&ctx, None).unwrap();
-        let exit_code_local = run_gc(&ctx, None, false, 24, false).await;
+        let exit_code_local = exit_code(run_gc(&ctx, None, false, 24, false).await);
         assert_eq!(exit_code_local, ExitCode::Success);
 
         // 3. Initialized + Storage Configured in non-git directory without force -> Failure (GitRequired)
-        let exit_code_non_git = run_gc(&ctx, Some(&cfg), false, 24, false).await;
+        let exit_code_non_git = exit_code(run_gc(&ctx, Some(&cfg), false, 24, false).await);
         assert_eq!(exit_code_non_git, ExitCode::Failure);
 
         // 4. Initialized + Storage Configured + force -> Success
-        let exit_code_force = run_gc(&ctx, Some(&cfg), false, 24, true).await;
+        let exit_code_force = exit_code(run_gc(&ctx, Some(&cfg), false, 24, true).await);
         assert_eq!(exit_code_force, ExitCode::Success);
 
         // 5. Initialized + Storage Configured + Dry Run (allowed without force) -> Success
-        let exit_code_dry = run_gc(&ctx, Some(&cfg), true, 24, false).await;
+        let exit_code_dry = exit_code(run_gc(&ctx, Some(&cfg), true, 24, false).await);
         assert_eq!(exit_code_dry, ExitCode::Success);
 
         // 6. Initialized + Storage Configured + Grace Period < 24h fails even with force
-        let exit_code_short = run_gc(&ctx, Some(&cfg), false, 12, true).await;
+        let exit_code_short = exit_code(run_gc(&ctx, Some(&cfg), false, 12, true).await);
         assert_eq!(exit_code_short, ExitCode::Failure);
     }
 
@@ -194,11 +174,11 @@ mod tests {
         drop(f);
 
         // 1. Dry Run with orphan -> outputs orphan candidate log (lines 62-71)
-        let exit_code_dry = run_gc(&ctx, Some(&cfg), true, 24, true).await;
+        let exit_code_dry = exit_code(run_gc(&ctx, Some(&cfg), true, 24, true).await);
         assert_eq!(exit_code_dry, ExitCode::Success);
 
         // 2. Executed mode with orphan -> deletes blob (lines 80-88)
-        let exit_code_exec = run_gc(&ctx, Some(&cfg), false, 24, true).await;
+        let exit_code_exec = exit_code(run_gc(&ctx, Some(&cfg), false, 24, true).await);
         assert_eq!(exit_code_exec, ExitCode::Success);
 
         // 3. Failed blob deletion (lines 89-91)
@@ -229,7 +209,7 @@ mod tests {
             let orig_perm = std::fs::metadata(parent_dir).unwrap().permissions();
             std::fs::set_permissions(parent_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-            let exit_code_fail = run_gc(&ctx, Some(&cfg), false, 24, true).await;
+            let exit_code_fail = exit_code(run_gc(&ctx, Some(&cfg), false, 24, true).await);
 
             std::fs::set_permissions(parent_dir, orig_perm).unwrap();
             assert_eq!(exit_code_fail, ExitCode::Failure);
@@ -237,11 +217,13 @@ mod tests {
     }
 
     #[test]
-    fn test_format_bytes() {
-        assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(1024), "1.00 KiB");
-        assert_eq!(format_bytes(1536), "1.50 KiB");
-        assert_eq!(format_bytes(10 * 1024 * 1024), "10.00 MiB");
-        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.00 GiB");
+    /// The sizes `gleon gc` prints (binary units of indicatif).
+    fn test_sizes_in_binary_units() {
+        let size = |bytes: u64| BinaryBytes(bytes).to_string();
+        assert_eq!(size(500), "500 B");
+        assert_eq!(size(1024), "1.00 KiB");
+        assert_eq!(size(1536), "1.50 KiB");
+        assert_eq!(size(10 * 1024 * 1024), "10.00 MiB");
+        assert_eq!(size(2 * 1024 * 1024 * 1024), "2.00 GiB");
     }
 }

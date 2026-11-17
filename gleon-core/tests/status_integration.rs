@@ -18,8 +18,8 @@ use std::{fs, path::Path};
 use gleon_core::{
     context::{ContextOptions, ResolvedContext},
     ops::{
-        Explained, StatusError, StatusReport, check_status, diff::DiffOptions, init_workspace,
-        run_diff, stage_workspace,
+        Explained, StatusReport, check_status, diff::DiffOptions, init_workspace, run_diff,
+        stage_workspace,
     },
 };
 
@@ -34,7 +34,7 @@ fn test_status_uninitialized_fails() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        StatusError::Core(gleon_core::ops::common::CoreError::NotInitialized)
+        gleon_core::ops::common::CoreError::NotInitialized
     ));
 }
 
@@ -290,7 +290,7 @@ fn test_status_missing_baseline_blob_is_uncomparable() {
         }
     }
 
-    // check_status should NOT fail with StatusError::Io, but name the missing blob
+    // check_status should NOT fail with an I/O error, but name the missing blob
     let res = check_status(&ctx).expect("check_status should succeed even if blob missing");
     assert!(res.modified.is_empty(), "{res:?}");
     assert!(
@@ -440,7 +440,7 @@ fn test_status_refuses_a_goldens_workspace() {
     let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp_dir.path()).unwrap();
     assert!(matches!(
         check_status(&ctx).unwrap_err(),
-        StatusError::Core(gleon_core::ops::common::CoreError::BaselinesAreGoldens)
+        gleon_core::ops::common::CoreError::BaselinesAreGoldens
     ));
 }
 

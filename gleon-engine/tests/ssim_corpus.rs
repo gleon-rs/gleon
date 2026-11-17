@@ -25,7 +25,7 @@
 
 use gleon_engine::{
     ComparisonResult, PixelOptions, PixelRegions, compare_images,
-    config::{DiffConfig, Mode},
+    config::{DEFAULT_COLOR_TOLERANCE, DEFAULT_MIN_SIMILARITY, Policy},
     pixel,
     ssim::{SsimPolicy, analyze},
 };
@@ -444,11 +444,10 @@ fn known_limits() -> Vec<(&'static str, Scene)> {
     ]
 }
 
-fn default_policy() -> SsimPolicy {
-    let config = DiffConfig::default();
+const fn default_policy() -> SsimPolicy {
     SsimPolicy {
-        min_similarity: config.min_similarity,
-        color_tolerance: config.color_tolerance,
+        min_similarity: DEFAULT_MIN_SIMILARITY,
+        color_tolerance: DEFAULT_COLOR_TOLERANCE,
     }
 }
 
@@ -638,7 +637,7 @@ fn test_pixel_options_on_the_corpus() {
 #[test]
 fn test_compare_images_uses_the_same_policy() {
     let golden = render(Scene::default());
-    let config = DiffConfig::default();
+    let config = Policy::Ssim(default_policy());
     assert!(matches!(
         compare_images(
             &golden,
@@ -646,7 +645,6 @@ fn test_compare_images_uses_the_same_policy() {
                 offset: (0.3, 0.2),
                 ..Scene::default()
             }),
-            Mode::Ssim,
             &config,
             &PixelRegions::NONE
         ),
@@ -659,7 +657,6 @@ fn test_compare_images_uses_the_same_policy() {
                 icon: false,
                 ..Scene::default()
             }),
-            Mode::Ssim,
             &config,
             &PixelRegions::NONE
         ),
@@ -730,8 +727,7 @@ fn memory_at_the_analysis_budget() {
     let result = compare_images(
         &base,
         &cand,
-        Mode::Ssim,
-        &DiffConfig::default(),
+        &Policy::Ssim(default_policy()),
         &PixelRegions {
             masks: &[],
             text: &text,

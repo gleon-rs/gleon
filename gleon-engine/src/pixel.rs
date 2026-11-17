@@ -121,7 +121,7 @@ pub struct TextAnalysis {
 }
 
 /// What [`compare`] measured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PixelAnalysis {
     /// Pixels compared strictly: neither masked nor text under a text tolerance.
     pub checked_pixels: u64,

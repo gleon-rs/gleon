@@ -219,7 +219,7 @@ All commands support the following global options:
 
 ### Environment Variables
 
-gleon reads these from the process environment and, as defaults, from `.gleon/.env` and `.gleon/.env.local` of the workspace (`GLEON_RUN_ID` from the process environment only).
+gleon reads these from the process environment and, as defaults, from `.gleon/.env` and `.gleon/.env.local` of the workspace (`GLEON_RUN_ID` from the process environment only). A flag (`GLEON_STRICT`, `GLEON_REQUIRE_STORAGE`, `GLEON_METRICS`, `GLEON_REQUIRE_CANONICAL`) is `1`, `true`, `0` or `false` (blank is unset); gleon stops with an error for any other value, also when the matching command-line flag is given.
 
 | Variable | Meaning |
 | :--- | :--- |
@@ -234,7 +234,7 @@ gleon reads these from the process environment and, as defaults, from `.gleon/.e
 | `GLEON_REQUIRE_STORAGE` | `1` or `true`: `pull` and `push` fail without remote storage (`--require-storage`). |
 | `GLEON_RUN_ID` | The run that `gleon test` records and that `report`, `dashboard` and `approve` read (see [Case reports](#case-reports-metrics)). |
 | `GLEON_METRICS`, `GLEON_ARTIFACTS_DIR` | Override `metrics.enabled` and `artifacts` of `.gleon/gleon.yaml`. |
-| `GLEON_REQUIRE_CANONICAL` | `1`: integrations compare goldens recorded elsewhere as goldens of the `fallback_platform` (see [Goldens of integrations on several platforms](#goldens-of-integrations-on-several-platforms)). |
+| `GLEON_REQUIRE_CANONICAL` | `1` or `true`: integrations compare goldens recorded elsewhere as goldens of the `fallback_platform` (see [Goldens of integrations on several platforms](#goldens-of-integrations-on-several-platforms)). |
 | `GLEON_HTML_ARTIFACT_URL` | The link to the full HTML report in a PR comment with more failures than it lists (the Action sets it). |
 
 ### Exit Codes
@@ -393,7 +393,7 @@ rule, except a golden the workspace excludes (written and compared like Flutter 
 is pixels like the rest, unless the call sets a text tolerance). Its text is
 compared there (`text_tolerance` 0.05: a pixel of font-engine noise per 16x16 square passes, a
 changed digit fails) and ignored elsewhere (1, layout exact). A golden without the stamp
-(recorded by another tool, or by the Flutter package before 0.4.0) counts as recorded on
+(recorded by Flutter or another tool, or by the Flutter package before 0.5.0) counts as recorded on
 `fallback_platform`, with the names a process reports (`std::env::consts`: `macos-aarch64`,
 `linux-x86_64`, `windows-x86_64`; `macos-arm64`, `linux-x64` and `darwin` are read as them, in
 the config, the flags and the variables alike, while a custom key such as `custom-arm64` keeps

@@ -1,5 +1,6 @@
 words = [
     "amd64",
+    "getrandom",
     "armv",
     "beos",
     "osx",

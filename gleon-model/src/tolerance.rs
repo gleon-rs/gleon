@@ -7,8 +7,8 @@
 )]
 
 use gleon_engine::{
-    PixelOptions,
-    config::{DiffConfig, MAX_COLOR_TOLERANCE, MAX_PIXEL_OPTION, Mode},
+    PixelOptions, SsimPolicy,
+    config::{MAX_COLOR_TOLERANCE, MAX_PIXEL_OPTION, Policy},
 };
 use serde::{Deserialize, Serialize};
 
@@ -223,36 +223,22 @@ impl Tolerance {
         }
     }
 
-    /// The engine mode and configuration implementing this tolerance (exact is pixel mode with a
-    /// zero threshold).
+    /// The engine policy implementing this tolerance (exact is pixel mode with a zero ratio and
+    /// strict options).
     #[must_use]
-    pub fn engine_config(&self) -> (Mode, DiffConfig) {
-        let base = DiffConfig::default();
+    pub const fn policy(&self) -> Policy {
         match *self {
-            Self::Exact {} | Self::Pixel { .. } => {
-                let options = self.pixel_options();
-                (
-                    Mode::Pixel,
-                    DiffConfig {
-                        threshold: self.max_diff_ratio(),
-                        channel_tolerance: options.channel_tolerance,
-                        anti_alias: options.anti_alias,
-                        edge_threshold: options.edge_threshold,
-                        ..base
-                    },
-                )
-            }
+            Self::Exact {} | Self::Pixel { .. } => Policy::Pixel {
+                max_diff_ratio: self.max_diff_ratio(),
+                options: self.pixel_options(),
+            },
             Self::Ssim {
                 min_similarity,
                 color_tolerance,
-            } => (
-                Mode::Ssim,
-                DiffConfig {
-                    min_similarity,
-                    color_tolerance,
-                    ..base
-                },
-            ),
+            } => Policy::Ssim(SsimPolicy {
+                min_similarity,
+                color_tolerance,
+            }),
         }
     }
 }
@@ -467,22 +453,23 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_config_round_trip() {
+    fn test_policy_round_trip() {
         let pixel = Tolerance::Pixel {
             max_diff_ratio: 0.05,
             channel_tolerance: 4,
             anti_alias: true,
             edge_threshold: 64,
         };
-        let (_, config) = pixel.engine_config();
         assert_eq!(
-            (
-                config.threshold,
-                config.channel_tolerance,
-                config.anti_alias,
-                config.edge_threshold
-            ),
-            (0.05, 4, true, 64)
+            pixel.policy(),
+            Policy::Pixel {
+                max_diff_ratio: 0.05,
+                options: PixelOptions {
+                    channel_tolerance: 4,
+                    anti_alias: true,
+                    edge_threshold: 64,
+                },
+            }
         );
         // Options are left out of reports while off, and default when parsed.
         assert_eq!(
@@ -510,12 +497,20 @@ mod tests {
             min_similarity: 0.7,
             color_tolerance: 12.0,
         };
-        let (mode, config) = ssim.engine_config();
-        assert_eq!(mode, Mode::Ssim);
-        assert_eq!((config.min_similarity, config.color_tolerance), (0.7, 12.0));
-
-        let (mode, config) = Tolerance::Exact {}.engine_config();
-        assert_eq!((mode, config.threshold), (Mode::Pixel, 0.0));
+        assert_eq!(
+            ssim.policy(),
+            Policy::Ssim(SsimPolicy {
+                min_similarity: 0.7,
+                color_tolerance: 12.0,
+            })
+        );
+        assert_eq!(
+            Tolerance::Exact {}.policy(),
+            Policy::Pixel {
+                max_diff_ratio: 0.0,
+                options: PixelOptions::STRICT,
+            }
+        );
     }
 
     #[test]

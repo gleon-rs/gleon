@@ -70,18 +70,13 @@ pub fn find_root(
     }
 }
 
-/// Whether `path` is `dir` or lies inside it ([`crate::fs::same_component`]). Only paths of the
+/// Whether `path` is `dir` or lies inside it ([`crate::fs::strip_dir`]). Only paths of the
 /// same kind compare: a relative `dir` (the empty path a relative walk ends with among them,
 /// whose components are none) never holds an absolute `path`.
 fn is_within(path: &Path, dir: &Path) -> bool {
-    if path.is_absolute() != dir.is_absolute() || dir.as_os_str().is_empty() {
-        return false;
-    }
-    let mut path = path.components();
-    dir.components().all(|own| {
-        path.next()
-            .is_some_and(|other| crate::fs::same_component(own, other))
-    })
+    path.is_absolute() == dir.is_absolute()
+        && !dir.as_os_str().is_empty()
+        && crate::fs::strip_dir(path, dir).is_some()
 }
 
 /// Whether `dir` is the root of a repository; `dir` is the same afterwards (it is extended in

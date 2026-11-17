@@ -15,15 +15,6 @@ use tracing::debug;
 pub trait EnvProvider: Sync {
     /// Gets the environment variable value.
     fn get_var(&self, key: &str) -> Option<String>;
-
-    /// Returns `true` if the environment variable is set.
-    ///
-    /// The default implementation defers to [`EnvProvider::get_var`]. Implementations backed
-    /// by the real process environment should override this to answer a presence check
-    /// without decoding and allocating a value the caller only wants to check for.
-    fn has_var(&self, key: &str) -> bool {
-        self.get_var(key).is_some()
-    }
 }
 
 /// Standard OS environment variable provider.
@@ -32,10 +23,6 @@ pub struct OsEnv;
 impl EnvProvider for OsEnv {
     fn get_var(&self, key: &str) -> Option<String> {
         std::env::var(key).ok()
-    }
-
-    fn has_var(&self, key: &str) -> bool {
-        std::env::var_os(key).is_some()
     }
 }
 
@@ -57,13 +44,6 @@ impl EnvProvider for MergedEnv {
     fn get_var(&self, key: &str) -> Option<String> {
         OsEnv.get_var(key).or_else(|| self.dotenv.get(key).cloned())
     }
-
-    /// As [`Self::get_var`] without copying the value: a value of the process that is no
-    /// UTF-8 falls back to `dotenv` there too.
-    fn has_var(&self, key: &str) -> bool {
-        std::env::var_os(key).is_some_and(|value| value.to_str().is_some())
-            || self.dotenv.contains_key(key)
-    }
 }
 
 /// Gets an environment variable, trims surrounding whitespace, and treats a blank result the
@@ -75,19 +55,30 @@ pub fn get_trimmed_var(env: &dyn EnvProvider, key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Whether the flag variable `key` of `env` is on.
+/// Whether the flag variable `key` of `env` is on: `1` or `true` turn it on, `0`, `false`, blank
+/// or unset leave it off (the rule of every `GLEON_*` flag, [`gleon_model::config::env_flag`]).
 ///
-/// It is on when set to anything but a false-like value (`0`, `false`, `no`, `n`, `f`, `off`, any
-/// case) or blank. Read through `env`, so a [`MergedEnv`] takes it from the process environment,
-/// else from `.gleon/.env` and `.gleon/.env.local`.
+/// Read through `env`, so a [`MergedEnv`] takes it from the process environment, else from
+/// `.gleon/.env` and `.gleon/.env.local`.
+///
+/// # Errors
+/// Returns [`gleon_model::config::ConfigError::InvalidEnvFlag`] for any other value, naming the
+/// variable.
+pub fn flag(
+    env: &dyn EnvProvider,
+    key: &'static str,
+) -> Result<bool, gleon_model::config::ConfigError> {
+    gleon_model::config::env_flag(key, env.get_var(key).as_deref()).map(|on| on == Some(true))
+}
+
+/// Whether the variable `key` a CI provider sets (`GITHUB_ACTIONS`, `CIRCLECI`, `TF_BUILD`, ...)
+/// marks a run there: `true` in any case or `1`, surrounding whitespace aside.
+///
+/// Lenient, unlike [`flag`]: gleon does not own these values, so any other value is simply off.
 #[must_use]
-pub fn is_flag_on(env: &dyn EnvProvider, key: &str) -> bool {
-    get_trimmed_var(env, key).is_some_and(|value| {
-        !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "n" | "f" | "off"
-        )
-    })
+pub fn is_ci_marker(env: &dyn EnvProvider, key: &str) -> bool {
+    get_trimmed_var(env, key)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
 }
 
 /// The home directory of the user ([`gleon_model::workspace::HOME_VAR`] of `env`), resolved like
@@ -198,37 +189,53 @@ mod tests {
     }
 
     #[test]
-    fn test_is_flag_on_reads_false_like_values_as_off() {
+    fn test_flags_are_one_true_zero_or_false() {
         let env = MapEnv(
             [
                 ("ONE", "1"),
                 ("TRUE", " TRUE "),
-                ("ANY", "yes please"),
                 ("ZERO", "0"),
                 ("FALSE", "False"),
-                ("NO", "no"),
-                ("N", "N"),
-                ("F", "f"),
-                ("OFF", " off "),
                 ("BLANK", "  "),
+                ("YES", "yes"),
             ]
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value.to_owned()))
             .collect(),
         );
-        for on in ["ONE", "TRUE", "ANY"] {
-            assert!(is_flag_on(&env, on), "{on}");
+        for on in ["ONE", "TRUE"] {
+            assert!(flag(&env, on).unwrap(), "{on}");
         }
-        for off in ["ZERO", "FALSE", "NO", "N", "F", "OFF", "BLANK", "MISSING"] {
-            assert!(!is_flag_on(&env, off), "{off}");
+        for off in ["ZERO", "FALSE", "BLANK", "MISSING"] {
+            assert!(!flag(&env, off).unwrap(), "{off}");
         }
+        assert_eq!(
+            flag(&env, "YES").unwrap_err().to_string(),
+            "YES must be 1, 0, true or false (got 'yes')"
+        );
     }
 
+    /// A CI marker is read leniently: on as `true` (any case) or `1`, off for anything else.
     #[test]
-    fn test_has_var_default_impl_matches_get_var() {
-        let env = MapEnv(Map::from([("SET".to_string(), String::new())]));
-        assert!(env.has_var("SET"));
-        assert!(!env.has_var("MISSING"));
+    fn test_ci_markers() {
+        let env = MapEnv(
+            [
+                ("ON", " TRUE "),
+                ("ONE", "1"),
+                ("OFF", "false"),
+                ("OTHER", "yes"),
+                ("BLANK", ""),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        );
+        for on in ["ON", "ONE"] {
+            assert!(is_ci_marker(&env, on), "{on}");
+        }
+        for off in ["OFF", "OTHER", "BLANK", "MISSING"] {
+            assert!(!is_ci_marker(&env, off), "{off}");
+        }
     }
 
     /// The process environment wins over `.env` values, which fill the keys it lacks.
@@ -243,11 +250,8 @@ mod tests {
         ]));
 
         assert_eq!(env.get_var("PATH"), Some(process));
-        assert!(env.has_var("PATH"));
         assert_eq!(env.get_var(only_dotenv).as_deref(), Some("from .env"));
-        assert!(env.has_var(only_dotenv));
         assert_eq!(env.get_var("GLEON_TEST_MERGED_ENV_UNSET"), None);
-        assert!(!env.has_var("GLEON_TEST_MERGED_ENV_UNSET"));
     }
 
     /// `--config` of a nested workspace reads the `.env` of that workspace, not the one of the

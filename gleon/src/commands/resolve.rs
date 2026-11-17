@@ -1,46 +1,28 @@
 //! Implementation of the `gleon resolve` subcommand for interactive conflict resolution.
 
-use std::io::IsTerminal;
-
+use anyhow::Context as _;
 use dialoguer::Select;
 use gleon_core::{
     context::ResolvedContext,
     ops::{apply_resolution, resolve::ConflictedManifestItem, scan_conflicts},
     storage::{ObjectStoreAdapter, StorageConfig},
 };
+use gleon_model::platform::PlatformKey;
 use tracing::{error, info, warn};
 
-use crate::{commands::report_failure, exit_code::ExitCode};
+use crate::exit_code::ExitCode;
 
 /// Runs interactive resolution for conflicted manifest files: those of `platform_filter` (the
-/// global `--platform`) only when it is given.
+/// canonical key of the context's platform, `--platform`) whose test path contains
+/// `test_path_filter`, prompting in the terminal (`is_terminal`: stdin is one) for each.
 pub async fn run_resolve(
     ctx: &ResolvedContext,
-    platform_filter: Option<&str>,
-    test_path_filter: Option<&str>,
-    fetch: bool,
-    storage_config: Option<StorageConfig>,
-) -> ExitCode {
-    run_resolve_with_tty(
-        ctx,
-        platform_filter,
-        test_path_filter,
-        fetch,
-        storage_config,
-        std::io::stdin().is_terminal(),
-    )
-    .await
-}
-
-/// Helper for running resolution with an explicit terminal TTY status.
-pub async fn run_resolve_with_tty(
-    ctx: &ResolvedContext,
-    platform_filter: Option<&str>,
+    platform_filter: Option<&PlatformKey>,
     test_path_filter: Option<&str>,
     fetch: bool,
     storage_config: Option<StorageConfig>,
     is_terminal: bool,
-) -> ExitCode {
+) -> anyhow::Result<ExitCode> {
     run_resolve_impl(
         ctx,
         platform_filter,
@@ -64,25 +46,23 @@ pub async fn run_resolve_with_tty(
 
 pub async fn run_resolve_impl<F>(
     ctx: &ResolvedContext,
-    platform_filter: Option<&str>,
+    platform_filter: Option<&PlatformKey>,
     test_path_filter: Option<&str>,
     fetch: bool,
     storage_config: Option<StorageConfig>,
     is_terminal: bool,
     selector: F,
-) -> ExitCode
+) -> anyhow::Result<ExitCode>
 where
     F: FnMut(&ConflictedManifestItem) -> Result<usize, anyhow::Error>,
 {
     if let Some(code) = crate::commands::goldens_nothing_to_do(ctx, "resolve") {
-        return code;
+        return Ok(code);
     }
     info!("Scanning for conflicted manifest files...");
 
-    let mut conflicts = match scan_conflicts(&ctx.base_dir, platform_filter) {
-        Ok(c) => c,
-        Err(e) => return report_failure("Error scanning for conflicts", &e),
-    };
+    let mut conflicts =
+        scan_conflicts(&ctx.base_dir, platform_filter).context("Error scanning for conflicts")?;
 
     if let Some(filter) = test_path_filter {
         conflicts.retain(|item| item.test_path.contains(filter));
@@ -90,7 +70,7 @@ where
 
     if conflicts.is_empty() {
         info!("No conflicted manifest files found.");
-        return ExitCode::Success;
+        return Ok(ExitCode::Success);
     }
 
     info!("Found {} conflicted manifest file(s).", conflicts.len());
@@ -116,21 +96,20 @@ where
     if !is_terminal {
         error!("Terminal is non-interactive (not a TTY). Cannot prompt for resolution.");
         error!("Run 'gleon resolve' in an interactive terminal environment.");
-        return ExitCode::Failure;
+        return Ok(ExitCode::Failure);
     }
 
     let resolved_count =
-        match resolve_conflicts_with_selector(ctx, conflicts, adapter.as_ref(), selector).await {
-            Ok(count) => count,
-            Err(e) => return report_failure("Error resolving manifest conflicts", &*e),
-        };
+        resolve_conflicts_with_selector(ctx, conflicts, adapter.as_ref(), selector)
+            .await
+            .context("Error resolving manifest conflicts")?;
 
     info!(
         "Successfully resolved {} manifest conflict(s).",
         resolved_count
     );
 
-    ExitCode::Success
+    Ok(ExitCode::Success)
 }
 
 /// Formats selectable prompt choice descriptions for a conflicted manifest item.
@@ -238,6 +217,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::commands::exit_code;
 
     #[tokio::test]
     async fn test_run_resolve_missing_manifest_dir() {
@@ -245,7 +225,7 @@ mod tests {
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), temp.path()).unwrap();
 
         // Missing manifest directory causes scan_conflicts to fail -> Failure
-        let res = run_resolve_with_tty(&ctx, None, None, false, None, false).await;
+        let res = exit_code(run_resolve(&ctx, None, None, false, None, false).await);
         assert_eq!(res, ExitCode::Failure);
     }
 
@@ -266,37 +246,41 @@ mod tests {
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_dir).unwrap();
 
         // 1. Filter out all test paths
-        let res_filtered =
-            run_resolve_with_tty(&ctx, None, Some("nonexistent_filter"), false, None, false).await;
+        let res_filtered = exit_code(
+            run_resolve(&ctx, None, Some("nonexistent_filter"), false, None, false).await,
+        );
         assert_eq!(res_filtered, ExitCode::Success);
 
         // 2. Matching filter in non-interactive mode
         let res_matching =
-            run_resolve_with_tty(&ctx, None, Some("login"), false, None, false).await;
+            exit_code(run_resolve(&ctx, None, Some("login"), false, None, false).await);
         assert_eq!(res_matching, ExitCode::Failure);
 
         // 3. Fetch mode without storage config
         let res_fetch_local =
-            run_resolve_with_tty(&ctx, None, Some("login"), true, None, false).await;
+            exit_code(run_resolve(&ctx, None, Some("login"), true, None, false).await);
         assert_eq!(res_fetch_local, ExitCode::Failure);
 
         // 4. Fetch mode with invalid storage config
         let invalid_storage = StorageConfig::new("invalid_scheme://bucket".to_string());
-        let res_fetch_invalid = run_resolve_with_tty(
-            &ctx,
-            None,
-            Some("login"),
-            true,
-            Some(invalid_storage),
-            false,
-        )
-        .await;
+        let res_fetch_invalid = exit_code(
+            run_resolve(
+                &ctx,
+                None,
+                Some("login"),
+                true,
+                Some(invalid_storage),
+                false,
+            )
+            .await,
+        );
         assert_eq!(res_fetch_invalid, ExitCode::Failure);
 
         // 5. Fetch mode with valid memory storage config (hits Ok(a) => Some(a))
         let valid_storage = StorageConfig::new("memory://");
-        let res_fetch_valid =
-            run_resolve_with_tty(&ctx, None, Some("login"), true, Some(valid_storage), false).await;
+        let res_fetch_valid = exit_code(
+            run_resolve(&ctx, None, Some("login"), true, Some(valid_storage), false).await,
+        );
         assert_eq!(res_fetch_valid, ExitCode::Failure);
     }
 
@@ -489,7 +473,8 @@ mod tests {
 
         let ctx = ResolvedContext::from_options(&ContextOptions::default(), base_dir).unwrap();
 
-        let exit_code = run_resolve_impl(&ctx, None, None, false, None, true, |_| Ok(0)).await;
+        let exit_code =
+            exit_code(run_resolve_impl(&ctx, None, None, false, None, true, |_| Ok(0)).await);
         assert_eq!(exit_code, ExitCode::Success);
     }
 }

@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use gleon_model::{case::Sha256Hex, compare};
 use serde::Serialize;
-use thiserror::Error;
 
 use crate::{
     context::ResolvedContext,
@@ -13,14 +12,6 @@ use crate::{
         load_config_and_scan, load_merged_index_with_fallback, local_blob_state, platform_key,
     },
 };
-
-/// Errors that can occur during status evaluation.
-#[derive(Debug, Error)]
-pub enum StatusError {
-    /// Error shared across `ops::*` operations.
-    #[error(transparent)]
-    Core(#[from] CoreError),
-}
 
 /// Grouped result of evaluating status across the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
@@ -225,7 +216,7 @@ fn classify_test_case(
     case: &crate::scanner::TestCase,
     workspace_index: &crate::manifest::WorkspaceIndex,
     blobs_root: &std::path::Path,
-) -> Result<Class, StatusError> {
+) -> Result<Class, CoreError> {
     let path = &case.image.relative_path;
     let Some(manifest) = workspace_index.get(&case.name) else {
         return Ok(Class::Added(path.clone()));
@@ -285,7 +276,7 @@ fn classify_test_case(
 /// Returns an error if the workspace is not initialized, if the platform key cannot be
 /// resolved, if manifests or workspace configuration fail to load, or if screenshots cannot be
 /// scanned or read.
-pub fn check_status(context: &ResolvedContext) -> Result<StatusReport, StatusError> {
+pub fn check_status(context: &ResolvedContext) -> Result<StatusReport, CoreError> {
     use rayon::prelude::*;
 
     let paths = ensure_initialized(&context.base_dir)?;
@@ -307,7 +298,7 @@ pub fn check_status(context: &ResolvedContext) -> Result<StatusReport, StatusErr
         .map(|case| classify_test_case(case, &workspace_index, &blobs_root))
         .try_fold(StatusReport::default, |mut report, class| {
             report.push(class?);
-            Ok::<_, StatusError>(report)
+            Ok::<_, CoreError>(report)
         })
         .try_reduce(StatusReport::default, |mut report, other| {
             report.append(other);
@@ -348,7 +339,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::ConfigError,
         context::ContextError,
         manifest::{ManifestError, WorkspaceIndex},
         scanner::ScannerError,
@@ -356,31 +346,24 @@ mod tests {
 
     #[test]
     fn test_status_error_display() {
-        let err1: StatusError = CoreError::NotInitialized.into();
+        let err1 = CoreError::NotInitialized;
         assert!(err1.to_string().contains("not initialized"));
 
-        let err2: StatusError = CoreError::Context(ContextError::Platform(
+        let err2 = CoreError::Context(ContextError::Platform(
             crate::platform::PlatformError::InvalidSegment("test".to_string()),
-        ))
-        .into();
+        ));
         assert!(err2.to_string().contains("Context resolution error"));
 
-        let err3: StatusError = CoreError::Scanner(ScannerError::InvalidTestName {
+        let err3 = CoreError::Scanner(ScannerError::InvalidTestName {
             name: "bad/name".to_string(),
             reason: "reason".to_string(),
-        })
-        .into();
+        });
         assert!(err3.to_string().contains("Scanner error"));
 
-        let err4: StatusError =
-            CoreError::Config(ConfigError::Validation("bad config".to_string())).into();
-        assert!(err4.to_string().contains("Config error"));
-
-        let err5: StatusError =
-            CoreError::Manifest(ManifestError::Validation("bad manifest".to_string())).into();
+        let err5 = CoreError::Manifest(ManifestError::Validation("bad manifest".to_string()));
         assert!(err5.to_string().contains("Manifest error"));
 
-        let err6: StatusError = CoreError::Io(std::io::Error::other("io test")).into();
+        let err6 = CoreError::Io(std::io::Error::other("io test"));
         assert!(err6.to_string().contains("IO error"));
     }
 
@@ -652,9 +635,7 @@ mod tests {
         let res = check_status(&ctx);
         assert!(matches!(
             res,
-            Err(StatusError::Core(CoreError::Context(
-                ContextError::Platform(_)
-            )))
+            Err(CoreError::Context(ContextError::Platform(_)))
         ));
     }
 
@@ -983,7 +964,7 @@ screenshots:
         std::fs::create_dir_all(&manifests_dir).unwrap();
         std::fs::create_dir_all(&blobs_dir).unwrap();
         let hash = hex::encode(sha2::Sha256::digest(baseline));
-        let (width, height) = gleon_model::case::png_size(baseline).unwrap();
+        let (width, height) = gleon_model::origin::png_size(baseline).unwrap();
         std::fs::write(blobs_dir.join(&hash), baseline).unwrap();
         WorkspaceIndex::new()
             .save_test(

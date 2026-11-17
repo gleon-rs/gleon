@@ -291,7 +291,7 @@ mod tests {
     use gleon_model::compare::CompareError;
 
     use super::*;
-    use crate::{config::ConfigError, context::ContextError, scanner::ScannerError};
+    use crate::{context::ContextError, scanner::ScannerError};
 
     #[test]
     fn test_stage_error_display() {
@@ -310,10 +310,6 @@ mod tests {
         })
         .into();
         assert!(err3.to_string().contains("Scanner error"));
-
-        let err4: StageError =
-            CoreError::Config(ConfigError::Validation("bad config".to_string())).into();
-        assert!(err4.to_string().contains("Config error"));
 
         let err5: StageError =
             CoreError::Manifest(ManifestError::Validation("bad manifest".to_string())).into();
