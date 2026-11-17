@@ -51,9 +51,7 @@ impl GitResolver {
                 None
             }
             Err(e) => {
-                tracing::debug!(
-                    "No Git branch: no repository (name one with --branch or GLEON_BRANCH): {e}"
-                );
+                tracing::debug!("No Git branch: no repository (see --branch, GLEON_BRANCH): {e}");
                 None
             }
         }
