@@ -96,6 +96,7 @@ words = [
     "globset",
     "goldens",
     "gpgsign",
+    "humantime",
     "idempotently",
     "indicatif",
     "keygen",

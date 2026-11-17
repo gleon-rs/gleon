@@ -103,14 +103,22 @@ pub fn png_size(png: &[u8]) -> Option<(u32, u32)> {
 /// Whether `png` is a complete PNG as far as its chunks tell.
 ///
 /// It has a header of a nonzero size ([`png_size`]) and chunks that lead from it through image
-/// data (`IDAT`) to the end chunk (`IEND`). Neither the CRCs nor the pixels are checked (the
-/// decoder does that), but bytes that are no PNG, a truncated one or one without image data never
-/// pass for an image.
+/// data (`IDAT`) to the first end chunk (`IEND`); what comes after that end is no part of it.
+/// Neither the CRCs nor the pixels are checked (the decoder does that), but bytes that are no PNG,
+/// a truncated one or one without image data never pass for an image.
 #[must_use]
 pub fn is_complete_png(png: &[u8]) -> bool {
     png_size(png).is_some()
-        && header(png).is_some_and(|(_, mut chunks)| {
-            chunks.any(|chunk| chunk.kind == *b"IDAT") && chunks.any(|chunk| chunk.kind == *b"IEND")
+        && header(png).is_some_and(|(_, chunks)| {
+            let mut data = false;
+            for chunk in chunks {
+                match &chunk.kind {
+                    b"IDAT" => data = true,
+                    b"IEND" => return data,
+                    _ => {}
+                }
+            }
+            false
         })
 }
 
@@ -340,6 +348,17 @@ mod tests {
         assert!(
             !is_complete_png(&data_after_end),
             "image data after the end"
+        );
+        let data_after_first_end = [
+            png_header(3, 2),
+            chunk(b"IEND"),
+            chunk(b"IDAT"),
+            chunk(b"IEND"),
+        ]
+        .concat();
+        assert!(
+            !is_complete_png(&data_after_first_end),
+            "image data after the first end"
         );
     }
 
