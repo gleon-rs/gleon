@@ -1,4 +1,5 @@
 words = [
+    "anc",
     "amd64",
     "getrandom",
     "armv",
